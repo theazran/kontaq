@@ -1,0 +1,2031 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#17171a" media="(prefers-color-scheme: dark)">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Kontaq">
+  <title>Kontaq</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script>
+    (function () {
+      var t = null; try { t = localStorage.getItem('kq-theme'); } catch (e) {}
+      if (t === 'dark' || (!t && window.matchMedia('(prefers-color-scheme: dark)').matches)) document.documentElement.classList.add('dark');
+    })();
+  </script>
+  <script src="https://cdn.tailwindcss.com/3.4.16"></script>
+  <script>tailwind.config = { darkMode: 'class', corePlugins: { preflight: true }, theme: { extend: { fontFamily: { sans: ['Inter', 'ui-sans-serif', 'system-ui'] } } } };</script>
+  <link rel="stylesheet" href="/public/style.css?v=<%= assetVersion %>">
+</head>
+<body class="h-full text-[13px]">
+
+<% if (!user) { %>
+  <!-- ───────────── Masuk / Setup ───────────── -->
+  <main class="min-h-screen flex items-center justify-center px-4">
+    <div class="w-full max-w-sm">
+      <div class="flex items-center gap-2 mb-8">
+        <span class="inline-flex w-7 h-7 rounded-md items-center justify-center" style="background:var(--accent)">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#0b1f12" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.4 8.4 0 0 1-12.4 7.4L3 21l2.1-5.5A8.5 8.5 0 1 1 21 11.5z"/></svg>
+        </span>
+        <span class="text-[15px] font-semibold tracking-tight">Kontaq</span>
+      </div>
+      <h1 class="text-xl font-semibold tracking-tight"><%= needsSetup ? 'Siapkan akun admin' : 'Masuk' %></h1>
+      <p class="ink-3 mt-1 mb-6"><%= needsSetup ? 'Akun pertama otomatis menjadi admin.' : 'Dashboard WhatsApp Cloud API.' %></p>
+      <form id="auth-form" class="space-y-3" data-mode="<%= needsSetup ? 'setup' : 'login' %>">
+        <% if (needsSetup) { %>
+          <div><label class="label" for="f-name">Nama</label><input class="input" id="f-name" name="name" required autocomplete="name"></div>
+        <% } %>
+        <div><label class="label" for="f-email">Email</label><input class="input" id="f-email" name="email" type="email" required autocomplete="email"></div>
+        <div><label class="label" for="f-pass">Kata sandi</label><input class="input" id="f-pass" name="password" type="password" required minlength="<%= needsSetup ? 10 : 1 %>" autocomplete="<%= needsSetup ? 'new-password' : 'current-password' %>">
+          <% if (needsSetup) { %><p class="hint">Minimal 10 karakter.</p><% } %></div>
+        <p id="auth-err" class="text-xs danger-ink hidden"></p>
+        <button class="btn btn-primary w-full h-9" type="submit"><%= needsSetup ? 'Buat akun' : 'Masuk' %></button>
+      </form>
+    </div>
+  </main>
+  <script>
+    document.getElementById('auth-form').addEventListener('submit', async function (e) {
+      e.preventDefault();
+      var f = e.target, err = document.getElementById('auth-err');
+      var body = Object.fromEntries(new FormData(f));
+      err.classList.add('hidden');
+      var r = await fetch('/api/' + f.dataset.mode, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'kontaq' }, body: JSON.stringify(body) });
+      var j = await r.json().catch(function () { return {}; });
+      if (!r.ok) { err.textContent = j.error || 'Gagal.'; err.classList.remove('hidden'); return; }
+      location.reload();
+    });
+  </script>
+<% } else { %>
+  <!-- ───────────── Aplikasi ───────────── -->
+  <div class="flex app-shell overflow-hidden">
+    <aside id="sidebar" class="surface border-r bd w-56 flex-none flex-col hidden md:flex fixed md:static inset-y-0 left-0 z-40">
+      <div class="h-14 flex items-center gap-2 px-4 border-b bd">
+        <span class="inline-flex w-6 h-6 rounded-md items-center justify-center" style="background:var(--accent)">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#0b1f12" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.4 8.4 0 0 1-12.4 7.4L3 21l2.1-5.5A8.5 8.5 0 1 1 21 11.5z"/></svg>
+        </span>
+        <span class="font-semibold tracking-tight text-[14px]">Kontaq</span>
+      </div>
+      <nav id="nav" class="flex-1 p-2 space-y-0.5 overflow-y-auto"></nav>
+      <div class="p-3 border-t bd">
+        <div class="flex items-center gap-1.5">
+          <span class="avatar" id="me-avatar"></span>
+          <div class="min-w-0 flex-1">
+            <div class="font-medium truncate" id="me-name"></div>
+            <div class="text-[11px] ink-3 capitalize" id="me-role"></div>
+          </div>
+          <button class="btn btn-ghost btn-icon btn-sm" data-act="sound" id="sound-btn" title="Suara notifikasi" aria-label="Suara notifikasi"></button>
+          <button class="btn btn-ghost btn-icon btn-sm" data-act="theme" title="Ganti tema" aria-label="Ganti tema"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg></button>
+          <button class="btn btn-ghost btn-icon btn-sm" data-act="logout" title="Keluar" aria-label="Keluar"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg></button>
+        </div>
+      </div>
+    </aside>
+    <div id="sidebar-back" class="fixed inset-0 z-30 bg-black/40 hidden md:hidden" data-act="nav-close"></div>
+
+    <div class="flex-1 min-w-0 flex flex-col">
+      <header id="app-header" class="h-14 flex-none surface border-b bd flex items-center gap-3 px-4">
+        <button class="btn btn-ghost btn-icon md:hidden" data-act="nav-open" aria-label="Menu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+        <h1 id="page-title" class="text-[15px] font-semibold tracking-tight"></h1>
+        <div class="flex-1"></div>
+        <span id="live" class="badge" title="Status koneksi real-time"><span class="dot"></span><span>Menghubungkan</span></span>
+      </header>
+      <main id="view" class="flex-1 min-h-0 overflow-y-auto scroll-thin"></main>
+      <nav id="tabbar" class="tabbar md:hidden flex-none" aria-label="Navigasi utama"></nav>
+    </div>
+  </div>
+
+  <div id="call-bar" class="call-sheet hidden" role="dialog" aria-label="Panggilan WhatsApp"></div>
+  <audio id="call-audio" autoplay></audio>
+  <div id="modal-root"></div>
+  <div id="toast-root" class="fixed top-4 right-4 z-[70] space-y-2"></div>
+  <div id="chart-tip" class="chart-tip hidden"></div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+  'use strict';
+  const BOOT = <%- JSON.stringify(boot).replace(/</g, '\\u003c') %>;
+
+  /* ───────────── Utilitas ───────────── */
+  const $ = (s, r = document) => r.querySelector(s);
+  const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+  const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const initials = (s) => esc(String(s || '?').trim().split(/\s+/).slice(0, 2).map((w) => w[0]).join('').toUpperCase() || '?');
+  const fmtTime = (t) => (t ? new Date(t).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) : '');
+  const fmtDate = (t) => (t ? new Date(t).toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' }) : '—');
+  const fmtDT = (t) => (t ? new Date(t).toLocaleString('id-ID', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—');
+  const fmtNum = (n) => Number(n || 0).toLocaleString('id-ID');
+  const relTime = (t) => {
+    if (!t) return '';
+    const d = Date.now() - t;
+    if (d < 60e3) return 'baru';
+    if (d < 3600e3) return Math.floor(d / 60e3) + 'm';
+    if (new Date(t).toDateString() === new Date().toDateString()) return fmtTime(t);
+    if (d < 7 * 864e5) return new Date(t).toLocaleDateString('id-ID', { weekday: 'short' });
+    return new Date(t).toLocaleDateString('id-ID', { day: '2-digit', month: '2-digit' });
+  };
+  // Format teks WhatsApp sederhana: *tebal*, _miring_, ~coret~, tautan
+  const waFormat = (s) => esc(s)
+    .replace(/\*([^*\n]+)\*/g, '<b>$1</b>').replace(/(^|\s)_([^_\n]+)_/g, '$1<i>$2</i>').replace(/~([^~\n]+)~/g, '<s>$1</s>')
+    .replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noopener noreferrer" class="underline" style="color:var(--info)">$1</a>')
+    .replace(/\n/g, '<br>');
+
+  async function api(method, url, body) {
+    const opt = { method, headers: { 'X-Requested-With': 'kontaq' } };
+    if (body instanceof FormData) opt.body = body;
+    else if (body !== undefined) { opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body); }
+    const r = await fetch(url, opt);
+    const j = await r.json().catch(() => ({}));
+    if (r.status === 401) { location.reload(); throw new Error(j.error); }
+    if (!r.ok) throw new Error(j.error || 'Permintaan gagal (' + r.status + ')');
+    return j;
+  }
+  function toast(msg, err) {
+    const el = document.createElement('div');
+    el.className = 'toast' + (err ? ' err' : ''); el.textContent = msg; el.setAttribute('role', err ? 'alert' : 'status');
+    const root = $('#toast-root'); root.appendChild(el);
+    while (root.children.length > 2) root.firstElementChild.remove();
+    setTimeout(() => el.remove(), err ? 6000 : 3000);
+  }
+  const fail = (e) => toast(e.message || String(e), true);
+  async function busy(btn, fn) {
+    if (btn) { btn.disabled = true; btn.dataset.label = btn.innerHTML; btn.innerHTML = '<svg class="spin" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.2-8.6"/></svg>'; }
+    try { return await fn(); } catch (e) { fail(e); } finally { if (btn) { btn.disabled = false; btn.innerHTML = btn.dataset.label; } }
+  }
+
+  function modal(title, body, { wide, footer } = {}) {
+    closeModal();
+    const root = $('#modal-root');
+    root.innerHTML = `<div class="modal-back" data-modal-back><div class="modal ${wide ? 'wide' : ''}" role="dialog" aria-modal="true" aria-label="${esc(title)}">
+      <div class="card-h"><div class="card-t">${esc(title)}</div><button class="btn btn-ghost btn-icon" data-act="modal-close" aria-label="Tutup">${ICON.x}</button></div>
+      <div class="p-4 max-h-[70vh] overflow-y-auto scroll-thin" id="modal-body">${body}</div>
+      ${footer ? `<div class="flex justify-end gap-2 px-4 py-3 border-t bd">${footer}</div>` : ''}</div></div>`;
+    root.querySelector('[data-modal-back]').addEventListener('mousedown', (e) => { if (e.target.dataset.modalBack !== undefined) closeModal(); });
+    const first = root.querySelector('input,select,textarea'); if (first) setTimeout(() => first.focus(), 30);
+    return root;
+  }
+  function closeModal() { $('#modal-root').innerHTML = ''; }
+  function confirmBox(text, okLabel = 'Lanjutkan', danger) {
+    return new Promise((resolve) => {
+      modal('Konfirmasi', `<p class="ink-2">${esc(text)}</p>`, { footer: `<button class="btn" data-c="0">Batal</button><button class="btn ${danger ? 'btn-danger' : 'btn-primary'}" data-c="1">${esc(okLabel)}</button>` });
+      $$('#modal-root [data-c]').forEach((b) => b.addEventListener('click', () => { closeModal(); resolve(b.dataset.c === '1'); }));
+      $('#modal-root [data-act=modal-close]').addEventListener('click', () => resolve(false));
+    });
+  }
+  const formData = (form) => Object.fromEntries(new FormData(form));
+
+  const ICON = {
+    x: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>',
+    dash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="M7 15l4-4 3 3 5-6"/></svg>',
+    inbox: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 11.5a8.4 8.4 0 0 1-12.4 7.4L3 21l2.1-5.5A8.5 8.5 0 1 1 21 11.5z"/></svg>',
+    users: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8"/></svg>',
+    tpl: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 8h10M7 12h10M7 16h6"/></svg>',
+    send: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m22 2-7 20-4-9-9-4z"/><path d="M22 2 11 13"/></svg>',
+    phone: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.4 1.8.7 2.7a2 2 0 0 1-.5 2.1L8 9.8a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.7.7a2 2 0 0 1 1.7 2z"/></svg>',
+    gear: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>',
+    clip: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m21.4 11-9.2 9.2a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.5-8.5"/></svg>',
+    pin: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 10c0 6-8 12-8 12S4 16 4 10a8 8 0 0 1 16 0z"/><circle cx="12" cy="10" r="3"/></svg>',
+    btns: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/></svg>',
+    list: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>',
+    info: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>',
+    back: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m15 18-6-6 6-6"/></svg>',
+    refresh: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 0 1-15.5 6.2L3 16M3 12a9 9 0 0 1 15.5-6.2L21 8M21 3v5h-5M3 21v-5h5"/></svg>',
+    plus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>',
+    reply: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 17 4 12l5-5"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg>',
+    menu: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></svg>',
+    camera: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>',
+    image: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg>',
+    doc: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>',
+    mic: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3"/></svg>',
+    micOff: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m2 2 20 20M9 9v3a3 3 0 0 0 5.1 2.1M15 9.3V5a3 3 0 0 0-5.9-.6M17 16.9A7 7 0 0 1 5 12v-2m14 0v2c0 .8-.1 1.5-.4 2.2M12 19v3"/></svg>',
+    bell: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9M13.7 21a2 2 0 0 1-3.4 0"/></svg>',
+    bellOff: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13.7 21a2 2 0 0 1-3.4 0M18.6 13A17.9 17.9 0 0 1 18 8M6.3 6.3A6 6 0 0 0 6 8c0 7-3 9-3 9h14M18 8a6 6 0 0 0-9.3-5M2 2l20 20"/></svg>',
+    up: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m18 15-6-6-6 6"/></svg>',
+    down: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg>',
+    edit: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>',
+    trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>',
+    bolt: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2 3 14h9l-1 8 10-12h-9z"/></svg>',
+    campaign: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m3 11 18-8-8 18-2-8z"/></svg>',
+  };
+  const tick = (s) => ({
+    pending: '<span title="Menunggu">🕓</span>', sent: '<span title="Terkirim">✓</span>', delivered: '<span title="Diterima">✓✓</span>',
+    read: '<span class="tick-read" title="Dibaca">✓✓</span>', played: '<span class="tick-read" title="Diputar">✓✓</span>', failed: '<span class="danger-ink" title="Gagal">⚠</span>',
+  }[s] || '');
+  const statusBadge = (s) => {
+    const map = { APPROVED: 'green', ACTIVE: 'green', done: 'green', running: 'green', delivered: 'green', read: 'green', open: 'green', ENABLED: 'green',
+      PENDING: 'amber', IN_APPEAL: 'amber', paused: 'amber', pending: 'amber', queued: 'amber', PAUSED: 'amber', ringing: 'amber',
+      REJECTED: 'red', DISABLED: 'red', failed: 'red', cancelled: 'red', rejected: 'red', FLAGGED: 'red' };
+    const label = { open: 'Terbuka', pending: 'Menunggu', closed: 'Selesai', draft: 'Draf', running: 'Berjalan', paused: 'Dijeda', done: 'Selesai', cancelled: 'Dibatalkan', queued: 'Antre', sent: 'Terkirim', delivered: 'Diterima', read: 'Dibaca', failed: 'Gagal', skipped: 'Dilewati' }[s] || s;
+    return `<span class="badge ${map[s] ? 'badge-' + map[s] : ''}"><span class="dot"></span>${esc(label)}</span>`;
+  };
+
+  /* ───────────── State & navigasi ───────────── */
+  const S = {
+    user: BOOT.user, isAdmin: BOOT.user.role === 'admin', users: [], view: 'dashboard',
+    inbox: { convs: [], activeId: null, messages: [], filter: { q: '', scope: 'all', status: 'open' }, showInfo: window.innerWidth >= 1280, replyTo: null },
+    templates: { rows: [], syncedAt: 0, loaded: false },
+    contacts: { q: '', label: '', page: 1 },
+    settingsTab: null,
+    call: null, pc: null,
+  };
+  const VIEWS = [
+    { id: 'dashboard', label: 'Dashboard', icon: 'dash' },
+    { id: 'inbox', label: 'Inbox', icon: 'inbox' },
+    { id: 'contacts', label: 'Kontak', icon: 'users' },
+    { id: 'templates', label: 'Template', icon: 'tpl' },
+    { id: 'campaigns', label: 'Campaign', icon: 'campaign', admin: true },
+    { id: 'autoreply', label: 'Auto reply', icon: 'bolt', admin: true },
+    { id: 'calls', label: 'Panggilan', icon: 'phone' },
+    { id: 'settings', label: 'Pengaturan', icon: 'gear' },
+  ];
+  const isTouch = window.matchMedia('(pointer: coarse)').matches;
+  const isMobile = () => window.innerWidth < 768;
+  function renderNav() {
+    const unread = S.inbox.convs.reduce((n, c) => n + (c.unread || 0), 0);
+    const tabs = [['inbox', 'Chat'], ['calls', 'Panggilan'], ['contacts', 'Kontak'], ['dashboard', 'Ringkasan']];
+    const inMenu = !tabs.some(([id]) => id === S.view);
+    $('#tabbar').innerHTML = tabs.map(([id, label]) => `<a href="#/${id}" class="tab-item ${S.view === id ? 'active' : ''}">${ICON[VIEWS.find((x) => x.id === id).icon]}<span>${label}</span>${id === 'inbox' && unread ? `<span class="tab-badge">${unread > 99 ? '99+' : unread}</span>` : ''}</a>`).join('')
+      + `<button class="tab-item ${inMenu ? 'active' : ''}" data-act="nav-open">${ICON.menu}<span>Lainnya</span></button>`;
+    document.body.classList.toggle('chat-open', S.view === 'inbox' && !!S.inbox.activeId);
+    $('#nav').innerHTML = VIEWS.filter((v) => !v.admin || S.isAdmin).map((v) => `<a href="#/${v.id}" class="nav-item ${S.view === v.id ? 'active' : ''}">${ICON[v.icon]}<span class="flex-1">${v.label}</span>${v.id === 'inbox' && unread ? `<span class="badge badge-green">${unread}</span>` : ''}</a>`).join('');
+  }
+  function route() {
+    const [view, arg] = location.hash.replace(/^#\/?/, '').split('/');
+    closeModal();
+    S.view = VIEWS.some((v) => v.id === view && (!v.admin || S.isAdmin)) ? view : 'dashboard';
+    $('#page-title').textContent = VIEWS.find((v) => v.id === S.view).label;
+    $('#sidebar').classList.add('hidden'); $('#sidebar').classList.remove('flex'); $('#sidebar-back').classList.add('hidden');
+    $('#sidebar').classList.toggle('md:flex', true);
+    renderNav();
+    const v = $('#view'); v.className = 'flex-1 min-h-0 overflow-y-auto scroll-thin';
+    ({ dashboard: viewDashboard, inbox: () => viewInbox(arg), contacts: viewContacts, templates: viewTemplates, campaigns: viewCampaigns, autoreply: viewAutoReply, calls: viewCalls, settings: () => viewSettings(arg) })[S.view]();
+  }
+  window.addEventListener('hashchange', route);
+
+  // Delegasi klik global (data-act)
+  const ACT = {
+    'modal-close': closeModal,
+    'nav-open': () => { $('#sidebar').classList.remove('hidden'); $('#sidebar').classList.add('flex'); $('#sidebar-back').classList.remove('hidden'); },
+    'nav-close': () => { $('#sidebar').classList.add('hidden'); $('#sidebar').classList.remove('flex'); $('#sidebar-back').classList.add('hidden'); },
+    theme: () => {
+      const dark = document.documentElement.classList.toggle('dark');
+      try { localStorage.setItem('kq-theme', dark ? 'dark' : 'light'); } catch (e) {}
+    },
+    callback: (el) => startCallback({ id: el.dataset.contact, name: el.dataset.name, phone: el.dataset.phone }),
+    logout: async () => { await api('POST', '/api/logout'); location.reload(); },
+    sound: () => { setPref('sound', !pref('sound')); renderSoundBtn(); if (pref('sound')) playChime(true); toast(pref('sound') ? 'Suara notifikasi aktif.' : 'Suara notifikasi dimatikan.'); },
+  };
+  document.addEventListener('click', (e) => {
+    const el = e.target.closest('[data-act]');
+    if (el && ACT[el.dataset.act]) { e.preventDefault(); ACT[el.dataset.act](el, e); }
+  });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && $('#modal-root').innerHTML) closeModal(); });
+
+  /* ───────────── Dashboard ───────────── */
+  async function viewDashboard() {
+    const v = $('#view');
+    v.innerHTML = '<div class="empty">Memuat…</div>';
+    let st;
+    try { st = await api('GET', '/api/stats?days=14'); } catch (e) { v.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+    if (S.view !== 'dashboard') return;
+    const o = st.outbound, outTotal = o.sent + o.delivered + o.read + o.failed + (o.pending || 0);
+    const pct = (n) => (outTotal ? Math.round((n / outTotal) * 100) : 0);
+    const max = Math.max(1, ...st.series.map((d) => Math.max(d.in, d.out)));
+    const tile = (label, value, sub) => `<div class="card p-4"><div class="text-xs ink-3">${label}</div><div class="text-2xl font-semibold tracking-tight mt-1">${fmtNum(value)}</div>${sub ? `<div class="text-[11px] ink-3 mt-0.5">${sub}</div>` : ''}</div>`;
+    v.innerHTML = `<div class="p-4 md:p-6 space-y-4 max-w-7xl">
+      ${!st.connected ? `<div class="card p-3 flex items-center gap-3" style="background:var(--warn-soft);border-color:transparent"><span style="color:var(--warn)">${ICON.info}</span><div class="flex-1 text-[13px]">Koneksi Meta belum dikonfigurasi. Pesan belum dapat dikirim.</div>${S.isAdmin ? '<a class="btn btn-sm" href="#/settings/meta">Atur koneksi</a>' : ''}</div>` : ''}
+      <div class="grid grid-cols-2 lg:grid-cols-5 gap-3">
+        ${tile('Percakapan terbuka', st.conversations.open, `${fmtNum(st.conversations.pending)} menunggu`)}
+        ${tile('Belum ditugaskan', st.conversations.unassigned, 'perlu ditangani')}
+        ${tile('Jendela 24 jam aktif', st.conversations.windowOpen, 'bisa dibalas bebas')}
+        ${tile('Kontak', st.contacts)}
+        ${tile('Template disetujui', st.templates.approved, `dari ${fmtNum(st.templates.total)} template`)}
+      </div>
+      ${S.isAdmin ? '<section id="cost-card" class="card"><div class="p-4 text-xs ink-3">Memuat biaya Meta…</div></section>' : ''}
+      <div class="grid lg:grid-cols-3 gap-4">
+        <section class="card lg:col-span-2">
+          <div class="card-h"><div><div class="card-t">Volume pesan</div><div class="text-[11px] ink-3">${st.days} hari terakhir</div></div>
+            <div class="flex items-center gap-3 text-[11px] ink-2"><span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-sm bar-in"></span>Masuk</span><span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-sm bar-out"></span>Keluar</span>
+            <button class="btn btn-ghost btn-sm" id="chart-table-toggle">Tabel</button></div></div>
+          <div class="p-4">
+            <div id="chart-wrap">
+              <div class="bar-chart" id="chart" role="img" aria-label="Grafik pesan masuk dan keluar per hari">
+                ${st.series.map((d) => `<div class="bar-col" data-tip="${esc(fmtDate(new Date(d.date)))}|${d.in}|${d.out}"><div class="bar bar-in" style="height:${(d.in / max) * 100}%"></div><div class="bar bar-out" style="height:${(d.out / max) * 100}%"></div></div>`).join('')}
+              </div>
+              <div class="flex justify-between text-[10px] ink-3 mt-2 border-t bd pt-1.5"><span>${esc(fmtDate(new Date(st.series[0].date)))}</span><span>maks ${fmtNum(max)}/hari</span><span>Hari ini</span></div>
+            </div>
+            <div id="chart-table" class="hidden max-h-64 overflow-y-auto scroll-thin"><table class="tbl"><thead><tr><th>Tanggal</th><th class="text-right">Masuk</th><th class="text-right">Keluar</th></tr></thead><tbody>${st.series.map((d) => `<tr><td>${esc(fmtDate(new Date(d.date)))}</td><td class="text-right">${d.in}</td><td class="text-right">${d.out}</td></tr>`).join('')}</tbody></table></div>
+          </div>
+        </section>
+        <section class="card">
+          <div class="card-h"><div class="card-t">Status pengiriman</div><span class="text-[11px] ink-3">${fmtNum(outTotal)} pesan keluar</span></div>
+          <div class="p-4 space-y-3">
+            ${[['Terkirim', o.sent], ['Diterima', o.delivered], ['Dibaca', o.read], ['Gagal', o.failed]].map(([l, n]) => `<div><div class="flex justify-between text-xs mb-1"><span class="ink-2">${l}</span><span class="font-medium">${fmtNum(n)} <span class="ink-3 font-normal">· ${pct(n)}%</span></span></div><div class="h-1.5 rounded-full surface-2 overflow-hidden"><div class="h-full rounded-full" style="width:${pct(n)}%;background:${l === 'Gagal' ? 'var(--danger)' : l === 'Dibaca' ? 'var(--accent)' : 'var(--ink-3)'}"></div></div></div>`).join('')}
+            <p class="hint">Status diperbarui dari webhook Meta. "Terkirim" berarti belum ada konfirmasi diterima.</p>
+          </div>
+        </section>
+      </div>
+      <div class="grid lg:grid-cols-2 gap-4">
+        <section class="card overflow-hidden">
+          <div class="card-h"><div class="card-t">Kinerja tim CS</div><span class="text-[11px] ink-3">${st.days} hari</span></div>
+          <table class="tbl"><thead><tr><th>Agen</th><th class="text-right">Aktif</th><th class="text-right">Selesai</th><th class="text-right">Pesan dikirim</th></tr></thead>
+          <tbody>${st.agents.map((a) => `<tr><td><div class="flex items-center gap-2"><span class="avatar" style="width:1.5rem;height:1.5rem;font-size:10px">${initials(a.name)}</span>${esc(a.name)}</div></td><td class="text-right">${a.open}</td><td class="text-right">${a.closed}</td><td class="text-right">${a.sent}</td></tr>`).join('') || '<tr><td colspan="4" class="ink-3">Belum ada data.</td></tr>'}</tbody></table>
+        </section>
+        <section class="card overflow-hidden">
+          <div class="card-h"><div class="card-t">Campaign terbaru</div>${S.isAdmin ? '<a href="#/campaigns" class="text-xs accent-ink">Lihat semua</a>' : ''}</div>
+          <table class="tbl"><thead><tr><th>Nama</th><th>Status</th><th class="text-right">Dibaca</th><th class="text-right">Gagal</th></tr></thead>
+          <tbody>${st.campaigns.map((c) => `<tr><td>${esc(c.name)}<div class="text-[11px] ink-3">${fmtNum(c.total)} penerima</div></td><td>${statusBadge(c.status)}</td><td class="text-right">${c.counts.read}</td><td class="text-right">${c.counts.failed}</td></tr>`).join('') || '<tr><td colspan="4" class="ink-3">Belum ada campaign.</td></tr>'}</tbody></table>
+        </section>
+      </div>
+    </div>`;
+    const tip = $('#chart-tip');
+    $$('#chart .bar-col').forEach((col) => {
+      col.addEventListener('mousemove', (e) => {
+        const [d, i, o] = col.dataset.tip.split('|');
+        tip.innerHTML = `<b>${esc(d)}</b><br>Masuk: ${i}<br>Keluar: ${o}`;
+        tip.classList.remove('hidden'); tip.style.left = e.clientX + 12 + 'px'; tip.style.top = e.clientY - 40 + 'px';
+      });
+      col.addEventListener('mouseleave', () => tip.classList.add('hidden'));
+    });
+    if (S.isAdmin) loadCostCard();
+    $('#chart-table-toggle').addEventListener('click', (e) => {
+      const showTable = $('#chart-table').classList.toggle('hidden') === false;
+      $('#chart-wrap').classList.toggle('hidden', showTable);
+      e.target.textContent = showTable ? 'Grafik' : 'Tabel';
+    });
+  }
+
+  /* ───────────── Meta Cost Monitor ───────────── */
+  const COST_LABEL = { marketing: 'Marketing', utility: 'Utility', authentication: 'Authentication', authentication_international: 'Authentication (internasional)', service: 'Service', marketing_lite: 'Marketing Lite', referral_conversion: 'Referral (iklan klik-ke-WA)' };
+  const RATE_CATS = ['marketing', 'utility', 'authentication', 'authentication_international', 'marketing_lite'];
+  function fmtMoney(n, cur) {
+    if (!cur) return fmtNum(Math.round(n * 100) / 100);
+    try { return new Intl.NumberFormat('id-ID', { style: 'currency', currency: cur, maximumFractionDigits: cur === 'IDR' ? 0 : 2 }).format(n); } catch (e) { return cur + ' ' + fmtNum(n); }
+  }
+  async function loadCostCard(month) {
+    const el = $('#cost-card'); if (!el) return;
+    S.costMonth = month || S.costMonth || new Date().toISOString().slice(0, 7);
+    let c;
+    try { c = await api('GET', '/api/costs?month=' + S.costMonth); } catch (e) { el.innerHTML = `<div class="p-4 text-xs danger-ink">${esc(e.message)}</div>`; return; }
+    if (!$('#cost-card')) return;
+    S.cost = c;
+    const cur = c.currency, money = (n) => fmtMoney(n, cur);
+    const budget = c.settings.budget, used = budget ? c.spent / budget : 0, pctUsed = Math.round(used * 100);
+    const alertAt = (c.settings.alertPct || 80) / 100;
+    const state = !budget ? null : used >= 1 ? { cls: 'badge-red', label: 'Melebihi anggaran', color: 'var(--danger)' } : used >= alertAt ? { cls: 'badge-amber', label: 'Mendekati batas', color: 'var(--warn)' } : { cls: 'badge-green', label: 'Aman', color: 'var(--accent)' };
+    const projOver = budget && c.projected > budget;
+    const badge = state && state.label === 'Aman' && projOver && c.isCurrent ? { cls: 'badge-amber', label: 'Proyeksi melebihi anggaran' } : state;
+    const months = Array.from({ length: 6 }, (_, i) => { const d = new Date(); d.setUTCDate(1); d.setUTCMonth(d.getUTCMonth() - i); return d.toISOString().slice(0, 7); });
+    const monthName = (m) => new Date(m + '-01T00:00:00Z').toLocaleDateString('id-ID', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+    const hasMeta = c.meta?.hasData;
+    // Grafik harian: biaya resmi Meta bila ada, selain itu jumlah pesan berbayar dari webhook
+    const series = hasMeta ? c.meta.daily.map((d) => ({ date: d.date, v: d.cost })) : c.webhook.daily.map((d) => ({ date: d.date, v: d.count }));
+    const max = Math.max(...series.map((d) => d.v), 0) || 1;
+    const fmtV = (n) => (hasMeta ? money(n) : fmtNum(n) + ' pesan');
+    const cats = [...new Set([...Object.keys(c.webhook.byCategory), ...Object.keys(c.meta?.byCategory || {})])].sort((a, b) => (COST_LABEL[a] ? 0 : 1) - (COST_LABEL[b] ? 0 : 1) || a.localeCompare(b));
+    const tileC = (label, value, sub, extra = '') => `<div class="surface-2 rounded-md p-3 min-w-0"><div class="text-[11px] ink-3">${label}</div><div class="text-lg font-semibold tracking-tight mt-0.5 truncate">${value}</div><div class="text-[11px] ink-3 mt-0.5 leading-snug">${sub}</div>${extra}</div>`;
+    $('#cost-card').innerHTML = `
+      <div class="card-h flex-wrap">
+        <div class="min-w-0"><div class="card-t flex items-center gap-2">Meta Cost Monitor ${badge ? `<span class="badge ${badge.cls}"><span class="dot"></span>${badge.label}</span>` : ''}</div>
+          <div class="text-[11px] ink-3">Biaya pesan WhatsApp Cloud API · ${cur ? esc(cur) : 'mata uang belum diketahui'}</div></div>
+        <div class="flex items-center gap-2 flex-wrap">
+          <select class="select h-8 text-xs w-40" id="cost-month" aria-label="Pilih bulan">${months.map((m) => `<option value="${m}" ${m === c.month ? 'selected' : ''}>${esc(monthName(m))}</option>`).join('')}</select>
+          <button class="btn btn-sm" id="cost-sync" title="Ambil biaya resmi dari Meta">${ICON.refresh} Sinkronkan</button>
+          <button class="btn btn-sm" id="cost-settings">${ICON.gear} Anggaran & tarif</button>
+        </div>
+      </div>
+      <div class="p-4 space-y-4">
+        ${c.meta?.error ? `<div class="rounded-md px-3 py-2 text-xs" style="background:var(--danger-soft);color:var(--danger)">Sinkronisasi gagal (${esc(fmtDT(c.meta.syncedAt))}): ${esc(c.meta.error)}</div>` : ''}
+        <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          ${tileC('Biaya resmi Meta', hasMeta ? money(c.meta.total) : '—', hasMeta ? `${fmtNum(c.meta.volume)} pesan · sinkron ${esc(fmtDT(c.meta.syncedAt))}` : c.meta ? 'Belum ada data dari Meta' : 'Klik Sinkronkan')}
+          ${tileC('Estimasi realtime', Object.keys(c.settings.rates || {}).length ? money(c.webhook.estimate) : '—', Object.keys(c.settings.rates || {}).length ? `${fmtNum(c.webhook.billable)} pesan berbayar × tarif` : `${fmtNum(c.webhook.billable)} pesan berbayar · isi tarif`)}
+          ${tileC('Anggaran bulan ini', budget ? `${pctUsed}%` : '—', budget ? `${money(c.spent)} dari ${money(budget)}` : 'Belum diatur',
+            budget ? `<div class="h-1.5 rounded-full mt-2 overflow-hidden" style="background:var(--border)" role="progressbar" aria-valuenow="${pctUsed}" aria-valuemin="0" aria-valuemax="100" aria-label="Pemakaian anggaran"><div class="h-full rounded-full" style="width:${Math.min(100, pctUsed)}%;background:${state.color}"></div></div>` : '')}
+          ${tileC(c.isCurrent ? 'Proyeksi akhir bulan' : 'Total bulan ini', c.spent || c.projected ? money(c.projected) : '—', c.isCurrent ? `hari ke-${c.daysElapsed} dari ${c.daysInMonth}${projOver ? ' · <span class="danger-ink">melebihi anggaran</span>' : ''}` : (c.spentSource === 'meta' ? 'dari data Meta' : 'dari estimasi'))}
+        </div>
+        <div>
+          <div class="flex items-center justify-between mb-2"><div class="text-xs font-medium">${hasMeta ? 'Biaya per hari (Meta)' : 'Pesan berbayar per hari (webhook)'}</div><button class="btn btn-ghost btn-sm" id="cost-table-toggle">Tabel</button></div>
+          <div id="cost-chart-wrap"><div class="bar-chart" style="height:120px" id="cost-chart" role="img" aria-label="${hasMeta ? 'Biaya per hari' : 'Pesan berbayar per hari'}">
+            ${series.map((d) => `<div class="bar-col" data-tip="${esc(fmtDate(new Date(d.date)))}|${esc(fmtV(d.v))}"><div class="bar" style="max-width:14px;height:${(d.v / max) * 100}%;background:var(--accent)"></div></div>`).join('')}
+          </div><div class="flex justify-between text-[10px] ink-3 mt-2 border-t bd pt-1.5"><span>1 ${esc(monthName(c.month))}</span><span>maks ${esc(fmtV(Math.max(...series.map((d) => d.v), 0)))}/hari</span><span>${c.daysInMonth}</span></div></div>
+          <div id="cost-chart-table" class="hidden max-h-56 overflow-y-auto scroll-thin"><table class="tbl"><thead><tr><th>Tanggal</th><th class="text-right">${hasMeta ? 'Biaya' : 'Pesan berbayar'}</th></tr></thead><tbody>${series.map((d) => `<tr><td>${esc(fmtDate(new Date(d.date)))}</td><td class="text-right">${esc(fmtV(d.v))}</td></tr>`).join('')}</tbody></table></div>
+        </div>
+        <div class="overflow-x-auto border bd rounded-md"><table class="tbl"><thead><tr><th>Kategori</th><th class="text-right">Berbayar</th><th class="text-right">Gratis</th><th class="text-right">Tarif</th><th class="text-right">Estimasi</th><th class="text-right">Biaya Meta</th></tr></thead><tbody>
+          ${cats.map((k) => { const w = c.webhook.byCategory[k] || { billable: 0, free: 0 }, mc = c.meta?.byCategory?.[k], rate = Number(c.settings.rates?.[k]) || 0;
+            return `<tr><td>${esc(COST_LABEL[k] || k)}</td><td class="text-right">${fmtNum(w.billable)}</td><td class="text-right ink-3">${fmtNum(w.free)}</td><td class="text-right ink-3">${rate ? money(rate) : '—'}</td><td class="text-right">${rate ? money(w.billable * rate) : '—'}</td><td class="text-right">${mc ? money(mc.cost) : '—'}</td></tr>`; }).join('') || '<tr><td colspan="6" class="ink-3">Belum ada pesan dengan info biaya pada bulan ini.</td></tr>'}
+        </tbody></table></div>
+        <p class="hint">Biaya resmi diambil dari Meta Pricing Analytics: mencakup <b>semua</b> pesan dari WABA ini (termasuk yang dikirim di luar Kontaq) dan bisa tertunda dari Meta. Estimasi realtime menghitung pesan berbayar dari webhook status (pesan layanan dalam jendela 24 jam umumnya gratis) dikalikan tarif yang Anda isi; tarif resmi per negara ada di <a class="accent-ink underline" href="https://developers.facebook.com/docs/whatsapp/pricing" target="_blank" rel="noopener noreferrer">halaman harga Meta</a>.</p>
+      </div>`;
+    $('#cost-month').addEventListener('change', (e) => loadCostCard(e.target.value));
+    $('#cost-sync').addEventListener('click', (e) => busy(e.currentTarget, async () => { const r = await api('POST', '/api/costs/sync', { month: c.month }); toast(`Sinkron: ${r.points} titik data dari Meta.`); }).then(() => loadCostCard()));
+    $('#cost-settings').addEventListener('click', costSettingsModal);
+    $('#cost-table-toggle').addEventListener('click', (e) => {
+      const showTable = $('#cost-chart-table').classList.toggle('hidden') === false;
+      $('#cost-chart-wrap').classList.toggle('hidden', showTable); e.target.textContent = showTable ? 'Grafik' : 'Tabel';
+    });
+    const tip = $('#chart-tip');
+    $$('#cost-chart .bar-col').forEach((col) => {
+      col.addEventListener('mousemove', (e) => { const [d, val] = col.dataset.tip.split('|'); tip.innerHTML = `<b>${esc(d)}</b><br>${esc(val)}`; tip.classList.remove('hidden'); tip.style.left = e.clientX + 12 + 'px'; tip.style.top = e.clientY - 36 + 'px'; });
+      col.addEventListener('mouseleave', () => tip.classList.add('hidden'));
+    });
+  }
+  function costSettingsModal() {
+    const c = S.cost, st = c.settings, cur = st.currency || c.defaultCurrency || '';
+    modal('Anggaran & tarif Meta', `<form id="f-cost" class="space-y-4">
+      <div class="grid sm:grid-cols-3 gap-3">
+        <div><label class="label">Mata uang</label><input class="input uppercase" name="currency" maxlength="3" value="${esc(st.currency)}" placeholder="${esc(c.defaultCurrency || 'IDR')}"><p class="hint">Kosongkan untuk memakai mata uang WABA${c.defaultCurrency ? ' (' + esc(c.defaultCurrency) + ')' : ''}.</p></div>
+        <div><label class="label">Anggaran per bulan</label><input class="input" type="number" min="0" step="any" name="budget" value="${st.budget || ''}" placeholder="0 = tanpa anggaran"></div>
+        <div><label class="label">Peringatan pada (%)</label><input class="input" type="number" min="1" max="100" name="alertPct" value="${st.alertPct || 80}"></div>
+      </div>
+      <div><div class="label">Tarif per pesan berbayar${cur ? ' (' + esc(cur) + ')' : ''}</div>
+        <div class="grid sm:grid-cols-2 gap-3">${RATE_CATS.map((k) => `<div><label class="text-xs ink-2" for="rate-${k}">${esc(COST_LABEL[k])}</label><input class="input mt-1" id="rate-${k}" type="number" min="0" step="any" name="rate_${k}" value="${st.rates?.[k] || ''}" placeholder="0"></div>`).join('')}</div>
+        <p class="hint">Isi sesuai tarif Meta untuk negara penerima Anda (mis. Indonesia). Dipakai untuk estimasi realtime; biaya resmi tetap diambil dari Meta.</p></div>
+    </form>`, { wide: true, footer: '<button class="btn" data-act="modal-close">Batal</button><button class="btn btn-primary" id="cost-save">Simpan</button>' });
+    $('#cost-save').addEventListener('click', (e) => busy(e.currentTarget, async () => {
+      const d = formData($('#f-cost'));
+      await api('PUT', '/api/costs/settings', { currency: d.currency, budget: d.budget, alertPct: d.alertPct, rates: Object.fromEntries(RATE_CATS.map((k) => [k, d['rate_' + k]])) });
+      closeModal(); toast('Pengaturan biaya disimpan.'); loadCostCard();
+    }));
+  }
+
+  /* ───────────── Inbox ───────────── */
+  async function loadConvs() {
+    const f = S.inbox.filter;
+    S.inbox.convs = await api('GET', `/api/conversations?q=${encodeURIComponent(f.q)}&scope=${f.scope}&status=${f.status}`);
+    renderNav();
+  }
+  const callbackOk = (k) => k?.callPermission?.status === 'accept' && (k.callPermission.permanent || !k.callPermission.expiresAt || k.callPermission.expiresAt > Date.now());
+  function avatar(k, size = 32, cls = '') {
+    const id = k?.id || k?.contactId;
+    const st = size !== 32 ? `style="width:${size}px;height:${size}px;font-size:${Math.max(10, Math.round(size * 0.34))}px"` : '';
+    return `<span class="avatar ${cls}" ${st}>${k?.avatarV && id ? `<img src="/api/contacts/${id}/avatar?v=${k.avatarV}" alt="" loading="lazy">` : initials(contactName(k))}</span>`;
+  }
+  // Perkecil foto di browser (potong persegi, maks 256px, JPEG) sebelum diunggah
+  async function resizeImage(file, max = 256) {
+    const img = await createImageBitmap(file);
+    const s = Math.min(img.width, img.height), out = Math.min(max, s);
+    const c = document.createElement('canvas'); c.width = c.height = out;
+    c.getContext('2d').drawImage(img, (img.width - s) / 2, (img.height - s) / 2, s, s, 0, 0, out, out);
+    return c.toDataURL('image/jpeg', 0.85);
+  }
+  // Ringkasan profil (di-cache 30 detik agar panel info tidak memanggil API terus-menerus)
+  async function getProfile(contactId, fresh) {
+    S.profiles = S.profiles || {};
+    const hit = S.profiles[contactId];
+    if (hit && !fresh && Date.now() - hit.at < 30000) return hit.data;
+    const data = await api('GET', `/api/contacts/${contactId}/profile`);
+    S.profiles[contactId] = { data, at: Date.now() };
+    return data;
+  }
+  function profileStatsHtml(p) {
+    const s = p.stats, cv = p.conversation;
+    const row = (k, val) => `<div class="flex justify-between gap-3"><span class="ink-3">${k}</span><span class="text-right">${val}</span></div>`;
+    return row('Pelanggan sejak', esc(fmtDate(s.since)))
+      + (cv ? row('Pesan', `${fmtNum(s.messagesIn)} masuk · ${fmtNum(s.messagesOut)} keluar`) : '')
+      + (s.lastInboundAt ? row('Pesan terakhir', esc(fmtDT(s.lastInboundAt))) : '')
+      + row('Panggilan', `${fmtNum(s.calls)}${s.missed ? ` · <span class="danger-ink">${s.missed} tak terjawab</span>` : ''}`)
+      + (s.lastCallAt ? row('Panggilan terakhir', esc(fmtDT(s.lastCallAt))) : '')
+      + (cv ? row('Ditangani', esc(cv.assignedName || 'Belum ditugaskan')) : '')
+      + row('Opt-in marketing', p.contact.optIn ? '<span class="accent-ink">Ya</span>' : 'Tidak');
+  }
+  // Status mengetik antar-CS (via Socket.IO). Arah pelanggan → CS tidak tersedia di Cloud API.
+  S.typing = {};
+  const typingNames = (convId) => Object.values(S.typing[convId] || {}).map((t) => t.name);
+  function emitTyping(convId) {
+    S.typingEmitAt = S.typingEmitAt || {};
+    if (Date.now() - (S.typingEmitAt[convId] || 0) < 3000) return;
+    S.typingEmitAt[convId] = Date.now();
+    socket.emit('typing', { conversationId: convId, toCustomer: pref('typingCustomer') });
+  }
+  function renderTyping() {
+    const el = $('#typing-line'); if (!el) return;
+    const names = typingNames(S.inbox.activeId);
+    el.innerHTML = names.length ? `<span class="typing-dots"><i></i><i></i><i></i></span>${esc(names.join(', '))} sedang mengetik…` : '';
+    el.classList.toggle('on', names.length > 0);
+  }
+  function setTyping(convId, userId, t) {
+    const had = !!S.typing[convId]?.[userId];
+    if (t) (S.typing[convId] = S.typing[convId] || {})[userId] = t; else if (S.typing[convId]) delete S.typing[convId][userId];
+    if (had !== !!t || t) { if (S.view === 'inbox') renderConvList(); if (convId === S.inbox.activeId) renderTyping(); }
+  }
+  setInterval(() => {
+    for (const [cid, users] of Object.entries(S.typing)) for (const [uid, t] of Object.entries(users)) if (Date.now() - t.seen > 6000) setTyping(cid, uid, null);
+  }, 1000);
+  const activeConv = () => S.inbox.convs.find((c) => c.id === S.inbox.activeId) || S.inbox.activeConv;
+  const contactName = (c) => c?.name || c?.waName || '+' + (c?.phone || '');
+
+  async function viewInbox(convId) {
+    const v = $('#view');
+    v.className = 'flex-1 min-h-0 overflow-hidden';
+    S.inbox.activeId = convId || (isMobile() ? null : S.inbox.activeId);
+    renderNav();
+    v.innerHTML = `<div class="h-full flex">
+      <section id="ib-list" class="w-full md:w-80 flex-none border-r bd surface flex-col ${S.inbox.activeId ? 'hidden md:flex' : 'flex'}">
+        <div class="p-3 space-y-2 border-b bd">
+          <input class="input" id="ib-q" placeholder="Cari nama, nomor, label…" value="${esc(S.inbox.filter.q)}" aria-label="Cari percakapan">
+          <div class="flex items-center gap-2">
+            <div class="seg" id="ib-scope">${[['all', 'Semua'], ['mine', 'Saya'], ['unassigned', 'Belum']].map(([k, l]) => `<button data-v="${k}" class="${S.inbox.filter.scope === k ? 'active' : ''}">${l}</button>`).join('')}</div>
+            <select class="select h-7 text-xs flex-1" id="ib-status" aria-label="Filter status">${[['open', 'Terbuka'], ['pending', 'Menunggu'], ['closed', 'Selesai'], ['all', 'Semua status']].map(([k, l]) => `<option value="${k}" ${S.inbox.filter.status === k ? 'selected' : ''}>${l}</option>`).join('')}</select>
+          </div>
+        </div>
+        <div id="ib-convs" class="flex-1 overflow-y-auto scroll-thin"></div>
+      </section>
+      <section id="ib-chat" class="flex-1 min-w-0 flex-col ${S.inbox.activeId ? 'flex' : 'hidden md:flex'}"></section>
+      <aside id="ib-info" class="hidden flex-none surface overflow-y-auto scroll-thin fixed inset-0 z-40 md:inset-auto md:right-0 md:top-14 md:bottom-0 md:w-72 md:border-l bd md:z-20 xl:static xl:z-auto"></aside>
+    </div>`;
+    let t;
+    $('#ib-q').addEventListener('input', (e) => { clearTimeout(t); t = setTimeout(async () => { S.inbox.filter.q = e.target.value; await loadConvs().catch(fail); renderConvList(); }, 250); });
+    $$('#ib-scope button').forEach((b) => b.addEventListener('click', async () => { S.inbox.filter.scope = b.dataset.v; $$('#ib-scope button').forEach((x) => x.classList.toggle('active', x === b)); await loadConvs().catch(fail); renderConvList(); }));
+    $('#ib-status').addEventListener('change', async (e) => { S.inbox.filter.status = e.target.value; await loadConvs().catch(fail); renderConvList(); });
+    if (!S.users.length) S.users = await api('GET', '/api/users').catch(() => []);
+    await loadConvs().catch(fail);
+    renderConvList();
+    if (S.inbox.activeId) openConv(S.inbox.activeId); else renderChatEmpty();
+  }
+  function renderConvList() {
+    const el = $('#ib-convs'); if (!el) return;
+    const rows = S.inbox.convs;
+    el.innerHTML = rows.length ? rows.map((c) => `<a href="#/inbox/${c.id}" class="conv-item ${c.id === S.inbox.activeId ? 'active' : ''}">
+      <div class="flex gap-2.5">
+        ${avatar(c.contact)}
+        <div class="min-w-0 flex-1">
+          <div class="flex items-baseline gap-2"><span class="font-medium truncate flex-1">${esc(contactName(c.contact))}</span><span class="text-[11px] ink-3 flex-none">${relTime(c.lastMessageAt)}</span></div>
+          <div class="flex items-center gap-2 mt-0.5">${typingNames(c.id).length ? `<span class="text-xs accent-ink truncate flex-1">${esc(typingNames(c.id).join(', '))} mengetik…</span>` : `<span class="text-xs ink-3 truncate flex-1">${esc(c.preview || 'Belum ada pesan')}</span>`}${c.unread ? `<span class="badge badge-green">${c.unread}</span>` : ''}</div>
+          <div class="flex items-center gap-1.5 mt-1 text-[11px] ink-3">
+            ${c.windowOpen ? '<span class="accent-ink" title="Jendela layanan 24 jam aktif">● 24j</span>' : '<span title="Di luar jendela 24 jam">○ 24j</span>'}
+            <span>·</span><span class="truncate">${c.assignedName ? esc(c.assignedName) : 'Belum ditugaskan'}</span>
+            ${callbackOk(c.contact) ? '<span class="badge badge-green" style="height:1rem;font-size:10px" title="Bersedia ditelepon balik">📞 telepon balik</span>' : ''}
+            ${(c.contact.labels || []).slice(0, 2).map((l) => `<span class="badge" style="height:1rem;font-size:10px">${esc(l)}</span>`).join('')}
+          </div>
+        </div>
+      </div></a>`).join('') : '<div class="empty">Tidak ada percakapan.<br><span class="text-xs">Pesan masuk dari webhook akan muncul di sini.</span></div>';
+  }
+  function renderChatEmpty() {
+    const el = $('#ib-chat'); if (!el) return;
+    el.innerHTML = '<div class="flex-1 flex items-center justify-center chat-bg"><div class="empty">Pilih percakapan untuk mulai membalas.</div></div>';
+    $('#ib-info').classList.add('hidden');
+  }
+  async function openConv(id) {
+    let data;
+    try { data = await api('GET', `/api/conversations/${id}`); } catch (e) { fail(e); S.inbox.activeId = null; location.hash = '#/inbox'; return; }
+    if (S.view !== 'inbox' || S.inbox.activeId !== id) return;
+    S.inbox.activeConv = data.conversation; S.inbox.messages = data.messages; S.inbox.replyTo = null;
+    const i = S.inbox.convs.findIndex((c) => c.id === id);
+    if (i >= 0) S.inbox.convs[i] = data.conversation;
+    renderChat(); renderInfo(); renderConvList();
+    if (data.conversation.unread) api('POST', `/api/conversations/${id}/read`).then(() => { const c = activeConv(); if (c) c.unread = 0; renderConvList(); renderNav(); }).catch(() => {});
+  }
+  function windowLabel(c) {
+    if (!c.windowOpen) return '<span class="badge badge-amber" title="Hanya template yang bisa dikirim">Di luar jendela 24 jam</span>';
+    const left = c.windowExpiresAt - Date.now(), h = Math.floor(left / 3600e3), m = Math.floor((left % 3600e3) / 60e3);
+    return `<span class="badge badge-green" title="Pesan bebas boleh dikirim sampai ${esc(fmtDT(c.windowExpiresAt))}">Jendela ${h}j ${m}m</span>`;
+  }
+  function renderChat() {
+    const c = activeConv(), el = $('#ib-chat'); if (!c || !el) return;
+    const canAssignOthers = S.isAdmin;
+    const assignOpts = [`<option value="">Belum ditugaskan</option>`, ...S.users.filter((u) => u.active && (canAssignOthers || u.id === S.user.id || u.id === c.assignedTo)).map((u) => `<option value="${u.id}" ${c.assignedTo === u.id ? 'selected' : ''}>${esc(u.name)}</option>`)].join('');
+    el.innerHTML = `
+      <div class="h-14 flex-none surface border-b bd flex items-center gap-2 px-3">
+        <a href="#/inbox" class="btn btn-ghost btn-icon md:hidden" aria-label="Kembali" data-back>${ICON.back}</a>
+        <button type="button" id="cv-name" class="flex items-center gap-2 min-w-0 flex-1 text-left" aria-label="Lihat info kontak">
+        ${avatar(c.contact)}
+        <div class="min-w-0 flex-1">
+          <div class="font-medium truncate">${esc(contactName(c.contact))}</div>
+          <div class="text-[11px] ink-3 flex items-center gap-2"><span class="mono hidden sm:inline">+${esc(c.contact.phone)}</span>${windowLabel(c)}</div>
+        </div></button>
+        <select class="select h-7 text-xs w-28 hidden sm:block" id="cv-status" aria-label="Status percakapan">${[['open', 'Terbuka'], ['pending', 'Menunggu'], ['closed', 'Selesai']].map(([k, l]) => `<option value="${k}" ${c.status === k ? 'selected' : ''}>${l}</option>`).join('')}</select>
+        <select class="select h-7 text-xs w-36 hidden sm:block" id="cv-assign" aria-label="Tugaskan ke">${assignOpts}</select>
+        <button class="btn btn-ghost btn-icon ${callbackOk(c.contact) ? 'accent-ink' : ''}" id="cv-call" title="${callbackOk(c.contact) ? 'Telepon balik' : 'Minta izin telepon'}" aria-label="${callbackOk(c.contact) ? 'Telepon balik' : 'Minta izin telepon'}">${ICON.phone}</button>
+        <button class="btn btn-ghost btn-icon" id="cv-info-btn" title="Info kontak" aria-label="Info kontak">${ICON.info}</button>
+      </div>
+      <div id="msgs" class="flex-1 overflow-y-auto overflow-x-hidden scroll-thin chat-bg px-3 md:px-6 py-4 space-y-1.5"></div>
+      <div id="typing-line" class="typing-line chat-bg" aria-live="polite"></div>
+      <div id="composer" class="flex-none surface border-t bd safe-b"></div>`;
+    bindSwipeReply($('#msgs'));
+    $('#cv-status').addEventListener('change', (e) => patchConv({ status: e.target.value }));
+    $('#cv-assign').addEventListener('change', (e) => patchConv({ assignedTo: e.target.value || null }));
+    $('#cv-call').addEventListener('click', () => {
+      const k = activeConv().contact;
+      if (callbackOk(k)) startCallback({ id: k.id, name: k.name || k.waName || '', phone: k.phone }); else callPermissionModal(activeConv());
+    });
+    $('#cv-info-btn').addEventListener('click', () => { S.inbox.showInfo = !S.inbox.showInfo; renderInfo(); });
+    $('[data-back]').addEventListener('click', () => { S.inbox.activeId = null; if (isMobile()) S.inbox.showInfo = false; });
+    $('#cv-name').addEventListener('click', () => { S.inbox.showInfo = true; renderInfo(); });
+    renderMessages(true); renderComposer(); renderTyping();
+  }
+  async function patchConv(body) {
+    const c = activeConv();
+    try {
+      const upd = await api('PATCH', `/api/conversations/${c.id}`, body);
+      applyConv(upd); toast('Percakapan diperbarui.');
+    } catch (e) { fail(e); renderChat(); }
+  }
+  function msgBody(m) {
+    const c = m.content || {}, media = c.mediaId ? `/api/media/${encodeURIComponent(c.mediaId)}` : '';
+    switch (m.type) {
+      case 'text': case 'unsupported': return waFormat(c.body);
+      case 'image': if (c.arImage) return `<img src="/api/autoreply/media/${c.arImage}" alt="Gambar" loading="lazy" class="mb-1">${c.caption ? waFormat(c.caption) : ''}`;
+        return `<a href="${media}" target="_blank" rel="noopener"><img src="${media}" alt="Gambar" loading="lazy" class="mb-1"></a>${c.caption ? waFormat(c.caption) : ''}`;
+      case 'sticker': return `<img src="${media}" alt="Stiker" loading="lazy" style="width:120px">`;
+      case 'video': return `<video src="${media}" controls preload="none" class="mb-1 w-full"></video>${c.caption ? waFormat(c.caption) : ''}`;
+      case 'audio': return `<audio src="${media}" controls preload="none" style="max-width:260px"></audio>${c.voice ? '<div class="text-[11px] ink-3">Pesan suara</div>' : ''}`;
+      case 'document': return `<a class="flex items-center gap-2 p-2 rounded-md surface-2" href="${media}?download=1">${ICON.tpl.replace('<svg', '<svg width="18" height="18"')}<span class="truncate font-medium">${esc(c.filename || 'Dokumen')}</span></a>${c.caption ? `<div class="mt-1">${waFormat(c.caption)}</div>` : ''}`;
+      case 'location': return `<a class="underline" style="color:var(--info)" target="_blank" rel="noopener noreferrer" href="https://maps.google.com/?q=${encodeURIComponent(c.latitude + ',' + c.longitude)}">📍 ${esc(c.name || `${c.latitude}, ${c.longitude}`)}</a>${c.address ? `<div class="text-xs ink-3">${esc(c.address)}</div>` : ''}`;
+      case 'interactive': return `${c.arImage ? `<img src="/api/autoreply/media/${c.arImage}" alt="Gambar" loading="lazy" class="mb-1">` : ''}${c.header ? `<div class="font-semibold">${esc(c.header)}</div>` : ''}<div>${waFormat(c.body)}</div>${c.footer ? `<div class="text-[11px] ink-3 mt-0.5">${esc(c.footer)}</div>` : ''}
+        ${c.kind === 'call_permission_request' ? `<span class="ib-btn">${ICON.phone.replace('<svg', '<svg width="12" height="12" style="display:inline;vertical-align:-1px"')} Permintaan izin telepon</span>`
+          : c.kind === 'button' ? c.buttons.map((b) => `<span class="ib-btn">${esc(b)}</span>`).join('') : `<span class="ib-btn">☰ ${esc(c.button)}</span><div class="text-[11px] ink-3 mt-1">${c.rows.map((r) => esc(r.title)).join(' · ')}</div>`}`;
+      case 'call_permission': return `<div class="flex items-center gap-2"><span class="${c.response === 'accept' ? 'accent-ink' : 'danger-ink'}">${ICON.phone.replace('<svg', '<svg width="16" height="16"')}</span><div><div class="font-medium">${c.response === 'accept' ? 'Bersedia ditelepon balik' : 'Menolak ditelepon'}</div>${c.response === 'accept' ? `<div class="text-[11px] ink-3">${c.permanent ? 'Izin permanen' : c.expiresAt ? 'Berlaku sampai ' + esc(fmtDT(c.expiresAt)) : ''}</div>` : ''}</div></div>`;
+      case 'interactive_reply': return `<div class="text-[11px] ink-3">Balasan pilihan</div><div class="font-medium">${esc(c.title)}</div>${c.description ? `<div class="text-xs ink-3">${esc(c.description)}</div>` : ''}`;
+      case 'button': return `<div class="text-[11px] ink-3">Tombol template</div><div class="font-medium">${esc(c.text)}</div>`;
+      case 'template': return `<div class="text-[11px] ink-3 mb-0.5">Template · ${esc(c.name)} (${esc(c.language)})</div>${waFormat(c.body || '')}`;
+      case 'contacts': return (c.contacts || []).map((k) => `👤 <b>${esc(k.name)}</b> ${esc((k.phones || []).join(', '))}`).join('<br>');
+      default: return esc(m.type);
+    }
+  }
+  // Ringkasan singkat isi pesan untuk kutipan balasan
+  function quoteText(m) {
+    const c = m.content || {};
+    return String({ text: c.body, interactive_reply: c.title, button: c.text, interactive: c.body, template: c.body, image: c.caption || '📷 Gambar', video: c.caption || '🎬 Video',
+      audio: '🎵 Audio', document: '📄 ' + (c.filename || 'Dokumen'), sticker: 'Stiker', location: '📍 ' + (c.name || 'Lokasi'), contacts: '👤 Kontak' }[m.type] || c.body || 'Pesan');
+  }
+  function msgHtml(m) {
+    const out = m.direction === 'out';
+    const quoted = m.contextId ? S.inbox.messages.find((x) => x.wamid === m.contextId) : null;
+    return `<div class="msg-row flex ${out ? 'justify-end' : 'justify-start'} group" data-mid="${m.id}">
+      ${out ? `<button class="reply-btn opacity-0 group-hover:opacity-100 ink-3 self-center p-1 mr-1" data-reply="${m.id}" title="Balas" aria-label="Balas">${ICON.reply.replace('<svg', '<svg width="14" height="14"')}</button>` : ''}
+      <div class="bubble ${out ? 'out' : 'in'} ${m.reaction ? 'mb-3' : ''}">
+        ${quoted ? `<div class="text-[11px] ink-3 border-l-2 pl-2 mb-1" style="border-color:var(--accent)">${esc(quoteText(quoted).slice(0, 80))}</div>` : ''}
+        ${msgBody(m)}
+        <div class="meta">${out && m.userName ? `<span>${m.auto ? '⚡ ' : ''}${esc(m.userName)} ·</span>` : ''}<span>${fmtTime(m.timestamp)}</span>${out ? tick(m.status) : ''}</div>
+        ${m.status === 'failed' ? `<div class="text-[11px] danger-ink mt-1">${esc(m.error || 'Gagal terkirim')}</div>` : ''}
+        ${m.reaction ? `<span class="reaction">${esc(m.reaction)}</span>` : ''}
+      </div>
+      ${!out ? `<button class="reply-btn opacity-0 group-hover:opacity-100 ink-3 self-center p-1 ml-1" data-reply="${m.id}" title="Balas" aria-label="Balas">${ICON.reply.replace('<svg', '<svg width="14" height="14"')}</button>` : ''}
+    </div>`;
+  }
+  function renderMessages(scroll) {
+    const el = $('#msgs'); if (!el) return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+    let lastDay = '';
+    el.innerHTML = S.inbox.messages.map((m) => {
+      const day = new Date(m.timestamp).toDateString();
+      const sep = day !== lastDay ? `<div class="flex justify-center py-2"><span class="day-sep">${esc(fmtDate(m.timestamp))}</span></div>` : '';
+      lastDay = day; return sep + msgHtml(m);
+    }).join('') || '<div class="empty">Belum ada pesan. Di luar jendela 24 jam, mulai dengan template.</div>';
+    $$('[data-reply]', el).forEach((b) => b.addEventListener('click', () => { S.inbox.replyTo = b.dataset.reply; renderComposer(); }));
+    if (scroll || nearBottom) el.scrollTop = el.scrollHeight;
+  }
+  // Geser pesan ke kanan untuk membalas (layar sentuh)
+  function bindSwipeReply(el) {
+    let row = null, x0 = 0, y0 = 0, dx = 0;
+    el.addEventListener('touchstart', (e) => { row = e.target.closest('.msg-row'); if (!row) return; x0 = e.touches[0].clientX; y0 = e.touches[0].clientY; dx = 0; }, { passive: true });
+    el.addEventListener('touchmove', (e) => {
+      if (!row) return;
+      const mx = e.touches[0].clientX - x0, my = e.touches[0].clientY - y0;
+      if (dx === 0 && Math.abs(my) > Math.abs(mx)) { row = null; return; }
+      dx = Math.max(0, Math.min(80, mx)); row.classList.add('swiping'); row.style.transform = `translateX(${dx}px)`;
+    }, { passive: true });
+    el.addEventListener('touchend', () => {
+      if (!row) return;
+      row.classList.remove('swiping'); row.style.transform = '';
+      if (dx > 56) { S.inbox.replyTo = row.dataset.mid; renderComposer(); navigator.vibrate?.(15); $('#cmp-text')?.focus(); }
+      row = null;
+    });
+  }
+  function renderComposer() {
+    const c = activeConv(), el = $('#composer'); if (!c || !el) return;
+    const draft = $('#cmp-text')?.value || '';
+    if (!c.windowOpen) {
+      el.innerHTML = `<div class="p-3 flex flex-wrap items-center gap-3"><div class="flex-1 min-w-[12rem] text-xs ink-2">Jendela layanan 24 jam tertutup. Sesuai kebijakan Meta, hanya <b>template yang disetujui</b> yang dapat dikirim sampai pelanggan membalas.</div><button class="btn btn-primary max-sm:w-full" id="cmp-tpl">${ICON.tpl} Kirim template</button></div>`;
+      $('#cmp-tpl').addEventListener('click', () => templateSendModal(c));
+      return;
+    }
+    const rep = S.inbox.replyTo ? S.inbox.messages.find((m) => m.id === S.inbox.replyTo) : null;
+    el.innerHTML = `${rep ? `<div class="px-3 pt-2 flex items-center gap-2 text-xs ink-3"><span class="border-l-2 pl-2 truncate flex-1" style="border-color:var(--accent)">Membalas: ${esc(quoteText(rep).slice(0, 100))}</span><button class="btn btn-ghost btn-sm" id="cmp-unreply" aria-label="Batal balas">${ICON.x}</button></div>` : ''}
+      <div class="p-2 flex items-end gap-1.5">
+        <button class="btn btn-ghost btn-icon sm:hidden" data-cmp="sheet" title="Lampiran" aria-label="Lampiran">${ICON.plus}</button>
+        <div class="hidden sm:flex items-center">
+          <button class="btn btn-ghost btn-icon" data-cmp="media" title="Media (gambar, video, audio, dokumen)" aria-label="Lampirkan media">${ICON.clip}</button>
+          <button class="btn btn-ghost btn-icon hidden sm:inline-flex" data-cmp="location" title="Lokasi" aria-label="Kirim lokasi">${ICON.pin}</button>
+          <button class="btn btn-ghost btn-icon hidden sm:inline-flex" data-cmp="buttons" title="Tombol interaktif" aria-label="Kirim tombol interaktif">${ICON.btns}</button>
+          <button class="btn btn-ghost btn-icon hidden sm:inline-flex" data-cmp="list" title="Daftar interaktif" aria-label="Kirim daftar interaktif">${ICON.list}</button>
+          <button class="btn btn-ghost btn-icon" data-cmp="template" title="Template" aria-label="Kirim template">${ICON.tpl}</button>
+        </div>
+        <textarea id="cmp-text" rows="1" class="textarea flex-1 max-h-40" placeholder="${isTouch ? 'Tulis pesan…' : 'Tulis pesan…  (Enter kirim, Shift+Enter baris baru)'}" aria-label="Pesan">${esc(draft)}</textarea>
+        <button class="btn btn-accent btn-icon h-[34px] w-[34px] max-md:h-10 max-md:w-10 max-md:rounded-full" id="cmp-send" title="Kirim" aria-label="Kirim">${ICON.send}</button>
+      </div>`;
+    const ta = $('#cmp-text');
+    const grow = () => { ta.style.height = 'auto'; ta.style.height = Math.min(160, ta.scrollHeight) + 'px'; };
+    ta.addEventListener('input', () => { grow(); if (ta.value.trim()) emitTyping(c.id); }); grow();
+    ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !isTouch) { e.preventDefault(); $('#cmp-send').click(); } });
+    $('#cmp-send').addEventListener('click', (e) => {
+      const body = ta.value.trim(); if (!body) return;
+      busy(e.currentTarget, async () => { await sendMsg({ type: 'text', body }); ta.value = ''; grow(); if (isTouch) ta.focus(); });
+    });
+    $('#cmp-unreply')?.addEventListener('click', () => { S.inbox.replyTo = null; renderComposer(); });
+    $$('[data-cmp]', el).forEach((b) => b.addEventListener('click', () => ({ sheet: attachSheet, media: () => mediaModal(), location: locationModal, buttons: buttonsModal, list: listModal, template: () => templateSendModal(c) })[b.dataset.cmp]()));
+    if (!isTouch) ta.focus();
+  }
+  async function sendMsg(body) {
+    const c = activeConv();
+    if (S.inbox.replyTo) body.replyTo = S.inbox.replyTo;
+    const msg = await api('POST', `/api/conversations/${c.id}/messages`, body);
+    S.inbox.replyTo = null;
+    if (S.typingEmitAt) delete S.typingEmitAt[c.id]; // ketikan berikutnya langsung terlihat lagi
+    if (!S.inbox.messages.some((m) => m.id === msg.id)) { S.inbox.messages.push(msg); renderMessages(true); }
+    if ($('#cmp-unreply')) renderComposer();
+    return msg;
+  }
+  // Lembar lampiran (HP): pilihan besar seperti aplikasi chat
+  function attachSheet() {
+    const items = [['camera', 'Kamera', ICON.camera], ['image', 'Galeri', ICON.image], ['document', 'Dokumen', ICON.doc], ['audio', 'Audio', ICON.mic],
+      ['location', 'Lokasi', ICON.pin], ['buttons', 'Tombol', ICON.btns], ['list', 'Daftar', ICON.list], ['template', 'Template', ICON.tpl]];
+    modal('Lampiran', `<div class="sheet-grid">${items.map(([k, l, ic]) => `<button class="sheet-btn" data-sheet="${k}"><span class="ic">${ic}</span>${l}</button>`).join('')}</div>`);
+    $$('[data-sheet]').forEach((b) => b.addEventListener('click', () => {
+      const c = activeConv();
+      ({ camera: () => mediaModal('image', true), image: () => mediaModal('image'), document: () => mediaModal('document'), audio: () => mediaModal('audio'),
+        location: locationModal, buttons: buttonsModal, list: listModal, template: () => templateSendModal(c) })[b.dataset.sheet]();
+    }));
+  }
+  function mediaModal(kind = 'image', camera = false) {
+    modal('Kirim media', `<form id="f-media" class="space-y-3">
+      <div><label class="label">Jenis</label><select class="select" name="kind">
+        <option value="image">Gambar (JPEG/PNG, maks 5 MB)</option><option value="video">Video (MP4/3GPP, maks 16 MB)</option>
+        <option value="audio">Audio (AAC/AMR/MP3/M4A/OGG, maks 16 MB)</option><option value="document">Dokumen (maks 100 MB)</option></select></div>
+      <div><label class="label">File</label><input class="input pt-1" type="file" name="file" required></div>
+      <div id="media-cap"><label class="label">Keterangan (opsional)</label><textarea class="textarea" name="caption" rows="2" maxlength="1024"></textarea></div>
+    </form>`, { footer: '<button class="btn" data-act="modal-close">Batal</button><button class="btn btn-primary" id="media-go">Unggah & kirim</button>' });
+    const f = $('#f-media');
+    f.kind.value = kind;
+    f.kind.addEventListener('change', () => { $('#media-cap').classList.toggle('hidden', f.kind.value === 'audio'); f.file.accept = { image: 'image/jpeg,image/png', video: 'video/mp4,video/3gpp', audio: 'audio/*', document: '' }[f.kind.value]; f.file.removeAttribute('capture'); });
+    f.kind.dispatchEvent(new Event('change'));
+    if (camera) { f.file.accept = 'image/*'; f.file.setAttribute('capture', 'environment'); f.file.click(); }
+    f.file.addEventListener('change', () => {
+      const file = f.file.files[0]; $('#media-prev')?.remove();
+      if (file && file.type.startsWith('image/')) f.file.insertAdjacentHTML('afterend', `<img id="media-prev" class="mt-2 rounded-md max-h-48" alt="Pratinjau" src="${URL.createObjectURL(file)}">`);
+    });
+    $('#media-go').addEventListener('click', (e) => busy(e.currentTarget, async () => {
+      if (!f.file.files[0]) throw new Error('Pilih file terlebih dahulu.');
+      const fd = new FormData(); fd.append('kind', f.kind.value); fd.append('file', f.file.files[0]);
+      const up = await api('POST', '/api/media', fd);
+      await sendMsg({ type: f.kind.value, mediaId: up.id, mime: up.mime, filename: up.filename, caption: f.caption.value });
+      closeModal();
+    }));
+  }
+  function locationModal() {
+    modal('Kirim lokasi', `<form id="f-loc" class="grid grid-cols-2 gap-3">
+      <button type="button" class="btn col-span-2" id="loc-me">${ICON.pin} Pakai lokasi saya saat ini</button>
+      <div><label class="label">Latitude</label><input class="input" name="latitude" required inputmode="decimal" placeholder="-6.2088"></div>
+      <div><label class="label">Longitude</label><input class="input" name="longitude" required inputmode="decimal" placeholder="106.8456"></div>
+      <div class="col-span-2"><label class="label">Nama tempat</label><input class="input" name="name" maxlength="1000"></div>
+      <div class="col-span-2"><label class="label">Alamat</label><input class="input" name="address" maxlength="1000"></div>
+    </form>`, { footer: '<button class="btn" data-act="modal-close">Batal</button><button class="btn btn-primary" id="loc-go">Kirim</button>' });
+    $('#loc-me').addEventListener('click', (e) => {
+      if (!navigator.geolocation) return fail(new Error('Perangkat tidak mendukung lokasi.'));
+      const btn = e.currentTarget; btn.disabled = true;
+      navigator.geolocation.getCurrentPosition((p) => {
+        const f = $('#f-loc'); f.latitude.value = p.coords.latitude.toFixed(6); f.longitude.value = p.coords.longitude.toFixed(6); btn.disabled = false;
+      }, (err) => { btn.disabled = false; fail(new Error('Lokasi tidak tersedia: ' + err.message)); }, { enableHighAccuracy: true, timeout: 10000 });
+    });
+    $('#loc-go').addEventListener('click', (e) => busy(e.currentTarget, async () => { await sendMsg({ type: 'location', ...formData($('#f-loc')) }); closeModal(); }));
+  }
+  function buttonsModal() {
+    modal('Kirim tombol interaktif', `<form id="f-btn" class="space-y-3">
+      <div><label class="label">Header (opsional)</label><input class="input" name="header" maxlength="60"></div>
+      <div><label class="label">Isi pesan</label><textarea class="textarea" name="body" rows="3" maxlength="1024" required></textarea></div>
+      <div><label class="label">Footer (opsional)</label><input class="input" name="footer" maxlength="60"></div>
+      <div><label class="label">Tombol balasan (1–3, maks 20 karakter)</label><div class="space-y-2">${[1, 2, 3].map((i) => `<input class="input" name="b${i}" maxlength="20" placeholder="Tombol ${i}">`).join('')}</div></div>
+    </form>`, { footer: '<button class="btn" data-act="modal-close">Batal</button><button class="btn btn-primary" id="btn-go">Kirim</button>' });
+    $('#btn-go').addEventListener('click', (e) => busy(e.currentTarget, async () => {
+      const d = formData($('#f-btn'));
+      await sendMsg({ type: 'buttons', header: d.header, body: d.body, footer: d.footer, buttons: [d.b1, d.b2, d.b3].filter((x) => x.trim()) });
+      closeModal();
+    }));
+  }
+  function listModal() {
+    modal('Kirim daftar interaktif', `<form id="f-list" class="space-y-3">
+      <div class="grid grid-cols-2 gap-3"><div><label class="label">Header (opsional)</label><input class="input" name="header" maxlength="60"></div>
+      <div><label class="label">Teks tombol</label><input class="input" name="button" maxlength="20" required placeholder="Lihat pilihan"></div></div>
+      <div><label class="label">Isi pesan</label><textarea class="textarea" name="body" rows="2" maxlength="4096" required></textarea></div>
+      <div class="grid grid-cols-2 gap-3"><div><label class="label">Judul bagian</label><input class="input" name="sectionTitle" maxlength="24" placeholder="Pilihan"></div>
+      <div><label class="label">Footer (opsional)</label><input class="input" name="footer" maxlength="60"></div></div>
+      <div><label class="label">Baris (1–10) — satu per baris: <span class="kbd">Judul | Deskripsi</span></label><textarea class="textarea mono" name="rows" rows="5" required placeholder="Paket Basic | Rp99rb/bulan&#10;Paket Pro | Rp199rb/bulan"></textarea><p class="hint">Judul maks 24 karakter, deskripsi maks 72.</p></div>
+    </form>`, { footer: '<button class="btn" data-act="modal-close">Batal</button><button class="btn btn-primary" id="list-go">Kirim</button>' });
+    $('#list-go').addEventListener('click', (e) => busy(e.currentTarget, async () => {
+      const d = formData($('#f-list'));
+      const rows = d.rows.split('\n').map((l) => l.split('|')).filter((p) => p[0].trim()).map(([t, ...rest]) => ({ title: t.trim(), description: rest.join('|').trim() }));
+      const long = rows.find((r) => r.title.length > 24 || r.description.length > 72);
+      if (long) throw new Error(`Baris "${long.title}" melebihi batas karakter.`);
+      await sendMsg({ type: 'list', header: d.header, body: d.body, footer: d.footer, button: d.button, sectionTitle: d.sectionTitle, rows });
+      closeModal();
+    }));
+  }
+
+  /* Template: pengisian variabel (dipakai inbox & campaign) */
+  const tplVars = (text) => [...new Set([...String(text || '').matchAll(/\{\{\s*(\w+)\s*\}\}/g)].map((m) => m[1]))];
+  const comp = (t, type) => (t.components || []).find((c) => c.type === type);
+  function tplFieldsHtml(t, { campaign } = {}) {
+    if (!t) return '';
+    const h = comp(t, 'HEADER'), b = comp(t, 'BODY'), hint = campaign ? '<p class="hint">Gunakan <span class="kbd">{{name}}</span> atau <span class="kbd">{{phone}}</span> untuk nilai per kontak.</p>' : '';
+    let out = '';
+    if (h?.format === 'TEXT') out += tplVars(h.text).map((v, i) => `<div><label class="label">Header {{${esc(v)}}}</label><input class="input" name="header_${i}" required></div>`).join('');
+    if (h && ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(h.format)) out += `<div><label class="label">URL ${h.format.toLowerCase()} header (HTTPS publik)</label><input class="input" name="headerMedia" type="url" required placeholder="https://…"></div>`;
+    out += tplVars(b?.text).map((v, i) => `<div><label class="label">Body {{${esc(v)}}}</label><input class="input" name="body_${i}" required></div>`).join('');
+    return (out ? out + hint : '<p class="text-xs ink-3">Template ini tidak memiliki variabel.</p>');
+  }
+  function tplPreview(t, form) {
+    if (!t) return '';
+    const h = comp(t, 'HEADER'), b = comp(t, 'BODY'), f = comp(t, 'FOOTER'), btns = comp(t, 'BUTTONS');
+    const val = (name) => form?.[name]?.value || '';
+    let i = 0, j = 0;
+    const header = h ? (h.format === 'TEXT' ? `<div class="font-semibold mb-1">${esc(String(h.text).replace(/\{\{\s*\w+\s*\}\}/g, () => val('header_' + j++) || '{{…}}'))}</div>` : `<div class="text-[11px] ink-3 mb-1">[${esc(h.format)}]</div>`) : '';
+    const body = waFormat(String(b?.text || '').replace(/\{\{\s*\w+\s*\}\}/g, () => val('body_' + i++) || '{{…}}'));
+    return `<div class="chat-bg rounded-md p-3"><div class="bubble out">${header}${body}${f ? `<div class="text-[11px] ink-3 mt-1">${esc(f.text)}</div>` : ''}${(btns?.buttons || []).map((x) => `<span class="ib-btn">${esc(x.text)}</span>`).join('')}</div></div>`;
+  }
+  function readTplValues(t, form) {
+    const h = comp(t, 'HEADER'), b = comp(t, 'BODY');
+    return {
+      header: h?.format === 'TEXT' ? tplVars(h.text).map((_, i) => form['header_' + i].value) : [],
+      headerMedia: form.headerMedia?.value || '',
+      body: tplVars(b?.text).map((_, i) => form['body_' + i].value),
+    };
+  }
+  async function ensureTemplates() {
+    if (!S.templates.loaded) { Object.assign(S.templates, await api('GET', '/api/templates'), { loaded: true }); }
+    return S.templates.rows;
+  }
+  async function templateSendModal(conv) {
+    const rows = (await ensureTemplates().catch((e) => { fail(e); return []; })).filter((t) => t.status === 'APPROVED');
+    modal('Kirim template', rows.length ? `<form id="f-tpl" class="grid md:grid-cols-2 gap-4">
+      <div class="space-y-3"><div><label class="label">Template</label><select class="select" name="tpl">${rows.map((t, i) => `<option value="${i}">${esc(t.name)} · ${esc(t.language)} · ${esc(t.category)}</option>`).join('')}</select></div><div id="tpl-fields" class="space-y-3"></div></div>
+      <div><div class="label">Pratinjau</div><div id="tpl-prev"></div></div></form>`
+      : `<div class="empty">Belum ada template APPROVED.<br><a href="#/templates" class="accent-ink" data-act="modal-close">Buka Template</a> lalu klik Sinkronkan.</div>`,
+    { wide: true, footer: rows.length ? '<button class="btn" data-act="modal-close">Batal</button><button class="btn btn-primary" id="tpl-go">Kirim template</button>' : '' });
+    if (!rows.length) return;
+    const f = $('#f-tpl'), cur = () => rows[f.tpl.value];
+    const draw = () => { $('#tpl-fields').innerHTML = tplFieldsHtml(cur()); $('#tpl-prev').innerHTML = tplPreview(cur(), f); };
+    f.tpl.addEventListener('change', draw);
+    f.addEventListener('input', (e) => { if (e.target.name !== 'tpl') $('#tpl-prev').innerHTML = tplPreview(cur(), f); });
+    draw();
+    $('#tpl-go').addEventListener('click', (e) => busy(e.currentTarget, async () => {
+      const t = cur();
+      const msg = await api('POST', `/api/conversations/${conv.id}/messages`, { type: 'template', name: t.name, language: t.language, values: readTplValues(t, f) });
+      if (S.inbox.activeId === conv.id && !S.inbox.messages.some((m) => m.id === msg.id)) { S.inbox.messages.push(msg); renderMessages(true); }
+      closeModal(); toast('Template terkirim.');
+    }));
+  }
+
+  function renderInfo() {
+    const el = $('#ib-info'), c = activeConv(); if (!el || !c) return;
+    el.classList.toggle('hidden', !S.inbox.showInfo);
+    if (!S.inbox.showInfo) return;
+    const k = c.contact;
+    el.innerHTML = `<div class="p-4 border-b bd text-center relative">
+        <button class="btn btn-ghost btn-icon absolute top-2 right-2 xl:hidden" id="info-close" aria-label="Tutup info">${ICON.x}</button>
+        ${avatar(k, 72, 'mx-auto')}
+        <div class="mt-2 flex justify-center gap-3 text-[11px]"><label class="accent-ink cursor-pointer hover:underline">${k.avatarV ? 'Ganti foto' : 'Tambah foto'}<input type="file" accept="image/*" class="hidden" id="av-file"></label>${k.avatarV ? '<button type="button" id="av-del" class="ink-3 hover:underline">Hapus foto</button>' : ''}</div>
+        <div class="font-semibold mt-2">${esc(contactName(k))}</div><div class="text-xs ink-3 mono">+${esc(k.phone)}</div>
+        ${k.waName && k.waName !== k.name ? `<div class="text-[11px] ink-3 mt-0.5">Profil WA: ${esc(k.waName)}</div>` : ''}
+        ${callbackOk(k) ? `<div class="mt-2"><span class="badge badge-green">${ICON.phone.replace('<svg', '<svg width="11" height="11"')} Minta ditelepon balik</span></div>` : ''}
+        ${callbackOk(k) ? `<button class="btn btn-accent btn-sm mt-3" data-act="callback" data-contact="${k.id}" data-name="${esc(k.name || k.waName || '')}" data-phone="${esc(k.phone)}" title="Telepon balik" aria-label="Telepon balik">${ICON.phone} Telepon balik</button>` : ''}
+      </div>
+      <div class="p-4 border-b bd"><div class="text-xs font-semibold mb-2">Profil pelanggan</div><div id="info-stats" class="text-xs space-y-1.5"><div class="ink-3">Memuat…</div></div></div>
+      <form id="f-contact" class="p-4 space-y-3 border-b bd">
+        <div class="sm:hidden grid grid-cols-2 gap-2">
+          <select class="select" id="cv-status-m" aria-label="Status percakapan">${[['open', 'Terbuka'], ['pending', 'Menunggu'], ['closed', 'Selesai']].map(([v, l]) => `<option value="${v}" ${c.status === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
+          <select class="select" id="cv-assign-m" aria-label="Tugaskan ke">${$('#cv-assign')?.innerHTML || ''}</select>
+        </div>
+        <div><label class="label">Nama</label><input class="input" name="name" value="${esc(k.name)}" maxlength="120"></div>
+        <div><label class="label">Label</label><input class="input" name="labels" value="${esc((k.labels || []).join(', '))}" placeholder="vip, prospek"><p class="hint">Pisahkan dengan koma.</p></div>
+        <div><label class="label">Catatan kontak</label><textarea class="textarea" name="notes" rows="2" maxlength="2000">${esc(k.notes)}</textarea></div>
+        <label class="flex items-center gap-2 text-xs"><input type="checkbox" class="check" name="optIn" ${k.optIn ? 'checked' : ''}> Sudah opt-in menerima pesan marketing</label>
+        <button class="btn btn-sm w-full" type="submit">Simpan kontak</button>
+      </form>
+      <div class="p-4">
+        <div class="flex items-center justify-between mb-2"><div class="text-xs font-semibold">Catatan internal</div><span class="text-[11px] ink-3">tidak terlihat pelanggan</span></div>
+        <div class="space-y-2 mb-3">${(c.notes || []).slice().reverse().map((n) => `<div class="note-item"><div class="whitespace-pre-wrap">${esc(n.text)}</div><div class="flex items-center justify-between mt-1 text-[10px] ink-3"><span>${esc(n.userName)} · ${fmtDT(n.at)}</span>${n.userId === S.user.id || S.isAdmin ? `<button data-del-note="${n.id}" class="hover:underline">Hapus</button>` : ''}</div></div>`).join('') || '<p class="text-xs ink-3">Belum ada catatan.</p>'}</div>
+        <form id="f-note" class="space-y-2"><textarea class="textarea" name="text" rows="2" placeholder="Tambah catatan untuk tim…" required maxlength="2000"></textarea><button class="btn btn-sm w-full" type="submit">Tambah catatan</button></form>
+      </div>`;
+    getProfile(k.id).then((p) => { const el2 = $('#info-stats'); if (el2 && activeConv()?.contact.id === k.id) el2.innerHTML = profileStatsHtml(p); }).catch(() => { const el2 = $('#info-stats'); if (el2) el2.innerHTML = '<div class="ink-3">Profil tidak dapat dimuat.</div>'; });
+    const setAvatar = (avatarV) => {
+      k.avatarV = avatarV;
+      S.inbox.convs.forEach((x) => { if (x.contact.id === k.id) x.contact.avatarV = avatarV; });
+      const hdr = $('#cv-name .avatar'); if (hdr) hdr.outerHTML = avatar(k);
+      renderConvList(); renderInfo();
+    };
+    $('#av-file').addEventListener('change', (e) => { const file = e.target.files[0]; if (!file) return; busy(null, async () => {
+      const r = await api('PUT', `/api/contacts/${k.id}/avatar`, { dataUrl: await resizeImage(file) });
+      setAvatar(r.avatarV); toast('Foto profil disimpan.');
+    }); });
+    $('#av-del')?.addEventListener('click', () => busy(null, async () => { await api('DELETE', `/api/contacts/${k.id}/avatar`); setAvatar(0); toast('Foto profil dihapus.'); }));
+    $('#info-close').addEventListener('click', () => { S.inbox.showInfo = false; renderInfo(); });
+    $('#cv-status-m')?.addEventListener('change', (e) => patchConv({ status: e.target.value }));
+    const am = $('#cv-assign-m'); if (am) { am.value = c.assignedTo || ''; am.addEventListener('change', (e) => patchConv({ assignedTo: e.target.value || null })); }
+    $('#f-contact').addEventListener('submit', (e) => { e.preventDefault(); busy(e.submitter, async () => {
+      const d = formData(e.target);
+      const k2 = await api('PATCH', `/api/contacts/${k.id}`, { name: d.name, labels: d.labels, notes: d.notes, optIn: !!d.optIn });
+      c.contact = k2; renderConvList(); renderChat(); renderInfo(); toast('Kontak disimpan.');
+    }); });
+    $('#f-note').addEventListener('submit', (e) => { e.preventDefault(); busy(e.submitter, async () => {
+      const n = await api('POST', `/api/conversations/${c.id}/notes`, { text: e.target.text.value });
+      if (!(c.notes || []).some((x) => x.id === n.id)) (c.notes = c.notes || []).push(n);
+      renderInfo();
+    }); });
+    $$('[data-del-note]', el).forEach((b) => b.addEventListener('click', () => busy(null, async () => {
+      await api('DELETE', `/api/conversations/${c.id}/notes/${b.dataset.delNote}`);
+      c.notes = c.notes.filter((n) => n.id !== b.dataset.delNote); renderInfo();
+    })));
+  }
+  // Terapkan update percakapan dari server/socket
+  function applyConv(conv) {
+    const i = S.inbox.convs.findIndex((c) => c.id === conv.id);
+    const f = S.inbox.filter;
+    const match = (f.status === 'all' || conv.status === f.status) && (f.scope !== 'mine' || conv.assignedTo === S.user.id) && (f.scope !== 'unassigned' || !conv.assignedTo);
+    if (i >= 0) { if (match || conv.id === S.inbox.activeId) S.inbox.convs[i] = conv; else S.inbox.convs.splice(i, 1); }
+    else if (match && !f.q) S.inbox.convs.unshift(conv);
+    S.inbox.convs.sort((a, b) => b.lastMessageAt - a.lastMessageAt);
+    if (conv.id === S.inbox.activeId) {
+      const prevWindow = S.inbox.activeConv?.windowOpen;
+      S.inbox.activeConv = conv;
+      if (S.view === 'inbox') {
+        renderChatHeaderOnly(conv);
+        const cb = $('#cv-call'); if (cb) { const ok = callbackOk(conv.contact); cb.classList.toggle('accent-ink', ok); cb.title = ok ? 'Telepon balik' : 'Minta izin telepon'; }
+        if (prevWindow !== conv.windowOpen) renderComposer();
+        if (!document.activeElement?.closest('#ib-info')) renderInfo();
+      }
+    }
+    if (S.view === 'inbox') renderConvList();
+    renderNav();
+  }
+  function renderChatHeaderOnly(c) {
+    const s = $('#cv-status'), a = $('#cv-assign');
+    if (s) s.value = c.status;
+    if (a) { if (![...a.options].some((o) => o.value === (c.assignedTo || ''))) return renderChat(); a.value = c.assignedTo || ''; }
+    const sub = $('#ib-chat .mono')?.parentElement; if (sub) sub.innerHTML = `<span class="mono hidden sm:inline">+${esc(c.contact.phone)}</span>${windowLabel(c)}`;
+  }
+
+  /* ───────────── Kontak ───────────── */
+  async function viewContacts() {
+    const v = $('#view'), st = S.contacts;
+    let data;
+    try { data = await api('GET', `/api/contacts?q=${encodeURIComponent(st.q)}&label=${encodeURIComponent(st.label)}&page=${st.page}`); } catch (e) { v.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+    if (S.view !== 'contacts') return;
+    const pages = Math.max(1, Math.ceil(data.total / data.per));
+    const keepFocus = document.activeElement?.id === 'ct-q';
+    v.innerHTML = `<div class="p-4 md:p-6 max-w-7xl space-y-3">
+      <div class="flex flex-wrap items-center gap-2">
+        <input class="input w-full sm:w-64" id="ct-q" placeholder="Cari nama, nomor, catatan…" value="${esc(st.q)}" aria-label="Cari kontak">
+        <select class="select flex-1 sm:flex-none sm:w-44" id="ct-label" aria-label="Filter label"><option value="">Semua label</option>${data.labels.map((l) => `<option ${l === st.label ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>
+        <span class="text-xs ink-3">${fmtNum(data.total)} kontak</span>
+        <div class="hidden sm:block flex-1"></div>
+        ${S.isAdmin ? `<a class="btn hidden sm:inline-flex" href="/api/contacts/export.csv">Ekspor CSV</a><button class="btn hidden sm:inline-flex" id="ct-import">Impor CSV</button>` : ''}
+        <button class="btn btn-primary" id="ct-add">${ICON.plus} Tambah kontak</button>
+      </div>
+      <div class="card sm:hidden divide-y" style="border-color:var(--border)">
+        ${data.rows.map((c) => `<div class="flex items-center gap-3 px-3 py-3 border-b bd last:border-0">
+          ${avatar(c, 40)}
+          <div class="min-w-0 flex-1"><div class="font-medium truncate">${esc(c.name || c.waName || '—')}</div>
+            <div class="text-xs ink-3 mono">+${esc(c.phone)}</div>
+            <div class="flex flex-wrap gap-1 mt-1">${c.optIn ? '<span class="badge badge-green">Opt-in</span>' : ''}${(c.labels || []).map((l) => `<span class="badge">${esc(l)}</span>`).join('')}</div></div>
+          <div class="flex flex-col gap-1.5"><button class="btn btn-sm btn-accent" data-chat="${c.id}">Chat</button><button class="btn btn-sm" data-edit="${c.id}">Ubah</button></div>
+        </div>`).join('') || '<div class="empty">Belum ada kontak.</div>'}
+      </div>
+      <div class="card overflow-x-auto hidden sm:block"><table class="tbl"><thead><tr><th>Nama</th><th>Nomor WhatsApp</th><th>Label</th><th>Opt-in</th><th>Catatan</th><th>Diperbarui</th><th></th></tr></thead><tbody>
+      ${data.rows.map((c) => `<tr>
+        <td><div class="flex items-center gap-2">${avatar(c, 24)}<span class="font-medium">${esc(c.name || c.waName || '—')}</span></div></td>
+        <td class="mono text-xs">+${esc(c.phone)}</td>
+        <td><div class="flex flex-wrap gap-1">${(c.labels || []).map((l) => `<span class="badge">${esc(l)}</span>`).join('') || '<span class="ink-3">—</span>'}</div></td>
+        <td>${c.optIn ? '<span class="badge badge-green">Ya</span>' : '<span class="ink-3 text-xs">Tidak</span>'}</td>
+        <td class="max-w-[16rem] truncate ink-2" title="${esc(c.notes)}">${esc(c.notes) || '<span class="ink-3">—</span>'}</td>
+        <td class="text-xs ink-3 whitespace-nowrap">${fmtDate(c.updatedAt)}</td>
+        <td class="text-right whitespace-nowrap"><button class="btn btn-sm" data-chat="${c.id}">Chat</button> <button class="btn btn-sm btn-ghost" data-edit="${c.id}">Ubah</button>${S.isAdmin ? ` <button class="btn btn-sm btn-ghost btn-danger" data-del="${c.id}">Hapus</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="7"><div class="empty">Belum ada kontak.</div></td></tr>'}
+      </tbody></table></div>
+      ${pages > 1 ? `<div class="flex items-center justify-end gap-2 text-xs"><button class="btn btn-sm" id="ct-prev" ${st.page <= 1 ? 'disabled' : ''}>Sebelumnya</button><span class="ink-3">Hal. ${st.page} / ${pages}</span><button class="btn btn-sm" id="ct-next" ${st.page >= pages ? 'disabled' : ''}>Berikutnya</button></div>` : ''}
+    </div>`;
+    const q = $('#ct-q'); if (keepFocus) { q.focus(); q.setSelectionRange(q.value.length, q.value.length); }
+    let t; q.addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => { st.q = q.value; st.page = 1; viewContacts(); }, 300); });
+    $('#ct-label').addEventListener('change', (e) => { st.label = e.target.value; st.page = 1; viewContacts(); });
+    $('#ct-prev')?.addEventListener('click', () => { st.page--; viewContacts(); });
+    $('#ct-next')?.addEventListener('click', () => { st.page++; viewContacts(); });
+    $('#ct-add').addEventListener('click', () => contactModal());
+    $('#ct-import')?.addEventListener('click', importModal);
+    $$('[data-edit]').forEach((b) => b.addEventListener('click', () => contactModal(data.rows.find((c) => c.id === b.dataset.edit))));
+    $$('[data-del]').forEach((b) => b.addEventListener('click', async () => {
+      const c = data.rows.find((x) => x.id === b.dataset.del);
+      if (await confirmBox(`Hapus kontak ${contactName(c)} beserta seluruh riwayat percakapannya?`, 'Hapus', true)) busy(null, async () => { await api('DELETE', `/api/contacts/${c.id}`); toast('Kontak dihapus.'); viewContacts(); });
+    }));
+    $$('[data-chat]').forEach((b) => b.addEventListener('click', () => busy(b, async () => {
+      const conv = await api('POST', '/api/conversations', { contactId: b.dataset.chat });
+      S.inbox.activeConv = conv; S.inbox.filter.status = 'all'; location.hash = `#/inbox/${conv.id}`;
+    })));
+  }
+  function contactModal(c) {
+    modal(c ? 'Ubah kontak' : 'Tambah kontak', `<form id="f-ct" class="space-y-3">
+      <div><label class="label">Nomor WhatsApp</label><input class="input mono" name="phone" value="${esc(c?.phone || '')}" ${c ? 'disabled' : 'required'} placeholder="6281234567890"><p class="hint">Format internasional tanpa "+" atau spasi.</p></div>
+      <div><label class="label">Nama</label><input class="input" name="name" value="${esc(c?.name || '')}" maxlength="120"></div>
+      <div><label class="label">Label</label><input class="input" name="labels" value="${esc((c?.labels || []).join(', '))}" placeholder="pelanggan, vip"></div>
+      <div><label class="label">Catatan</label><textarea class="textarea" name="notes" rows="3" maxlength="2000">${esc(c?.notes || '')}</textarea></div>
+      <label class="flex items-center gap-2 text-xs"><input type="checkbox" class="check" name="optIn" ${c?.optIn ? 'checked' : ''}> Kontak telah memberikan opt-in untuk menerima pesan dari bisnis</label>
+    </form>`, { footer: '<button class="btn" data-act="modal-close">Batal</button><button class="btn btn-primary" id="ct-save">Simpan</button>' });
+    $('#ct-save').addEventListener('click', (e) => busy(e.currentTarget, async () => {
+      const d = formData($('#f-ct')); d.optIn = !!d.optIn;
+      if (c) await api('PATCH', `/api/contacts/${c.id}`, d); else await api('POST', '/api/contacts', d);
+      closeModal(); toast('Kontak disimpan.'); viewContacts();
+    }));
+  }
+  function importModal() {
+    modal('Impor kontak dari CSV', `<form id="f-imp" class="space-y-3">
+      <p class="text-xs ink-2">Baris pertama adalah header. Kolom wajib <span class="kbd">phone</span>; opsional <span class="kbd">name</span>, <span class="kbd">labels</span> (pisah <span class="kbd">|</span>), <span class="kbd">notes</span>, <span class="kbd">opt_in</span> (1/0). Nomor yang sudah ada akan diperbarui.</p>
+      <pre class="kbd block p-2 text-[11px] overflow-x-auto">phone,name,labels,opt_in\n6281234567890,Budi Santoso,vip|jakarta,1</pre>
+      <div><label class="label">File CSV</label><input class="input pt-1" type="file" name="file" accept=".csv,text/csv" required></div>
+      <div><label class="label">Tambahkan label ke semua baris (opsional)</label><input class="input" name="labels" placeholder="impor-okt"></div>
+      <div id="imp-res"></div>
+    </form>`, { footer: '<button class="btn" data-act="modal-close">Tutup</button><button class="btn btn-primary" id="imp-go">Impor</button>' });
+    $('#imp-go').addEventListener('click', (e) => busy(e.currentTarget, async () => {
+      const f = $('#f-imp'); if (!f.file.files[0]) throw new Error('Pilih file CSV.');
+      const fd = new FormData(); fd.append('file', f.file.files[0]); fd.append('labels', f.labels.value);
+      const r = await api('POST', '/api/contacts/import', fd);
+      $('#imp-res').innerHTML = `<div class="card p-3 text-xs"><b>${r.created}</b> baru · <b>${r.updated}</b> diperbarui · <b class="${r.errorCount ? 'danger-ink' : ''}">${r.errorCount}</b> gagal${r.errors.length ? `<ul class="mt-2 ink-3 list-disc pl-4 max-h-32 overflow-y-auto">${r.errors.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}</div>`;
+      viewContacts();
+    }));
+  }
+
+  /* ───────────── Template ───────────── */
+  async function viewTemplates(force) {
+    const v = $('#view');
+    if (!S.templates.loaded || force) { try { Object.assign(S.templates, await api('GET', '/api/templates'), { loaded: true }); } catch (e) { fail(e); } }
+    if (S.view !== 'templates') return;
+    const f = S.templates.filter || '';
+    const rows = S.templates.rows.filter((t) => !f || t.status === f);
+    const counts = S.templates.rows.reduce((a, t) => ((a[t.status] = (a[t.status] || 0) + 1), a), {});
+    v.innerHTML = `<div class="p-4 md:p-6 max-w-7xl space-y-3">
+      <div class="flex flex-wrap items-center gap-2">
+        <div class="seg" id="tp-filter">${[['', 'Semua'], ['APPROVED', 'Disetujui'], ['PENDING', 'Ditinjau'], ['REJECTED', 'Ditolak']].map(([k, l]) => `<button data-v="${k}" class="${f === k ? 'active' : ''}">${l}${k ? ` <span class="ink-3">${counts[k] || 0}</span>` : ''}</button>`).join('')}</div>
+        <span class="text-xs ink-3">${S.templates.syncedAt ? 'Sinkron ' + fmtDT(S.templates.syncedAt) : 'Belum disinkronkan'}</span>
+        <div class="flex-1"></div>
+        <button class="btn" id="tp-sync">${ICON.refresh} Sinkronkan dari Meta</button>
+        ${S.isAdmin ? `<button class="btn btn-primary" id="tp-new">${ICON.plus} Buat template</button>` : ''}
+      </div>
+      <div class="card overflow-x-auto"><table class="tbl"><thead><tr><th>Nama</th><th>Kategori</th><th>Bahasa</th><th>Status</th><th>Kualitas</th><th>Isi</th><th></th></tr></thead><tbody>
+        ${rows.map((t) => `<tr>
+          <td class="font-medium mono text-xs">${esc(t.name)}</td><td class="text-xs">${esc(t.category)}</td><td class="text-xs">${esc(t.language)}</td>
+          <td>${statusBadge(t.status)}${t.rejected_reason && t.rejected_reason !== 'NONE' ? `<div class="text-[11px] danger-ink mt-0.5">${esc(t.rejected_reason)}</div>` : ''}</td>
+          <td class="text-xs">${esc(t.quality_score?.score || '—')}</td>
+          <td class="max-w-[22rem] truncate ink-2 text-xs">${esc(comp(t, 'BODY')?.text || '')}</td>
+          <td class="text-right whitespace-nowrap"><button class="btn btn-sm btn-ghost" data-view="${esc(t.id)}">Lihat</button>${S.isAdmin ? ` <button class="btn btn-sm btn-ghost btn-danger" data-del="${esc(t.id)}">Hapus</button>` : ''}</td></tr>`).join('') || `<tr><td colspan="7"><div class="empty">Belum ada template. Klik <b>Sinkronkan dari Meta</b> untuk memuat template dari WABA.</div></td></tr>`}
+      </tbody></table></div>
+      <p class="hint">Status template diperbarui otomatis melalui webhook <span class="kbd">message_template_status_update</span>.</p>
+    </div>`;
+    $$('#tp-filter button').forEach((b) => b.addEventListener('click', () => { S.templates.filter = b.dataset.v; viewTemplates(); }));
+    $('#tp-sync').addEventListener('click', (e) => busy(e.currentTarget, async () => { Object.assign(S.templates, await api('POST', '/api/templates/sync'), { loaded: true }); toast(`${S.templates.rows.length} template disinkronkan.`); viewTemplates(); }));
+    $('#tp-new')?.addEventListener('click', templateCreateModal);
+    $$('[data-view]').forEach((b) => b.addEventListener('click', () => {
+      const t = S.templates.rows.find((x) => String(x.id) === b.dataset.view);
+      modal(`${t.name} · ${t.language}`, `<div class="grid md:grid-cols-2 gap-4"><div class="space-y-2 text-xs">
+        <div class="flex justify-between"><span class="ink-3">Kategori</span><span>${esc(t.category)}</span></div>
+        <div class="flex justify-between"><span class="ink-3">Status</span>${statusBadge(t.status)}</div>
+        <div class="flex justify-between"><span class="ink-3">ID</span><span class="mono">${esc(t.id)}</span></div>
+        <div class="flex justify-between"><span class="ink-3">Format parameter</span><span>${esc(t.parameter_format || 'POSITIONAL')}</span></div>
+        <details class="pt-2"><summary class="cursor-pointer ink-2">Komponen (JSON)</summary><pre class="kbd block p-2 mt-2 overflow-x-auto text-[11px]">${esc(JSON.stringify(t.components, null, 2))}</pre></details>
+      </div><div>${tplPreview(t)}</div></div>`, { wide: true });
+    }));
+    $$('[data-del]').forEach((b) => b.addEventListener('click', async () => {
+      const t = S.templates.rows.find((x) => String(x.id) === b.dataset.del);
+      if (await confirmBox(`Hapus template "${t.name}" (${t.language}) dari Meta? Nama yang sama tidak dapat dipakai ulang selama 30 hari.`, 'Hapus', true))
+        busy(null, async () => { await api('DELETE', `/api/templates/${encodeURIComponent(t.name)}?id=${encodeURIComponent(t.id)}`); S.templates.rows = S.templates.rows.filter((x) => x.id !== t.id); toast('Template dihapus.'); viewTemplates(); });
+    }));
+  }
+  function templateCreateModal() {
+    modal('Buat template', `<form id="f-tc" class="grid md:grid-cols-2 gap-4">
+      <div class="space-y-3">
+        <div><label class="label">Nama</label><input class="input mono" name="name" required pattern="[a-z0-9_]+" placeholder="promo_oktober"><p class="hint">Huruf kecil, angka, garis bawah.</p></div>
+        <div class="grid grid-cols-2 gap-3">
+          <div><label class="label">Kategori</label><select class="select" name="category"><option>MARKETING</option><option>UTILITY</option><option>AUTHENTICATION</option></select></div>
+          <div><label class="label">Bahasa</label><select class="select" name="language"><option value="id">Indonesia (id)</option><option value="en_US">English US (en_US)</option><option value="en">English (en)</option><option value="ms">Melayu (ms)</option></select></div>
+        </div>
+        <div><label class="label">Header teks (opsional)</label><input class="input" name="headerText" maxlength="60" placeholder="Halo {{1}}"></div>
+        <div id="tc-hex" class="hidden"><label class="label">Contoh variabel header</label><input class="input" name="headerExample"></div>
+        <div><label class="label">Body</label><textarea class="textarea" name="body" rows="5" maxlength="1024" required placeholder="Hai {{1}}, pesanan {{2}} sudah dikirim."></textarea><p class="hint">Variabel berurutan {{1}}, {{2}}, … Format: *tebal* _miring_</p></div>
+        <div id="tc-bex" class="hidden"><label class="label">Contoh nilai variabel body (pisah |)</label><input class="input" name="bodyExample" placeholder="Budi | INV-001"></div>
+        <div><label class="label">Footer (opsional)</label><input class="input" name="footer" maxlength="60"></div>
+        <div><div class="flex items-center justify-between"><span class="label mb-0">Tombol (opsional)</span><button type="button" class="btn btn-sm btn-ghost" id="tc-addbtn">${ICON.plus} Tombol</button></div><div id="tc-btns" class="space-y-2 mt-2"></div></div>
+        <p class="hint">Header media (gambar/video/dokumen) memerlukan unggahan contoh via Resumable Upload API dan belum didukung di formulir ini — buat di WhatsApp Manager, lalu sinkronkan.</p>
+      </div>
+      <div><div class="label">Pratinjau</div><div id="tc-prev"></div></div>
+    </form>`, { wide: true, footer: '<button class="btn" data-act="modal-close">Batal</button><button class="btn btn-primary" id="tc-go">Ajukan ke Meta</button>' });
+    const f = $('#f-tc'), btns = $('#tc-btns');
+    const addBtn = () => {
+      if (btns.children.length >= 10) return;
+      const row = document.createElement('div'); row.className = 'grid grid-cols-[7rem_1fr_auto] gap-2';
+      row.innerHTML = `<select class="select" data-k="type"><option value="QUICK_REPLY">Balasan cepat</option><option value="URL">URL</option><option value="PHONE_NUMBER">Telepon</option></select>
+        <div class="space-y-1"><input class="input" data-k="text" maxlength="25" placeholder="Teks tombol"><input class="input hidden" data-k="extra" placeholder=""></div>
+        <button type="button" class="btn btn-ghost btn-icon" aria-label="Hapus tombol">${ICON.x}</button>`;
+      const sel = row.querySelector('[data-k=type]'), ex = row.querySelector('[data-k=extra]');
+      sel.addEventListener('change', () => { ex.classList.toggle('hidden', sel.value === 'QUICK_REPLY'); ex.placeholder = sel.value === 'URL' ? 'https://contoh.com' : '6281234567890'; });
+      row.querySelector('button').addEventListener('click', () => { row.remove(); draw(); });
+      btns.appendChild(row);
+    };
+    const collect = () => {
+      const d = formData(f);
+      d.buttons = [...btns.children].map((r) => { const type = r.querySelector('[data-k=type]').value, text = r.querySelector('[data-k=text]').value, extra = r.querySelector('[data-k=extra]').value; return { type, text, url: extra, phone: extra }; });
+      return d;
+    };
+    const draw = () => {
+      const d = collect();
+      $('#tc-hex').classList.toggle('hidden', !tplVars(d.headerText).length);
+      $('#tc-bex').classList.toggle('hidden', !tplVars(d.body).length);
+      const t = { components: [d.headerText && { type: 'HEADER', format: 'TEXT', text: d.headerText }, { type: 'BODY', text: d.body || 'Isi pesan…' }, d.footer && { type: 'FOOTER', text: d.footer }, d.buttons.length && { type: 'BUTTONS', buttons: d.buttons.filter((b) => b.text) }].filter(Boolean) };
+      $('#tc-prev').innerHTML = tplPreview(t);
+    };
+    $('#tc-addbtn').addEventListener('click', () => { addBtn(); draw(); });
+    f.addEventListener('input', draw); draw();
+    $('#tc-go').addEventListener('click', (e) => busy(e.currentTarget, async () => {
+      if (!f.reportValidity()) return;
+      const r = await api('POST', '/api/templates', collect());
+      closeModal(); toast(`Template diajukan. Status: ${r.status || 'PENDING'}`);
+      S.templates.loaded = false; viewTemplates(true);
+    }));
+  }
+
+  /* ───────────── Campaign ───────────── */
+  async function viewCampaigns() {
+    const v = $('#view');
+    let rows;
+    try { rows = await api('GET', '/api/campaigns'); } catch (e) { v.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+    if (S.view !== 'campaigns') return;
+    S.campaigns = rows;
+    v.innerHTML = `<div class="p-4 md:p-6 max-w-7xl space-y-3">
+      <div class="flex items-center gap-2"><p class="text-xs ink-3 flex-1">Campaign mengirim template APPROVED ke kontak terpilih melalui antrean (${BOOT.campaignRate} pesan/detik). Patuhi kebijakan opt-in WhatsApp.</p>
+      <button class="btn btn-primary" id="cp-new">${ICON.plus} Campaign baru</button></div>
+      <div class="card overflow-x-auto"><table class="tbl"><thead><tr><th>Nama</th><th>Template</th><th>Status</th><th>Progres</th><th class="text-right">Terkirim</th><th class="text-right">Diterima</th><th class="text-right">Dibaca</th><th class="text-right">Gagal</th><th>Dibuat</th><th></th></tr></thead>
+      <tbody id="cp-rows">${rows.map(campaignRow).join('') || '<tr><td colspan="10"><div class="empty">Belum ada campaign.</div></td></tr>'}</tbody></table></div>
+    </div>`;
+    $('#cp-new').addEventListener('click', campaignModal);
+    $('#cp-rows').addEventListener('click', (e) => { const b = e.target.closest('[data-open]'); if (b) campaignDetail(b.dataset.open); });
+  }
+  function campaignRow(c) {
+    const done = c.total - (c.counts.queued || 0), pct = c.total ? Math.round((done / c.total) * 100) : 0;
+    const sent = c.counts.sent + c.counts.delivered + c.counts.read;
+    return `<tr data-cid="${c.id}"><td class="font-medium">${esc(c.name)}${c.lastError ? `<div class="text-[11px] danger-ink truncate max-w-[14rem]" title="${esc(c.lastError)}">${esc(c.lastError)}</div>` : ''}</td>
+      <td class="mono text-xs">${esc(c.templateName)}</td><td>${statusBadge(c.status)}</td>
+      <td class="w-32"><div class="h-1.5 rounded-full surface-2 overflow-hidden"><div class="h-full rounded-full" style="width:${pct}%;background:var(--accent)"></div></div><div class="text-[11px] ink-3 mt-0.5">${fmtNum(done)} / ${fmtNum(c.total)}</div></td>
+      <td class="text-right">${fmtNum(sent)}</td><td class="text-right">${fmtNum(c.counts.delivered + c.counts.read)}</td><td class="text-right">${fmtNum(c.counts.read)}</td><td class="text-right ${c.counts.failed ? 'danger-ink' : ''}">${fmtNum(c.counts.failed)}</td>
+      <td class="text-xs ink-3 whitespace-nowrap">${fmtDT(c.createdAt)}</td><td class="text-right"><button class="btn btn-sm" data-open="${c.id}">Detail</button></td></tr>`;
+  }
+  async function campaignModal() {
+    const tpls = (await ensureTemplates().catch(() => [])).filter((t) => t.status === 'APPROVED');
+    const labels = (await api('GET', '/api/contacts?page=1').catch(() => ({ labels: [] }))).labels;
+    if (!tpls.length) return modal('Campaign baru', '<div class="empty">Belum ada template APPROVED. Sinkronkan template di menu Template.</div>');
+    modal('Campaign baru', `<form id="f-cp" class="grid md:grid-cols-2 gap-4">
+      <div class="space-y-3">
+        <div><label class="label">Nama campaign</label><input class="input" name="name" required maxlength="120"></div>
+        <div><label class="label">Template</label><select class="select" name="tpl">${tpls.map((t, i) => `<option value="${i}">${esc(t.name)} · ${esc(t.language)} · ${esc(t.category)}</option>`).join('')}</select></div>
+        <div id="cp-fields" class="space-y-3"></div>
+        <div><label class="label">Target label (kosong = semua kontak)</label><div class="flex flex-wrap gap-x-3 gap-y-1.5">${labels.map((l) => `<label class="flex items-center gap-1.5 text-xs"><input type="checkbox" class="check" name="label" value="${esc(l)}">${esc(l)}</label>`).join('') || '<span class="text-xs ink-3">Belum ada label.</span>'}</div></div>
+        <label class="flex items-center gap-2 text-xs"><input type="checkbox" class="check" name="optInOnly" checked> Hanya kontak yang sudah opt-in</label>
+      </div>
+      <div><div class="label">Pratinjau (contoh)</div><div id="cp-prev"></div><p class="hint mt-3">Campaign dibuat sebagai draf. Anda dapat meninjau jumlah penerima sebelum memulai.</p></div>
+    </form>`, { wide: true, footer: '<button class="btn" data-act="modal-close">Batal</button><button class="btn btn-primary" id="cp-go">Buat draf</button>' });
+    const f = $('#f-cp'), cur = () => tpls[f.tpl.value];
+    const draw = () => { $('#cp-fields').innerHTML = tplFieldsHtml(cur(), { campaign: true }); $('#cp-prev').innerHTML = tplPreview(cur(), f); };
+    f.tpl.addEventListener('change', draw);
+    f.addEventListener('input', (e) => { if (e.target.name !== 'tpl') $('#cp-prev').innerHTML = tplPreview(cur(), f); });
+    draw();
+    $('#cp-go').addEventListener('click', (e) => busy(e.currentTarget, async () => {
+      if (!f.reportValidity()) return;
+      const t = cur();
+      const c = await api('POST', '/api/campaigns', { name: f.name.value, templateName: t.name, language: t.language, values: readTplValues(t, f), labels: $$('input[name=label]:checked', f).map((x) => x.value), optInOnly: f.optInOnly.checked });
+      closeModal(); toast(`Draf dibuat: ${c.total} penerima.`); await viewCampaigns(); campaignDetail(c.id);
+    }));
+  }
+  async function campaignDetail(id) {
+    let c; try { c = await api('GET', `/api/campaigns/${id}`); } catch (e) { return fail(e); }
+    const act = (a, label, cls = '') => `<button class="btn ${cls}" data-cact="${a}">${label}</button>`;
+    modal(c.name, `<div class="space-y-4">
+      <div class="flex flex-wrap items-center gap-2 text-xs">${statusBadge(c.status)}<span class="ink-3">Template <span class="mono">${esc(c.templateName)}</span> · ${esc(c.language)}</span><span class="ink-3">· ${c.labels.length ? 'Label: ' + esc(c.labels.join(', ')) : 'Semua kontak'}${c.optInOnly ? ' · opt-in saja' : ''}</span></div>
+      ${c.lastError ? `<div class="text-xs danger-ink">${esc(c.lastError)}</div>` : ''}
+      <div class="grid grid-cols-3 sm:grid-cols-6 gap-2">${[['Total', c.total], ['Antre', c.counts.queued], ['Terkirim', c.counts.sent], ['Diterima', c.counts.delivered], ['Dibaca', c.counts.read], ['Gagal', c.counts.failed]].map(([l, n]) => `<div class="card p-2.5"><div class="text-[11px] ink-3">${l}</div><div class="text-lg font-semibold">${fmtNum(n)}</div></div>`).join('')}</div>
+      <div class="card overflow-hidden max-h-72 overflow-y-auto scroll-thin"><table class="tbl"><thead><tr><th>Nomor</th><th>Nama</th><th>Status</th><th>Keterangan</th></tr></thead><tbody>
+        ${c.recipients.map((r) => `<tr><td class="mono text-xs">+${esc(r.phone)}</td><td>${esc(r.name)}</td><td>${statusBadge(r.status)}</td><td class="text-[11px] danger-ink">${esc(r.error || '')}</td></tr>`).join('')}
+      </tbody></table></div>${c.total > 1000 ? '<p class="hint">Menampilkan 1.000 penerima pertama. Unduh CSV untuk laporan lengkap.</p>' : ''}
+    </div>`, { wide: true, footer: `<a class="btn" href="/api/campaigns/${c.id}/export.csv">Unduh laporan CSV</a><div class="flex-1"></div>
+      ${['draft', 'paused'].includes(c.status) ? act('start', c.status === 'draft' ? 'Mulai kirim' : 'Lanjutkan', 'btn-primary') : ''}${c.status === 'running' ? act('pause', 'Jeda') : ''}${!['done', 'cancelled'].includes(c.status) ? act('cancel', 'Batalkan', 'btn-danger') : ''}` });
+    $$('[data-cact]').forEach((b) => b.addEventListener('click', async () => {
+      const a = b.dataset.cact;
+      if (a === 'start' && !(await confirmBox(`Kirim template "${c.templateName}" ke ${c.counts.queued} kontak? Pesan template berbayar sesuai tarif Meta.`, 'Kirim'))) return campaignDetail(id);
+      if (a === 'cancel' && !(await confirmBox('Batalkan campaign? Penerima yang masih antre akan dilewati.', 'Batalkan', true))) return campaignDetail(id);
+      busy(b, async () => { await api('POST', `/api/campaigns/${id}/${a}`); campaignDetail(id); if (S.view === 'campaigns') viewCampaigns(); });
+    }));
+  }
+
+  /* ───────────── Auto reply ───────────── */
+  const AR_DAYS = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
+  const AR_MATCH = { contains: 'Mengandung kata', exact: 'Sama persis', starts: 'Diawali dengan' };
+  const TZ_LIST = ['Asia/Jakarta', 'Asia/Makassar', 'Asia/Jayapura', 'Asia/Singapore', 'Asia/Kuala_Lumpur', 'UTC'];
+  const sw = (id, on, label) => `<label class="switch ${on ? 'on' : ''}" title="${esc(label)}"><input type="checkbox" class="sr-only" id="${id}" ${on ? 'checked' : ''} role="switch" aria-label="${esc(label)}"><span></span></label>`;
+  // Perkecil gambar (sisi terpanjang maks 1600px, JPEG) sebelum diunggah
+  async function resizeMedia(file, max = 1600) {
+    const img = await createImageBitmap(file);
+    const k = Math.min(1, max / Math.max(img.width, img.height));
+    const c = document.createElement('canvas'); c.width = Math.round(img.width * k); c.height = Math.round(img.height * k);
+    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+    return c.toDataURL('image/jpeg', 0.85);
+  }
+  const arImg = (key, cls = '') => `<img src="/api/autoreply/media/${key}" alt="" class="object-cover rounded-md border bd ${cls}">`;
+  function imgPickerHtml(p, key) {
+    return `${key ? arImg(key, 'w-20 h-20') : `<div class="w-20 h-20 rounded-md border border-dashed flex items-center justify-center ink-3" style="border-color:var(--border-strong)">${ICON.image.replace('<svg', '<svg width="22" height="22"')}</div>`}
+      <div class="flex flex-col items-start gap-1.5">
+        <label class="btn btn-sm cursor-pointer">${key ? 'Ganti gambar' : 'Pilih gambar'}<input type="file" accept="image/jpeg,image/png" class="hidden" data-ar-img="${p}"></label>
+        ${key ? `<button type="button" class="btn btn-sm btn-ghost btn-danger" data-ar-img-del="${p}">Hapus gambar</button>` : '<span class="text-[11px] ink-3">JPEG/PNG, diperkecil otomatis</span>'}
+      </div>`;
+  }
+  function replyExtrasHtml(p, src) {
+    return `<div class="grid sm:grid-cols-[auto_1fr] gap-4 rounded-md surface-2 p-3">
+        <div><div class="label">Gambar <span class="ink-3 font-normal">(opsional)</span></div><div class="flex items-center gap-3" id="${p}-img">${imgPickerHtml(p, src.image)}</div></div>
+        <div class="min-w-0"><div class="label">Tombol balasan <span class="ink-3 font-normal">(opsional, maks. 3 · 20 karakter)</span></div>
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">${[0, 1, 2].map((i) => `<input class="input" maxlength="20" data-ar-btn="${p}" value="${esc(src.buttons?.[i] || '')}" placeholder="Tombol ${i + 1}" aria-label="Tombol ${i + 1}">`).join('')}</div>
+          <p class="hint">Bila memakai gambar atau tombol, teks maksimal 1024 karakter. Tombol yang ditekan pelanggan masuk sebagai pesan, jadi bisa memicu aturan lain (mis. aturan <i>Sama persis</i>: "Lihat harga").</p></div>
+      </div>`;
+  }
+  const readButtons = (p, root = document) => $$(`[data-ar-btn="${p}"]`, root).map((x) => x.value.trim()).filter(Boolean);
+  async function uploadArImage(file) {
+    if (!file) return null;
+    const r = await api('POST', '/api/autoreply/media', { dataUrl: await resizeMedia(file) });
+    return r.key;
+  }
+  async function viewAutoReply() {
+    const v = $('#view');
+    try { S.ar = await api('GET', '/api/autoreply'); } catch (e) { v.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+    if (S.view !== 'autoreply') return;
+    S.arDirty = false;
+    renderAutoReply();
+  }
+  function renderAutoReply() {
+    const a = S.ar, v = $('#view');
+    const tzOpts = [...new Set([a.timezone, ...TZ_LIST])];
+    const iconBtn = (attr, icon, label, extra = '') => `<button type="button" class="btn btn-ghost btn-icon btn-sm ${extra}" ${attr} title="${label}" aria-label="${label}">${icon}</button>`;
+    v.innerHTML = `<div id="ar-root">
+    <div id="ar-savebar" class="${S.arDirty ? '' : 'hidden'} sticky top-0 z-20 px-4 md:px-6 pt-3">
+      <div class="max-w-4xl mx-auto surface border bd rounded-lg shadow-lg px-4 py-2.5 flex items-center gap-3">
+        <span class="w-2 h-2 rounded-full flex-none" style="background:var(--warn)"></span>
+        <span class="text-[13px] font-medium flex-1 min-w-0 truncate">Perubahan belum disimpan</span>
+        <button class="btn btn-ghost btn-sm" id="ar-reset">Batalkan</button><button class="btn btn-primary btn-sm" id="ar-save">Simpan</button>
+      </div>
+    </div>
+    <div class="p-4 md:p-6 max-w-4xl mx-auto space-y-4">
+
+      <section class="card p-4">
+        <div class="flex items-center gap-3">
+          <span class="inline-flex w-9 h-9 rounded-lg items-center justify-center flex-none ${a.enabled ? 'badge-green' : 'surface-2'}" style="border-radius:.5rem">${ICON.bolt.replace('<svg', '<svg width="18" height="18"')}</span>
+          <div class="flex-1 min-w-0">
+            <div class="flex items-center gap-2"><span class="font-semibold">Auto reply</span>${a.enabled ? '<span class="badge badge-green">Aktif</span>' : '<span class="badge">Nonaktif</span>'}</div>
+            <div class="text-xs ink-3 mt-0.5">Membalas pesan masuk 24 jam, walau tidak ada CS yang membuka Kontaq.</div>
+          </div>
+          ${sw('ar-enabled', a.enabled, 'Aktifkan auto reply')}
+        </div>
+        <div class="grid grid-cols-3 gap-2 mt-4">
+          <div class="surface-2 rounded-md px-3 py-2"><div class="text-[11px] ink-3">Terkirim</div><div class="font-semibold mt-0.5">${fmtNum(a.sent)}</div></div>
+          <div class="surface-2 rounded-md px-3 py-2"><div class="text-[11px] ink-3">Waktu sekarang</div><div class="font-semibold mt-0.5 leading-tight">${esc(AR_DAYS[a.now.day])} ${esc(a.now.time)}</div></div>
+          <div class="surface-2 rounded-md px-3 py-2"><div class="text-[11px] ink-3">Status</div><div class="font-semibold mt-0.5 leading-tight ${a.now.open ? 'accent-ink' : ''}">${a.now.open ? 'Jam kerja' : 'Di luar jam kerja'}</div></div>
+        </div>
+        <div class="text-[11px] ink-3 mt-3">Urutan pengecekan: <b class="ink-2">kata kunci</b> → <b class="ink-2">di luar jam kerja</b> → <b class="ink-2">sambutan</b>. Satu pesan masuk dibalas paling banyak sekali.</div>
+        ${a.lastError ? `<div class="mt-3 rounded-md px-3 py-2 text-xs" style="background:var(--danger-soft);color:var(--danger)">Gagal terakhir ${esc(fmtDT(a.lastError.at))}: ${esc(a.lastError.message)}</div>` : ''}
+      </section>
+
+      <section class="card">
+        <div class="card-h"><div class="min-w-0"><div class="card-t">Balasan kata kunci</div><div class="text-[11px] ink-3">Dicek dari atas ke bawah. Aturan pertama yang cocok akan membalas.</div></div>
+          <button class="btn btn-sm btn-primary flex-none" id="ar-add">${ICON.plus} Aturan</button></div>
+        <div>${a.rules.map((x, i) => `<div class="px-4 py-3 border-b bd last:border-0 flex gap-3 ${x.enabled ? '' : 'opacity-60'}">
+            <div class="pt-0.5">${sw('ar-rule-on-' + i, x.enabled, 'Aktifkan aturan ' + x.name)}</div>
+            <div class="min-w-0 flex-1">
+              <div class="flex items-start gap-2">
+                <div class="min-w-0 flex-1"><div class="font-medium truncate">${esc(x.name)}</div>
+                  <div class="text-[11px] ink-3 mt-0.5">${esc(AR_MATCH[x.match])} · ${fmtNum(x.hits || 0)}× membalas${x.lastHitAt ? ' · ' + esc(fmtDT(x.lastHitAt)) : ''}</div></div>
+                <div class="flex items-center -mr-1.5 -mt-1 flex-none">
+                  ${iconBtn(`data-ar-up="${i}" ${i === 0 ? 'disabled' : ''}`, ICON.up, 'Naikkan')}
+                  ${iconBtn(`data-ar-down="${i}" ${i === a.rules.length - 1 ? 'disabled' : ''}`, ICON.down, 'Turunkan')}
+                  ${iconBtn(`data-ar-edit="${i}"`, ICON.edit, 'Ubah')}
+                  ${iconBtn(`data-ar-del="${i}"`, ICON.trash, 'Hapus', 'btn-danger')}
+                </div>
+              </div>
+              <div class="flex flex-wrap gap-1 mt-2">${x.keywords.map((k) => `<span class="badge">${esc(k)}</span>`).join('')}</div>
+              <div class="mt-2 surface-2 rounded-md px-2.5 py-2 flex gap-2.5">
+                ${x.image ? arImg(x.image, 'w-11 h-11 flex-none') : ''}
+                <div class="min-w-0 flex-1"><div class="text-xs ink-2 line-clamp-2 whitespace-pre-line">${x.reply ? esc(x.reply) : '<span class="ink-3">(gambar tanpa teks)</span>'}</div>
+                  ${(x.buttons || []).length ? `<div class="flex flex-wrap gap-1 mt-1.5">${x.buttons.map((t) => `<span class="badge" style="color:var(--info)">${esc(t)}</span>`).join('')}</div>` : ''}</div>
+              </div>
+            </div>
+          </div>`).join('') || '<div class="empty">Belum ada aturan.<br><span class="text-xs">Contoh kata kunci: <span class="kbd">harga</span> <span class="kbd">jam buka</span> <span class="kbd">alamat</span></span></div>'}</div>
+      </section>
+
+      <section class="card">
+        <div class="card-h"><div class="min-w-0"><div class="card-t">Di luar jam kerja</div><div class="text-[11px] ink-3">Dikirim bila pesan masuk di luar jadwal berikut.</div></div>${sw('ar-away-on', a.away.enabled, 'Aktifkan pesan di luar jam kerja')}</div>
+        <div class="p-4 space-y-4">
+          <div><label class="label" for="ar-away-text">Pesan</label><textarea class="textarea" id="ar-away-text" rows="3" maxlength="4096">${esc(a.away.text)}</textarea>
+            <p class="hint">Variabel: <span class="kbd">{{name}}</span> <span class="kbd">{{phone}}</span></p></div>
+          ${replyExtrasHtml('away', a.away)}
+          <div>
+            <div class="flex flex-wrap items-end justify-between gap-3 mb-2">
+              <div class="label mb-0">Jam kerja</div>
+              <label class="flex items-center gap-2 text-xs ink-2">Zona waktu
+                <select class="select h-8 text-xs w-44" id="ar-tz">${tzOpts.map((t) => `<option ${t === a.timezone ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></label>
+            </div>
+            <div class="rounded-md border bd divide-y" id="ar-hours" style="border-color:var(--border)">${a.away.hours.map((h) => `<div class="flex flex-wrap items-center gap-x-3 gap-y-2 px-3 py-2 min-h-[3rem] border-b bd last:border-0">
+                <label class="flex items-center gap-2 w-24 flex-none text-[13px]"><input type="checkbox" class="check" data-h-on="${h.day}" ${h.enabled ? 'checked' : ''}>${AR_DAYS[h.day]}</label>
+                <div class="flex items-center gap-2 max-[420px]:w-full max-[420px]:pl-6 ${h.enabled ? '' : 'hidden'}" data-h-times="${h.day}">
+                  <input class="input h-8 text-xs w-[6.5rem]" type="time" data-h-open="${h.day}" value="${h.open}" aria-label="Jam buka ${AR_DAYS[h.day]}"><span class="ink-3 text-xs">s.d.</span>
+                  <input class="input h-8 text-xs w-[6.5rem]" type="time" data-h-close="${h.day}" value="${h.close}" aria-label="Jam tutup ${AR_DAYS[h.day]}"></div>
+                <span class="text-xs ink-3 ${h.enabled ? 'hidden' : ''}" data-h-closed="${h.day}">Tutup</span>
+              </div>`).join('')}</div>
+          </div>
+          <div class="max-w-xs"><label class="label" for="ar-away-cd">Kirim ulang ke pelanggan yang sama setelah (jam)</label><input class="input" type="number" min="0" max="168" id="ar-away-cd" value="${a.away.cooldownHours}"></div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-h"><div class="min-w-0"><div class="card-t">Pesan sambutan</div><div class="text-[11px] ink-3">Untuk pelanggan baru, atau yang lama tidak menghubungi.</div></div>${sw('ar-wel-on', a.welcome.enabled, 'Aktifkan pesan sambutan')}</div>
+        <div class="p-4 space-y-4">
+          <div><label class="label" for="ar-wel-text">Pesan</label><textarea class="textarea" id="ar-wel-text" rows="3" maxlength="4096">${esc(a.welcome.text)}</textarea></div>
+          ${replyExtrasHtml('wel', a.welcome)}
+          <div class="max-w-xs"><label class="label" for="ar-wel-days">Dianggap pelanggan baru bila tidak aktif selama (hari)</label><input class="input" type="number" min="1" max="365" id="ar-wel-days" value="${a.welcome.inactiveDays}"></div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-h"><div class="card-t">Pengaman</div></div>
+        <div class="divide-y">
+          <div class="p-4 flex flex-col sm:flex-row sm:items-center gap-3 border-b bd">
+            <div class="flex-1 min-w-0"><label class="font-medium text-[13px]" for="ar-pause">Jeda saat CS aktif</label><div class="text-xs ink-3 mt-0.5">Bot tidak membalas bila CS sudah membalas manual dalam waktu ini. 0 = selalu membalas.</div></div>
+            <div class="flex items-center gap-2 flex-none"><input class="input w-24 text-right" type="number" min="0" max="1440" id="ar-pause" value="${a.pauseMinutes}"><span class="text-xs ink-3 w-10">menit</span></div>
+          </div>
+          <div class="p-4 flex flex-col sm:flex-row sm:items-center gap-3">
+            <div class="flex-1 min-w-0"><label class="font-medium text-[13px]" for="ar-kwcd">Jeda kata kunci yang sama</label><div class="text-xs ink-3 mt-0.5">Aturan yang sama tidak membalas pelanggan yang sama lagi selama waktu ini.</div></div>
+            <div class="flex items-center gap-2 flex-none"><input class="input w-24 text-right" type="number" min="0" max="1440" id="ar-kwcd" value="${a.keywordCooldownMin}"><span class="text-xs ink-3 w-10">menit</span></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-h"><div class="min-w-0"><div class="card-t">Uji balasan</div><div class="text-[11px] ink-3">Memakai isian di halaman ini, termasuk yang belum disimpan. Tidak ada pesan yang dikirim.</div></div></div>
+        <div class="p-4 space-y-3">
+          <input class="input" id="ar-test-text" placeholder="Tulis contoh pesan pelanggan, mis. berapa harga paket pro?" aria-label="Contoh pesan pelanggan">
+          <div class="flex items-center justify-between gap-3"><label class="flex items-center gap-2 text-xs ink-2"><input type="checkbox" class="check" id="ar-test-new"> Anggap kontak baru</label><button class="btn" id="ar-test-go">Uji balasan</button></div>
+          <div id="ar-test-out"></div>
+        </div>
+      </section>
+    </div>
+
+    </div>`;
+    bindAutoReply();
+  }
+  // Baca seluruh form ke objek konfigurasi
+  function collectAutoReply() {
+    const a = structuredClone(S.ar);
+    a.enabled = $('#ar-enabled').checked;
+    a.away.enabled = $('#ar-away-on').checked; a.away.text = $('#ar-away-text').value; a.away.cooldownHours = Number($('#ar-away-cd').value);
+    a.timezone = $('#ar-tz').value.trim();
+    a.away.hours = AR_DAYS.map((_, day) => ({ day, enabled: $(`[data-h-on="${day}"]`).checked, open: $(`[data-h-open="${day}"]`).value, close: $(`[data-h-close="${day}"]`).value }));
+    a.away.buttons = readButtons('away'); a.welcome.buttons = readButtons('wel');
+    a.welcome.enabled = $('#ar-wel-on').checked; a.welcome.text = $('#ar-wel-text').value; a.welcome.inactiveDays = Number($('#ar-wel-days').value);
+    a.pauseMinutes = Number($('#ar-pause').value); a.keywordCooldownMin = Number($('#ar-kwcd').value);
+    a.rules.forEach((x, i) => { x.enabled = $('#ar-rule-on-' + i).checked; });
+    return a;
+  }
+  function markDirty() {
+    S.arDirty = true;
+    $('#ar-savebar')?.classList.remove('hidden');
+  }
+  function bindAutoReply() {
+    const v = $('#ar-root');
+    v.addEventListener('input', (e) => { if (e.target.closest('#ar-test-text')) return; markDirty(); });
+    v.addEventListener('change', (e) => {
+      const sw2 = e.target.closest('.switch'); if (sw2) sw2.classList.toggle('on', e.target.checked);
+      const d = e.target.dataset.hOn; if (d !== undefined) { $(`[data-h-times="${d}"]`).classList.toggle('hidden', !e.target.checked); $(`[data-h-closed="${d}"]`).classList.toggle('hidden', e.target.checked); }
+      if (e.target.id?.startsWith('ar-rule-on-')) e.target.closest('.border-b').classList.toggle('opacity-60', !e.target.checked);
+      if (!e.target.closest('#ar-test-new')) markDirty();
+    });
+    const arTarget = (p) => (p === 'wel' ? 'welcome' : 'away');
+    v.addEventListener('change', (e) => {
+      const p = e.target.dataset.arImg; if (!p || p === 'rule') return;
+      busy(null, async () => { const key = await uploadArImage(e.target.files[0]); if (!key) return; S.ar = collectAutoReply(); S.ar[arTarget(p)].image = key; S.arDirty = true; renderAutoReply(); });
+    });
+    v.addEventListener('click', (e) => {
+      const p = e.target.closest('[data-ar-img-del]')?.dataset.arImgDel; if (!p || p === 'rule') return;
+      S.ar = collectAutoReply(); S.ar[arTarget(p)].image = null; S.arDirty = true; renderAutoReply();
+    });
+    const restructure = (fn) => { S.ar = collectAutoReply(); fn(S.ar.rules); S.arDirty = true; renderAutoReply(); };
+    $('#ar-add').addEventListener('click', () => ruleModal());
+    $$('[data-ar-edit]').forEach((b) => b.addEventListener('click', () => ruleModal(Number(b.dataset.arEdit))));
+    $$('[data-ar-del]').forEach((b) => b.addEventListener('click', async () => {
+      const i = Number(b.dataset.arDel);
+      if (await confirmBox(`Hapus aturan "${S.ar.rules[i].name}"?`, 'Hapus', true)) restructure((rules) => rules.splice(i, 1));
+    }));
+    $$('[data-ar-up]').forEach((b) => b.addEventListener('click', () => restructure((rules) => { const i = Number(b.dataset.arUp); [rules[i - 1], rules[i]] = [rules[i], rules[i - 1]]; })));
+    $$('[data-ar-down]').forEach((b) => b.addEventListener('click', () => restructure((rules) => { const i = Number(b.dataset.arDown); [rules[i + 1], rules[i]] = [rules[i], rules[i + 1]]; })));
+    $('#ar-reset').addEventListener('click', () => viewAutoReply());
+    $('#ar-save').addEventListener('click', (e) => busy(e.currentTarget, async () => {
+      S.ar = await api('PUT', '/api/autoreply', collectAutoReply()); S.arDirty = false; renderAutoReply(); toast('Auto reply disimpan.');
+    }));
+    $('#ar-test-go').addEventListener('click', (e) => busy(e.currentTarget, async () => {
+      const t = await api('POST', '/api/autoreply/test', { text: $('#ar-test-text').value, newContact: $('#ar-test-new').checked, config: collectAutoReply() });
+      $('#ar-test-out').innerHTML = t.matched
+        ? `<div class="text-xs ink-3 mb-1">Dibalas oleh: <b class="ink">${esc(t.label)}</b></div><div class="chat-bg rounded-md p-3"><div class="bubble out">${t.image ? `<img src="/api/autoreply/media/${t.image}" alt="" class="mb-1">` : ''}${t.reply ? waFormat(t.reply) : ''}${t.buttons.map((b) => `<span class="ib-btn">${esc(b)}</span>`).join('')}<div class="meta"><span>⚡ Auto reply</span></div></div></div>`
+        : `<div class="text-xs ink-3">Tidak ada balasan otomatis: ${esc(t.skip)}</div>`;
+    }));
+    $('#ar-test-text').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#ar-test-go').click(); });
+  }
+  function ruleModal(i) {
+    const x = i === undefined ? { name: '', match: 'contains', keywords: [], reply: '', image: null, buttons: [], enabled: true } : S.ar.rules[i];
+    S.ruleDraftImage = x.image || null;
+    modal(i === undefined ? 'Aturan kata kunci baru' : 'Ubah aturan', `<form id="f-rule" class="space-y-3">
+      <div><label class="label">Nama aturan</label><input class="input" name="name" value="${esc(x.name)}" maxlength="80" placeholder="Info harga"></div>
+      <div class="grid sm:grid-cols-[11rem_1fr] gap-3">
+        <div><label class="label">Cocok bila pesan</label><select class="select" name="match">${Object.entries(AR_MATCH).map(([k, l]) => `<option value="${k}" ${x.match === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+        <div><label class="label">Kata kunci (pisahkan dengan koma)</label><input class="input" name="keywords" value="${esc(x.keywords.join(', '))}" required placeholder="harga, price list, berapa"></div>
+      </div>
+      <p class="hint -mt-1">"Mengandung kata" mencocokkan kata utuh tanpa membedakan huruf besar/kecil: <span class="kbd">harga</span> cocok dengan "Berapa harga paket?" tetapi tidak dengan "hargai".</p>
+      <div><label class="label">Teks balasan</label><textarea class="textarea" name="reply" rows="4" maxlength="4096" placeholder="Halo {{name}}, berikut daftar harga kami: …">${esc(x.reply)}</textarea><p class="hint">Variabel: <span class="kbd">{{name}}</span> <span class="kbd">{{phone}}</span>. Format WhatsApp: *tebal* _miring_. Boleh kosong bila hanya mengirim gambar.</p></div>
+      ${replyExtrasHtml('rule', x)}
+    </form>`, { wide: true, footer: '<button class="btn" data-act="modal-close">Batal</button><button class="btn btn-primary" id="rule-ok">Terapkan</button>' });
+    const f = $('#f-rule');
+    const drawImg = () => { $('#rule-img').innerHTML = imgPickerHtml('rule', S.ruleDraftImage); };
+    f.addEventListener('change', (e) => { if (e.target.dataset.arImg === 'rule') busy(null, async () => { const key = await uploadArImage(e.target.files[0]); if (key) { S.ruleDraftImage = key; drawImg(); } }); });
+    f.addEventListener('click', (e) => { if (e.target.closest('[data-ar-img-del="rule"]')) { S.ruleDraftImage = null; drawImg(); } });
+    $('#rule-ok').addEventListener('click', () => {
+      if (!f.reportValidity()) return;
+      const d = formData(f), buttons = readButtons('rule', f), image = S.ruleDraftImage, reply = d.reply.trim();
+      if (!reply && !image) return fail(new Error('Isi teks balasan atau pilih gambar.'));
+      if (buttons.length && !reply) return fail(new Error('Teks balasan wajib diisi bila memakai tombol.'));
+      if ((image || buttons.length) && reply.length > 1024) return fail(new Error(`Teks maksimal 1024 karakter bila memakai gambar atau tombol (sekarang ${reply.length}).`));
+      if (new Set(buttons.map((t) => t.toLowerCase())).size !== buttons.length) return fail(new Error('Teks tombol harus berbeda satu sama lain.'));
+      S.ar = collectAutoReply();
+      const rule = { ...x, name: d.name.trim() || 'Aturan', match: d.match, keywords: d.keywords.split(',').map((k) => k.trim()).filter(Boolean), reply, image, buttons };
+      if (i === undefined) S.ar.rules.push(rule); else S.ar.rules[i] = rule;
+      S.arDirty = true; closeModal(); renderAutoReply(); toast('Aturan diterapkan — klik Simpan.');
+    });
+  }
+
+  /* ───────────── Panggilan (Calling API) ───────────── */
+  async function viewCalls() {
+    const v = $('#view');
+    v.innerHTML = `<div class="p-4 md:p-6 max-w-7xl space-y-4">
+      <section class="card"><div class="card-h"><div class="card-t">WhatsApp Business Calling API</div><span id="cl-status" class="text-xs ink-3">Memeriksa…</span></div>
+        <div class="p-4 text-xs ink-2 space-y-2" id="cl-body">
+          <p>Panggilan suara memakai Calling API resmi Meta (WebRTC). Persyaratan: nomor terdaftar di Cloud API, fitur Calling tersedia untuk akun & negara Anda, webhook field <span class="kbd">calls</span> disubscribe, dan browser agen mengizinkan mikrofon via HTTPS.</p>
+          <p>Kontaq mendukung <b>menerima panggilan</b> dari pelanggan (angkat, tolak, akhiri) dan <b>telepon balik</b> ke pelanggan yang sudah memberi izin.</p>
+        </div></section>
+      <section class="card"><div class="card-h"><div class="card-t">Pengaturan telepon</div></div>
+        <div class="divide-y" id="cl-settings"><div class="p-4 text-xs ink-3">Memuat pengaturan dari Meta…</div></div></section>
+      <section class="card"><div class="card-h"><div><div class="card-t">Permintaan telepon balik</div><div class="text-[11px] ink-3">Pelanggan yang mengizinkan bisnis menelepon mereka. Tekan Telepon untuk menelepon balik dari browser ini.</div></div></div>
+        <div id="cl-callbacks"><div class="p-4 text-xs ink-3">Memuat…</div></div></section>
+      <section class="card overflow-x-auto"><div class="card-h"><div class="card-t">Riwayat panggilan</div></div>
+        <div id="cl-cards" class="sm:hidden"></div>
+        <table class="tbl hidden sm:table"><thead><tr><th>Waktu</th><th>Kontak</th><th>Arah</th><th>Status</th><th>Durasi</th><th>Diangkat oleh</th></tr></thead><tbody id="cl-rows"><tr><td colspan="6" class="ink-3">Memuat…</td></tr></tbody></table></section>
+    </div>`;
+    loadCallbacks();
+    api('GET', '/api/calls').then((rows) => {
+      if (S.view !== 'calls') return;
+      const dur = (c) => (c.duration ? Math.floor(c.duration / 60) + 'm ' + (c.duration % 60) + 'd' : '');
+      $('#cl-cards').innerHTML = rows.map((c) => `<div class="flex items-center gap-3 px-4 py-3 border-b bd last:border-0">
+        ${avatar({ contactId: c.contactId, avatarV: c.avatarV, name: c.contactName, phone: c.phone }, 40)}
+        <div class="min-w-0 flex-1"><div class="font-medium truncate">${esc(c.contactName || '+' + c.phone)}</div><div class="text-xs ink-3">${c.direction === 'USER_INITIATED' ? 'Masuk' : 'Keluar'} · ${fmtDT(c.startedAt)}${dur(c) ? ' · ' + dur(c) : ''}</div></div>
+        ${statusBadge(c.status)}</div>`).join('') || '<div class="empty">Belum ada panggilan.</div>';
+      $('#cl-rows').innerHTML = rows.map((c) => `<tr><td class="text-xs whitespace-nowrap">${fmtDT(c.startedAt)}</td><td>${esc(c.contactName || '—')} <span class="mono text-xs ink-3">+${esc(c.phone)}</span></td><td class="text-xs">${c.direction === 'USER_INITIATED' ? 'Masuk' : 'Keluar'}</td><td>${statusBadge(c.status)}</td><td class="text-xs">${c.duration ? Math.floor(c.duration / 60) + 'm ' + (c.duration % 60) + 'd' : '—'}</td><td class="text-xs">${esc(c.answeredName || '—')}</td></tr>`).join('') || '<tr><td colspan="6"><div class="empty">Belum ada panggilan.</div></td></tr>';
+    }).catch(fail);
+    try {
+      const r = await api('GET', '/api/calls/settings');
+      if (S.view !== 'calls') return;
+      const status = r.calling?.status || 'TIDAK TERSEDIA';
+      $('#cl-status').innerHTML = statusBadge(status);
+      renderCallSettings(r.calling);
+      if (!r.calling) $('#cl-body').insertAdjacentHTML('beforeend', '<p class="danger-ink">Meta tidak mengembalikan pengaturan calling untuk nomor ini — fitur kemungkinan belum tersedia untuk akun Anda.</p>');
+    } catch (e) {
+      if (S.view !== 'calls') return;
+      $('#cl-status').innerHTML = statusBadge('DISABLED');
+      $('#cl-body').insertAdjacentHTML('beforeend', `<p class="danger-ink">${esc(e.message)}</p>`);
+      $('#cl-settings').innerHTML = '<div class="p-4 text-xs ink-3">Pengaturan tidak dapat dibaca dari Meta.</div>';
+    }
+  }
+  // Layar panggilan: layar penuh di HP, kartu di pojok kanan bawah di desktop
+  // Baris pengaturan dengan sakelar; perubahan langsung dikirim ke Meta (POST /{phone-number-id}/settings)
+  function renderCallSettings(calling) {
+    const el = $('#cl-settings'); if (!el) return;
+    if (!calling) { el.innerHTML = '<div class="p-4 text-xs ink-3">Calling API belum tersedia untuk nomor ini.</div>'; return; }
+    const callingOn = calling.status === 'ENABLED';
+    const row = (key, title, desc, on, disabled) => `<label class="flex items-start gap-3 p-4 ${S.isAdmin && !disabled ? 'cursor-pointer' : ''}">
+        <div class="flex-1 min-w-0"><div class="font-medium">${title}</div><div class="text-xs ink-3 mt-0.5">${desc}</div></div>
+        <span class="switch ${on ? 'on' : ''}"><input type="checkbox" class="sr-only" data-setting="${key}" ${on ? 'checked' : ''} ${!S.isAdmin || disabled ? 'disabled' : ''} role="switch" aria-label="${esc(title)}"><span></span></span>
+      </label>`;
+    el.innerHTML = row('enabled', 'Aktifkan panggilan', 'Tampilkan tombol telepon WhatsApp di chat dan profil bisnis Anda.', callingOn)
+      + row('callback', 'Izinkan telepon balik', `Jika Anda tidak bisa menjawab telepon, izinkan orang meminta ditelepon balik. WhatsApp akan meminta izin kepada pelanggan setelah mereka menelepon. <a class="accent-ink underline" target="_blank" rel="noopener noreferrer" href="https://developers.facebook.com/documentation/business-messaging/whatsapp/calling/call-settings">Pelajari selengkapnya tentang telepon balik</a>${callingOn ? '' : '<br><span class="text-[11px]">Aktifkan panggilan terlebih dahulu.</span>'}`, calling.callback_permission_status === 'ENABLED', !callingOn)
+      + (S.isAdmin ? '' : '<p class="px-4 pb-3 text-[11px] ink-3">Hanya admin yang dapat mengubah pengaturan ini.</p>');
+    $$('[data-setting]', el).forEach((inp) => inp.addEventListener('change', async () => {
+      const key = inp.dataset.setting, val = inp.checked;
+      inp.closest('.switch').classList.toggle('on', val); inp.disabled = true;
+      try {
+        await api('POST', '/api/calls/settings', { [key]: val });
+        toast(key === 'callback' ? (val ? 'Telepon balik diizinkan.' : 'Telepon balik dinonaktifkan.') : (val ? 'Panggilan diaktifkan.' : 'Panggilan dinonaktifkan.'));
+        // Muat ulang dari Meta agar tampilan sesuai status sebenarnya
+        const r = await api('GET', '/api/calls/settings'); if (S.view === 'calls') { renderCallSettings(r.calling); $('#cl-status').innerHTML = statusBadge(r.calling?.status || 'DISABLED'); }
+      } catch (e) { fail(e); inp.checked = !val; inp.closest('.switch').classList.toggle('on', !val); inp.disabled = false; }
+    }));
+  }
+  async function loadCallbacks() {
+    const rows = await api('GET', '/api/calls/callbacks').catch(() => []);
+    const el = $('#cl-callbacks'); if (!el || S.view !== 'calls') return;
+    el.innerHTML = rows.map((c) => `<div class="flex items-center gap-3 px-4 py-3 border-b bd last:border-0">
+        ${avatar({ contactId: c.contactId, avatarV: c.avatarV, name: c.name, phone: c.phone }, 36)}
+        <div class="min-w-0 flex-1"><div class="font-medium truncate">${esc(c.name || '+' + c.phone)}</div>
+          <div class="text-xs ink-3">Diizinkan ${fmtDT(c.at)} · ${c.permanent ? 'permanen' : c.expiresAt ? 'berlaku sampai ' + fmtDT(c.expiresAt) : 'tanpa batas waktu'}</div></div>
+        <button class="btn btn-sm btn-accent" data-act="callback" data-contact="${c.contactId}" data-name="${esc(c.name)}" data-phone="${esc(c.phone)}" aria-label="Telepon ${esc(c.name || c.phone)}">${ICON.phone} Telepon</button>
+        ${c.conversationId ? `<a class="btn btn-sm" href="#/inbox/${c.conversationId}">Chat</a>` : ''}
+      </div>`).join('') || '<div class="empty">Belum ada pelanggan yang meminta ditelepon balik.</div>';
+  }
+  function renderCallBar() {
+    const bar = $('#call-bar'), c = S.call;
+    if (!c) { bar.classList.add('hidden'); bar.classList.remove('call-min'); document.body.classList.remove('call-min-on'); bar.innerHTML = ''; return; }
+    bar.classList.remove('hidden');
+    bar.classList.toggle('call-min', !!S.callMin); document.body.classList.toggle('call-min-on', !!S.callMin);
+    const active = c.status === 'accepted' && S.pc && S.callStart;
+    const outgoing = c.direction === 'BUSINESS_INITIATED';
+    const outState = { connecting: 'Menghubungkan…', calling: 'Memanggil…', ringing: 'Berdering di HP pelanggan…', accepted: 'Tersambung, menyiapkan audio…' }[c.status] || 'Memanggil…';
+    const name = c.contactName || '+' + c.phone;
+    const btn = (id, cls, icon, label, disabled) => `<div class="flex flex-col items-center"><button class="call-btn ${cls}" id="${id}" aria-label="${label}" ${disabled ? 'disabled' : ''}>${icon}</button><div class="call-label">${label}</div></div>`;
+    const who = { contactId: c.contactId, avatarV: c.avatarV ?? S.callProfile?.contact.avatarV, name: c.contactName, phone: c.phone };
+    const stateText = active ? fmtDur(S.callStart) : outgoing ? outState : (c.offer ? 'Berdering…' : 'Berdering — buka di perangkat yang menerima panggilan');
+    if (S.callMin) {
+      // Bar kecil: tetap bisa membaca/membalas chat selama panggilan
+      bar.innerHTML = `${avatar(who, 36)}
+        <button class="min-w-0 flex-1 text-left" id="call-expand" aria-label="Tampilkan layar panggilan"><div class="font-medium truncate">${esc(name)}</div><div class="text-[11px] ${active ? 'accent-ink' : 'ink-3'}" id="call-state">${esc(stateText)}</div></button>
+        ${!active && !outgoing && c.offer ? `<button class="call-btn accept" style="width:2.5rem;height:2.5rem" id="call-ok" aria-label="Angkat">${ICON.phone}</button>` : ''}
+        <button class="call-btn reject" style="width:2.5rem;height:2.5rem" id="${active || outgoing ? 'call-end' : 'call-no'}" aria-label="${active ? 'Akhiri' : outgoing ? 'Batalkan' : 'Tolak'}">${ICON.phone}</button>`;
+      $('#call-expand').addEventListener('click', () => { S.callMin = false; renderCallBar(); });
+      bindCallButtons(c);
+      return;
+    }
+    bar.innerHTML = `<div class="flex-1 flex flex-col items-center justify-center text-center px-6 py-6 md:py-5 relative">
+        <button class="btn btn-ghost btn-icon absolute top-2 right-2" id="call-shrink" title="Perkecil" aria-label="Perkecil layar panggilan">${ICON.back.replace('m15 18-6-6 6-6', 'm6 9 6 6 6-6')}</button>
+        <div class="text-xs ink-3 mb-4 md:mb-3">${active ? 'Panggilan WhatsApp' : outgoing ? 'Telepon balik' : 'Panggilan WhatsApp masuk'}</div>
+        ${avatar(who, 88, active ? '' : 'ring-pulse')}
+        <div class="text-xl font-semibold tracking-tight mt-4 md:mt-3 max-w-full truncate">${esc(name)}</div>
+        <div class="text-sm ink-3 mt-1 mono">${c.contactName ? '+' + esc(c.phone) : ''}</div>
+        <div class="text-sm mt-2 ${active ? 'accent-ink' : 'ink-2'}" id="call-state">${esc(stateText)}</div>
+        <div id="call-profile" class="mt-5 md:mt-4 w-full max-w-xs text-left"></div>
+      </div>
+      <div class="flex items-start justify-center gap-10 md:gap-8 px-6 pb-10 md:pb-5">
+        ${active
+          ? btn('call-mute', S.muted ? 'muted' : 'neutral', S.muted ? ICON.micOff : ICON.mic, S.muted ? 'Bisukan aktif' : 'Bisukan') + btn('call-end', 'reject', ICON.phone, 'Akhiri')
+          : outgoing ? btn('call-end', 'reject', ICON.phone, 'Batalkan', !c.id)
+          : btn('call-no', 'reject', ICON.phone, 'Tolak') + (c.offer ? btn('call-ok', 'accept ring-pulse', ICON.phone, 'Angkat') : '')}
+      </div>`;
+    $('#call-shrink').addEventListener('click', () => { S.callMin = true; renderCallBar(); });
+    bindCallButtons(c);
+    renderCallProfile(c);
+  }
+  function bindCallButtons(c) {
+    $('#call-ok')?.addEventListener('click', (e) => { stopRinging(); busy(e.currentTarget, answerCall); });
+    $('#call-no')?.addEventListener('click', (e) => busy(e.currentTarget, async () => { stopRinging(); await api('POST', `/api/calls/${c.id}/reject`); endCallLocal(); }));
+    $('#call-end')?.addEventListener('click', (e) => busy(e.currentTarget, async () => { if (c.id) await api('POST', `/api/calls/${c.id}/terminate`).catch(fail); endCallLocal(); }));
+    $('#call-mute')?.addEventListener('click', () => { S.muted = !S.muted; S.stream?.getAudioTracks().forEach((t) => { t.enabled = !S.muted; }); renderCallBar(); });
+  }
+  // Kartu profil di layar panggilan: label, catatan, riwayat singkat, dan pintasan ke chat
+  async function renderCallProfile(c) {
+    if (!c.contactId) return;
+    let p = S.callProfile?.contact.id === c.contactId ? S.callProfile : null;
+    if (!p) {
+      try { p = S.callProfile = await getProfile(c.contactId, true); } catch (e) { return; }
+      if (S.call?.contactId !== c.contactId) return;
+      if (!S.call.avatarV && p.contact.avatarV) return renderCallBar();
+    }
+    const el = $('#call-profile'); if (!el) return;
+    const k = p.contact, s = p.stats;
+    el.innerHTML = `<div class="card p-3 space-y-2 text-xs">
+        ${(k.labels || []).length ? `<div class="flex flex-wrap gap-1">${k.labels.map((l) => `<span class="badge">${esc(l)}</span>`).join('')}</div>` : ''}
+        ${k.notes ? `<div class="ink-2 line-clamp-2" title="${esc(k.notes)}">${esc(k.notes)}</div>` : ''}
+        ${p.conversation?.preview ? `<div class="ink-3 truncate">Pesan terakhir: ${esc(p.conversation.preview)}</div>` : ''}
+        <div class="grid grid-cols-3 gap-2 text-center pt-1">
+          <div><div class="font-semibold text-sm">${fmtNum(s.messagesIn + s.messagesOut)}</div><div class="ink-3 text-[10px]">pesan</div></div>
+          <div><div class="font-semibold text-sm">${fmtNum(s.calls)}</div><div class="ink-3 text-[10px]">panggilan</div></div>
+          <div><div class="font-semibold text-sm">${esc(new Date(s.since).toLocaleDateString('id-ID', { month: 'short', year: 'numeric' }))}</div><div class="ink-3 text-[10px]">pelanggan sejak</div></div>
+        </div>
+        ${p.conversation ? `<div class="flex items-center justify-between gap-2 pt-1 border-t bd"><span class="ink-3 truncate pt-2">${esc(p.conversation.assignedName || 'Belum ditugaskan')}</span><button class="btn btn-sm mt-2" id="call-open-chat">${ICON.inbox} Buka chat</button></div>` : ''}
+      </div>`;
+    $('#call-open-chat')?.addEventListener('click', () => { S.callMin = true; renderCallBar(); location.hash = '#/inbox/' + p.conversation.id; });
+  }
+  const fmtDur = (start) => { const s = Math.max(0, Math.floor((Date.now() - start) / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
+  function showIncomingCall(c) {
+    if (S.call) return;
+    S.call = c; renderCallBar(); startRinging();
+    notifyBrowser('Panggilan WhatsApp masuk', c.contactName || '+' + c.phone);
+  }
+  // Preferensi per perangkat (disimpan di browser ini saja)
+  const PREF_DEFAULT = { sound: true, soundOpen: false, typingCustomer: true };
+  function pref(k) { try { const v = localStorage.getItem('kq-' + k); return v === null ? PREF_DEFAULT[k] : v === '1'; } catch (e) { return PREF_DEFAULT[k]; } }
+  function setPref(k, val) { try { localStorage.setItem('kq-' + k, val ? '1' : '0'); } catch (e) {} }
+  function renderSoundBtn() { const b = $('#sound-btn'); if (b) { b.innerHTML = pref('sound') ? ICON.bell : ICON.bellOff; b.title = pref('sound') ? 'Suara notifikasi: aktif' : 'Suara notifikasi: mati'; } }
+  // Browser memblokir audio sampai ada sentuhan/klik pertama: buka kunci AudioContext saat itu
+  function audioCtx() {
+    if (!S.audio) { try { S.audio = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { return null; } }
+    if (S.audio.state === 'suspended') S.audio.resume().catch(() => {});
+    return S.audio;
+  }
+  ['pointerdown', 'keydown'].forEach((ev) => document.addEventListener(ev, function unlock() { audioCtx(); document.removeEventListener(ev, unlock); }, { once: true }));
+  function tone(ctx, freq, at, dur, vol) {
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = 'sine'; o.frequency.value = freq; o.connect(g); g.connect(ctx.destination);
+    g.gain.setValueAtTime(0.0001, ctx.currentTime + at);
+    g.gain.exponentialRampToValueAtTime(vol, ctx.currentTime + at + 0.015);
+    g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + at + dur);
+    o.start(ctx.currentTime + at); o.stop(ctx.currentTime + at + dur + 0.05);
+  }
+  // Bunyi "ding-dong" pendek untuk chat masuk; dibatasi agar rentetan pesan tidak berisik
+  function playChime(force) {
+    if (!force && (!pref('sound') || S.call || Date.now() - (S.lastChime || 0) < 1500)) return;
+    S.lastChime = Date.now();
+    const ctx = audioCtx(); if (!ctx) return;
+    tone(ctx, 880, 0, 0.18, 0.22); tone(ctx, 1318.5, 0.12, 0.32, 0.18);
+    navigator.vibrate?.([80, 60, 80]);
+  }
+  // Nada dering & getar (dibuat dengan WebAudio, tanpa file audio)
+  function startRinging() {
+    stopRinging();
+    try {
+      const ctx = audioCtx(); if (!ctx) throw new Error('no audio');
+      const ring = () => {
+        [0, 0.45].forEach((t) => {
+          const o = ctx.createOscillator(), g = ctx.createGain();
+          o.frequency.value = 440; o.connect(g); g.connect(ctx.destination);
+          g.gain.setValueAtTime(0.0001, ctx.currentTime + t); g.gain.exponentialRampToValueAtTime(0.25, ctx.currentTime + t + 0.03);
+          g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + t + 0.35);
+          o.start(ctx.currentTime + t); o.stop(ctx.currentTime + t + 0.4);
+        });
+      };
+      ring(); S.ringTimer = setInterval(ring, 2500);
+    } catch (e) { /* audio diblokir browser sampai ada interaksi */ }
+    navigator.vibrate?.([600, 300, 600, 300, 600, 300, 600, 300, 600]);
+  }
+  function stopRinging() { clearInterval(S.ringTimer); S.ringTimer = null; navigator.vibrate?.(0); }
+  async function answerCall() {
+    const c = S.call;
+    if (!navigator.mediaDevices?.getUserMedia) throw new Error('Browser tidak mengizinkan mikrofon. Buka Kontaq lewat HTTPS.');
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+    const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+    S.pc = pc; S.stream = stream; S.muted = false;
+    stream.getTracks().forEach((t) => pc.addTrack(t, stream));
+    pc.ontrack = (e) => { const a = $('#call-audio'); a.srcObject = e.streams[0]; a.play?.().catch(() => {}); };
+    pc.onconnectionstatechange = () => { if (['failed', 'closed'].includes(pc.connectionState)) endCallLocal(); };
+    await pc.setRemoteDescription({ type: 'offer', sdp: c.offer });
+    await pc.setLocalDescription(await pc.createAnswer());
+    await new Promise((res) => { if (pc.iceGatheringState === 'complete') return res(); const t = setTimeout(res, 3000); pc.onicegatheringstatechange = () => { if (pc.iceGatheringState === 'complete') { clearTimeout(t); res(); } }; });
+    try { S.call = { ...(await api('POST', `/api/calls/${c.id}/accept`, { sdp: pc.localDescription.sdp })), offer: null }; }
+    catch (e) { endCallLocal(); throw e; }
+    S.callStart = Date.now();
+    S.callTimer = setInterval(() => { const el = $('#call-state'); if (el) el.textContent = fmtDur(S.callStart); }, 1000);
+    // Jaga layar tetap menyala selama panggilan
+    try { S.wakeLock = await navigator.wakeLock?.request('screen'); } catch (e) {}
+    renderCallBar();
+  }
+  // Pelanggan belum memberi izin: tawarkan kirim pesan permintaan izin telepon
+  function callPermissionModal(conv) {
+    const k = conv.contact, name = esc(contactName(k));
+    const p = k.callPermission;
+    const status = p?.status === 'reject' ? `${name} sebelumnya <b>menolak</b> ditelepon.` : p?.status === 'accept' ? `Izin telepon dari ${name} sudah <b>kedaluwarsa</b>.` : `${name} belum memberi izin untuk ditelepon.`;
+    if (!conv.windowOpen) {
+      return modal('Minta izin telepon', `<p class="ink-2">${status}</p><p class="ink-2 mt-2">Permintaan izin hanya bisa dikirim dalam jendela layanan 24 jam. Tunggu pelanggan mengirim pesan, lalu coba lagi.</p>`,
+        { footer: '<button class="btn btn-primary" data-act="modal-close">Mengerti</button>' });
+    }
+    modal('Minta izin telepon', `<form id="f-cperm" class="space-y-3">
+        <p class="ink-2">${status} WhatsApp mewajibkan izin dari pelanggan sebelum bisnis bisa menelepon. Kirim permintaan izin; setelah pelanggan menekan <b>Izinkan</b>, tombol telepon akan aktif.</p>
+        <div><label class="label">Pesan</label><textarea class="textarea" name="body" rows="3" maxlength="1024">Boleh kami menelepon Anda melalui WhatsApp untuk membantu lebih lanjut?</textarea></div>
+      </form>`, { footer: '<button class="btn" data-act="modal-close">Batal</button><button class="btn btn-primary" id="cperm-go">Kirim permintaan</button>' });
+    $('#cperm-go').addEventListener('click', (e) => busy(e.currentTarget, async () => {
+      await sendMsg({ type: 'call_permission_request', body: $('#f-cperm').body.value });
+      closeModal(); toast('Permintaan izin telepon terkirim.');
+    }));
+  }
+  async function startCallback(contact) {
+    if (S.call) return toast('Masih ada panggilan yang berlangsung.', true);
+    if (!navigator.mediaDevices?.getUserMedia) return fail(new Error('Browser tidak mengizinkan mikrofon. Buka Kontaq lewat HTTPS.'));
+    S.call = { id: null, direction: 'BUSINESS_INITIATED', status: 'connecting', contactId: contact.id, contactName: contact.name, phone: contact.phone };
+    renderCallBar();
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+      const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+      S.pc = pc; S.stream = stream; S.muted = false;
+      stream.getTracks().forEach((t) => pc.addTrack(t, stream));
+      pc.ontrack = (e) => { const a = $('#call-audio'); a.srcObject = e.streams[0]; a.play?.().catch(() => {}); };
+      pc.onconnectionstatechange = () => { if (['failed', 'closed'].includes(pc.connectionState)) endCallLocal(); };
+      await pc.setLocalDescription(await pc.createOffer({ offerToReceiveAudio: true }));
+      await new Promise((res) => { if (pc.iceGatheringState === 'complete') return res(); const t = setTimeout(res, 3000); pc.onicegatheringstatechange = () => { if (pc.iceGatheringState === 'complete') { clearTimeout(t); res(); } }; });
+      if (!S.call) return; // dibatalkan saat menyiapkan
+      const call = await api('POST', '/api/calls/outbound', { contactId: contact.id, sdp: pc.localDescription.sdp });
+      S.call = { ...call, contactName: call.contactName || contact.name };
+      try { S.wakeLock = await navigator.wakeLock?.request('screen'); } catch (e) {}
+      renderCallBar();
+      // Jawaban bisa tiba sebelum respons POST
+      if (S.pendingAnswer?.id === call.id) applyAnswer(S.pendingAnswer);
+    } catch (e) { endCallLocal(); fail(e); }
+  }
+  async function applyAnswer({ id, sdp }) {
+    if (!S.pc || S.call?.id !== id) { S.pendingAnswer = { id, sdp }; return; }
+    S.pendingAnswer = null;
+    try { await S.pc.setRemoteDescription({ type: 'answer', sdp }); }
+    catch (e) { fail(new Error('Gagal menyambungkan audio: ' + e.message)); return; }
+    S.call.status = 'accepted'; S.callStart = Date.now();
+    clearInterval(S.callTimer);
+    S.callTimer = setInterval(() => { const el = $('#call-state'); if (el) el.textContent = fmtDur(S.callStart); }, 1000);
+    navigator.vibrate?.(60);
+    renderCallBar();
+  }
+  function endCallLocal() {
+    stopRinging(); clearInterval(S.callTimer);
+    S.pc?.close(); S.stream?.getTracks().forEach((t) => t.stop());
+    S.wakeLock?.release?.().catch(() => {});
+    S.pc = null; S.stream = null; S.call = null; S.wakeLock = null; S.muted = false; S.callStart = null; S.pendingAnswer = null; S.callProfile = null; S.callMin = false; renderCallBar();
+  }
+  // HP sering memutus socket saat layar mati: periksa panggilan yang masih berdering saat aplikasi aktif lagi
+  async function checkRingingCall() {
+    if (S.call) return;
+    const c = await api('GET', '/api/calls/ringing').catch(() => null);
+    if (c) showIncomingCall(c);
+  }
+
+  /* ───────────── Pengaturan ───────────── */
+  function viewSettings(tab) {
+    const tabs = [S.isAdmin && ['meta', 'Koneksi Meta'], S.isAdmin && ['team', 'Tim CS'], S.isAdmin && ['gateway', 'Gateway WA'], ['security', 'Notifikasi & keamanan'], S.isAdmin && ['audit', 'Audit log']].filter(Boolean);
+    const cur = tabs.some((t) => t[0] === tab) ? tab : tabs[0][0];
+    $('#view').innerHTML = `<div class="p-4 md:p-6 max-w-5xl space-y-4"><nav class="tabs">${tabs.map(([k, l]) => `<a href="#/settings/${k}" class="tab ${k === cur ? 'active' : ''}">${l}</a>`).join('')}</nav><div id="set-body"></div></div>`;
+    ({ meta: setMeta, team: setTeam, gateway: setGateway, security: setSecurity, audit: setAudit })[cur]();
+  }
+  async function setMeta() {
+    const el = $('#set-body');
+    let m; try { m = await api('GET', '/api/settings/meta'); } catch (e) { el.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+    const conn = m.connection;
+    el.innerHTML = `<div class="grid lg:grid-cols-5 gap-4">
+      <form id="f-meta" class="card lg:col-span-3"><div class="card-h"><div class="card-t">Kredensial WhatsApp Cloud API</div></div>
+        <div class="p-4 space-y-3">
+          <div class="grid sm:grid-cols-2 gap-3">
+            <div><label class="label">Phone Number ID</label><input class="input mono" name="phoneNumberId" value="${esc(m.phoneNumberId)}" inputmode="numeric"></div>
+            <div><label class="label">WhatsApp Business Account ID</label><input class="input mono" name="wabaId" value="${esc(m.wabaId)}" inputmode="numeric"></div>
+          </div>
+          <div><label class="label">Access Token (System User, permanen)</label><input class="input mono" name="accessToken" type="password" autocomplete="off" placeholder="${m.accessTokenMasked ? 'Tersimpan ' + esc(m.accessTokenMasked) + ' — isi untuk mengganti' : 'EAAG…'}"><p class="hint">Disimpan terenkripsi di server, tidak pernah dikirim ke browser. Izin: whatsapp_business_messaging, whatsapp_business_management.</p></div>
+          <div><label class="label">App Secret</label><input class="input mono" name="appSecret" type="password" autocomplete="off" placeholder="${m.appSecretMasked ? 'Tersimpan ' + esc(m.appSecretMasked) + ' — isi untuk mengganti' : 'Untuk verifikasi tanda tangan webhook'}"></div>
+          <div class="grid sm:grid-cols-2 gap-3">
+            <div><label class="label">Verify Token webhook</label><input class="input mono" name="verifyToken" value="${esc(m.verifyToken)}" placeholder="string acak buatan Anda"></div>
+            <div><label class="label">Versi Graph API</label><input class="input mono" name="graphVersion" value="${esc(m.graphVersion)}"></div>
+          </div>
+        </div>
+        <div class="flex flex-wrap justify-end gap-2 px-4 py-3 border-t bd"><button type="button" class="btn" id="mt-test">Uji koneksi</button><button class="btn btn-primary" type="submit">Simpan</button></div>
+      </form>
+      <div class="lg:col-span-2 space-y-4">
+        <section class="card"><div class="card-h"><div class="card-t">Status koneksi</div>${conn?.ok ? statusBadge('ACTIVE') : '<span class="badge">Belum diuji</span>'}</div>
+          <div class="p-4 text-xs space-y-1.5">${conn?.ok ? [
+            ['Nomor', conn.phone.display_phone_number], ['Nama terverifikasi', conn.phone.verified_name], ['Status nama', conn.phone.name_status], ['Kualitas', conn.phone.quality_rating],
+            ['Throughput', conn.phone.throughput?.level], ['WABA', conn.waba.name], ['Diuji', fmtDT(conn.checkedAt)],
+            ['App ter-subscribe', conn.subscribedApps ? (conn.subscribedApps.length ? conn.subscribedApps.join(', ') : 'Tidak ada') : 'Tidak dapat dibaca'],
+          ].map(([k, val]) => `<div class="flex justify-between gap-3"><span class="ink-3">${k}</span><span class="text-right">${esc(val ?? '—')}</span></div>`).join('') : '<p class="ink-3">Simpan kredensial lalu klik "Uji koneksi".</p>'}
+          </div></section>
+        <section class="card"><div class="card-h"><div class="card-t">Webhook</div></div>
+          <div class="p-4 text-xs space-y-3">
+            <div><div class="label">Callback URL</div><div class="flex gap-2"><input class="input mono text-xs" readonly value="${esc(m.webhookUrl)}" id="wh-url"><button class="btn btn-sm h-8" data-copy="wh-url">Salin</button></div></div>
+            <div><div class="label">Field yang perlu disubscribe</div><div class="flex flex-wrap gap-1"><span class="kbd">messages</span><span class="kbd">message_template_status_update</span><span class="kbd">calls</span></div></div>
+            <div class="flex justify-between"><span class="ink-3">Webhook terakhir diterima</span><span>${m.lastWebhookAt ? fmtDT(m.lastWebhookAt) : 'Belum pernah'}</span></div>
+            <button class="btn btn-sm w-full" id="mt-sub">Subscribe app ke WABA</button>
+            <p class="hint">Mengaktifkan pengiriman webhook dari WABA ini ke app Meta Anda (POST /{waba-id}/subscribed_apps).</p>
+          </div></section>
+      </div></div>`;
+    const f = $('#f-meta');
+    f.addEventListener('submit', (e) => { e.preventDefault(); busy(e.submitter, async () => {
+      const d = formData(f); if (!d.accessToken) delete d.accessToken; if (!d.appSecret) delete d.appSecret;
+      await api('PUT', '/api/settings/meta', d); toast('Pengaturan disimpan.'); setMeta();
+    }); });
+    $('#mt-test').addEventListener('click', (e) => busy(e.currentTarget, async () => { await api('POST', '/api/settings/meta/test'); toast('Koneksi berhasil.'); setMeta(); }));
+    $('#mt-sub').addEventListener('click', (e) => busy(e.currentTarget, async () => { await api('POST', '/api/settings/meta/subscribe'); toast('App berhasil di-subscribe ke WABA.'); }));
+    $$('[data-copy]').forEach((b) => b.addEventListener('click', () => { navigator.clipboard?.writeText($('#' + b.dataset.copy).value); toast('Disalin.'); }));
+  }
+  async function setGateway() {
+    const el = $('#set-body');
+    let g; try { g = await api('GET', '/api/settings/wa-gateway'); } catch (e) { el.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+    el.innerHTML = `<div class="grid lg:grid-cols-5 gap-4">
+      <form id="f-gw" class="card lg:col-span-3"><div class="card-h"><div class="card-t">Gateway notifikasi WhatsApp</div>${g.apiKeyMasked && g.device ? statusBadge('ACTIVE') : '<span class="badge">Belum diatur</span>'}</div>
+        <div class="p-4 space-y-3">
+          <div><label class="label">URL endpoint kirim pesan</label><input class="input mono" name="url" value="${esc(g.url)}" placeholder="https://notif.beliakun.id/api/send-message"></div>
+          <div class="grid sm:grid-cols-2 gap-3">
+            <div><label class="label">Device</label><input class="input mono" name="device" value="${esc(g.device)}" placeholder="ID/nomor device di gateway"></div>
+            <div><label class="label">API key (x-api-key)</label><input class="input mono" name="apiKey" type="password" autocomplete="off" placeholder="${g.apiKeyMasked ? 'Tersimpan ' + esc(g.apiKeyMasked) + ' — isi untuk mengganti' : 'API key gateway'}"></div>
+          </div>
+          <p class="hint">Dipakai hanya untuk notifikasi internal ke nomor WA pribadi anggota tim, bukan untuk membalas pelanggan. API key disimpan terenkripsi di server.</p>
+        </div>
+        <div class="flex justify-end px-4 py-3 border-t bd"><button class="btn btn-primary" type="submit">Simpan</button></div>
+      </form>
+      <div class="lg:col-span-2 space-y-4">
+        <form id="f-gwt" class="card"><div class="card-h"><div class="card-t">Uji kirim</div></div><div class="p-4 space-y-3 text-xs">
+          <div><label class="label">Nomor tujuan</label><input class="input mono" name="to" required inputmode="numeric" placeholder="6281234567890"></div>
+          <button class="btn btn-sm w-full" type="submit">Kirim pesan tes</button>
+          <p class="hint">${g.users} pengguna mengaktifkan notifikasi WhatsApp. Setiap pengguna mengatur nomornya di Pengaturan › Notifikasi & keamanan.</p>
+        </div></form>
+      </div></div>`;
+    $('#f-gw').addEventListener('submit', (e) => { e.preventDefault(); busy(e.submitter, async () => {
+      const d = formData(e.target); if (!d.apiKey) delete d.apiKey;
+      await api('PUT', '/api/settings/wa-gateway', d); toast('Gateway disimpan.'); setGateway();
+    }); });
+    $('#f-gwt').addEventListener('submit', (e) => { e.preventDefault(); busy(e.submitter, async () => {
+      await api('POST', '/api/settings/wa-gateway/test', formData(e.target)); toast('Pesan tes terkirim lewat gateway.');
+    }); });
+  }
+  async function setTeam() {
+    const el = $('#set-body');
+    S.users = await api('GET', '/api/users').catch((e) => { fail(e); return []; });
+    el.innerHTML = `<div class="space-y-3"><div class="flex items-center"><p class="text-xs ink-3 flex-1"><b>Admin</b>: akses penuh. <b>Agen</b>: inbox (percakapan miliknya & belum ditugaskan), kontak, kirim template.</p><button class="btn btn-primary" id="tm-add">${ICON.plus} Tambah anggota</button></div>
+      <div class="card overflow-x-auto"><table class="tbl"><thead><tr><th>Nama</th><th>Email</th><th>Peran</th><th>Status</th><th>Login terakhir</th><th></th></tr></thead><tbody>
+      ${S.users.map((u) => `<tr><td class="font-medium">${esc(u.name)}${u.id === S.user.id ? ' <span class="ink-3 text-xs">(Anda)</span>' : ''}</td><td class="text-xs">${esc(u.email)}</td><td class="capitalize text-xs">${esc(u.role)}</td><td>${u.active ? '<span class="badge badge-green">Aktif</span>' : '<span class="badge">Nonaktif</span>'}</td><td class="text-xs ink-3">${fmtDT(u.lastLoginAt)}</td>
+        <td class="text-right"><button class="btn btn-sm btn-ghost" data-uedit="${u.id}">Ubah</button></td></tr>`).join('')}
+      </tbody></table></div></div>`;
+    $('#tm-add').addEventListener('click', () => userModal());
+    $$('[data-uedit]').forEach((b) => b.addEventListener('click', () => userModal(S.users.find((u) => u.id === b.dataset.uedit))));
+  }
+  function userModal(u) {
+    modal(u ? 'Ubah anggota' : 'Tambah anggota', `<form id="f-u" class="space-y-3">
+      <div><label class="label">Nama</label><input class="input" name="name" value="${esc(u?.name || '')}" required maxlength="80"></div>
+      <div><label class="label">Email</label><input class="input" name="email" type="email" value="${esc(u?.email || '')}" ${u ? 'disabled' : 'required'}></div>
+      <div><label class="label">Peran</label><select class="select" name="role"><option value="agent" ${u?.role === 'agent' ? 'selected' : ''}>Agen</option><option value="admin" ${u?.role === 'admin' ? 'selected' : ''}>Admin</option></select></div>
+      <div><label class="label">${u ? 'Reset kata sandi (opsional)' : 'Kata sandi awal'}</label><input class="input" name="password" type="password" minlength="10" autocomplete="new-password" ${u ? '' : 'required'}><p class="hint">Minimal 10 karakter.${u ? ' Mengganti kata sandi akan mengeluarkan semua sesi pengguna.' : ''}</p></div>
+      ${u ? `<label class="flex items-center gap-2 text-xs"><input type="checkbox" class="check" name="active" ${u.active ? 'checked' : ''}> Akun aktif</label>` : ''}
+    </form>`, { footer: '<button class="btn" data-act="modal-close">Batal</button><button class="btn btn-primary" id="u-save">Simpan</button>' });
+    $('#u-save').addEventListener('click', (e) => busy(e.currentTarget, async () => {
+      const f = $('#f-u'); if (!f.reportValidity()) return;
+      const d = formData(f);
+      if (u) { const body = { name: d.name, role: d.role, active: !!d.active }; if (d.password) body.password = d.password; await api('PATCH', `/api/users/${u.id}`, body); }
+      else await api('POST', '/api/users', d);
+      closeModal(); toast('Tersimpan.'); setTeam();
+    }));
+  }
+  function setSecurity() {
+    $('#set-body').innerHTML = `<div class="grid lg:grid-cols-2 gap-4">
+      <section class="card"><div class="card-h"><div class="card-t">Notifikasi di perangkat ini</div></div><div class="p-4 space-y-3 text-xs">
+        <label class="flex items-center gap-2"><input type="checkbox" class="check" id="pf-sound" ${pref('sound') ? 'checked' : ''}> Bunyikan suara saat ada chat masuk</label>
+        <label class="flex items-center gap-2"><input type="checkbox" class="check" id="pf-open" ${pref('soundOpen') ? 'checked' : ''}> Tetap bunyi walau percakapan sedang dibuka</label>
+        <label class="flex items-center gap-2"><input type="checkbox" class="check" id="pf-typing" ${pref('typingCustomer') ? 'checked' : ''}> Tampilkan "sedang mengetik…" ke pelanggan saat saya mengetik</label>
+        <div class="flex flex-wrap gap-2"><button class="btn btn-sm" id="pf-test">${ICON.bell} Tes suara</button><button class="btn btn-sm" id="pf-notif">Izinkan notifikasi browser</button></div>
+        <p class="hint">Suara hanya berbunyi selama Kontaq terbuka. Pastikan HP tidak dalam mode senyap. Pengaturan ini tersimpan di browser ini saja.</p>
+      </div></section>
+      <section class="card" id="wa-notif"><div class="card-h"><div class="card-t">Notifikasi WhatsApp</div></div><div class="p-4 text-xs ink-3">Memuat…</div></section>
+      <form id="f-pw" class="card"><div class="card-h"><div class="card-t">Ganti kata sandi</div></div><div class="p-4 space-y-3">
+        <div><label class="label">Kata sandi saat ini</label><input class="input" type="password" name="current" required autocomplete="current-password"></div>
+        <div><label class="label">Kata sandi baru</label><input class="input" type="password" name="password" required minlength="10" autocomplete="new-password"></div>
+        <div><label class="label">Ulangi kata sandi baru</label><input class="input" type="password" name="password2" required minlength="10" autocomplete="new-password"></div>
+      </div><div class="flex justify-end px-4 py-3 border-t bd"><button class="btn btn-primary" type="submit">Perbarui</button></div></form>
+      <section class="card"><div class="card-h"><div class="card-t">Sesi</div></div><div class="p-4 space-y-3 text-xs ink-2">
+        <p>Sesi berlaku 7 hari menggunakan cookie HttpOnly. Keluarkan semua perangkat lain bila Anda curiga akun disalahgunakan.</p>
+        <button class="btn" id="sec-all">Keluarkan semua sesi lain</button>
+        <div class="border-t bd pt-3 space-y-1"><div class="flex justify-between"><span class="ink-3">Akun</span><span>${esc(S.user.email)}</span></div><div class="flex justify-between"><span class="ink-3">Peran</span><span class="capitalize">${esc(S.user.role)}</span></div></div>
+      </div></section></div>`;
+    $('#f-pw').addEventListener('submit', (e) => { e.preventDefault(); busy(e.submitter, async () => {
+      const d = formData(e.target); if (d.password !== d.password2) throw new Error('Konfirmasi kata sandi tidak sama.');
+      await api('POST', '/api/me/password', { current: d.current, password: d.password }); e.target.reset(); toast('Kata sandi diperbarui.');
+    }); });
+    $('#pf-sound').addEventListener('change', (e) => { setPref('sound', e.target.checked); renderSoundBtn(); });
+    $('#pf-typing').addEventListener('change', (e) => setPref('typingCustomer', e.target.checked));
+    $('#pf-open').addEventListener('change', (e) => setPref('soundOpen', e.target.checked));
+    $('#pf-test').addEventListener('click', () => playChime(true));
+    $('#pf-notif').addEventListener('click', async () => {
+      if (!('Notification' in window)) return fail(new Error('Browser ini tidak mendukung notifikasi.'));
+      const p = await Notification.requestPermission();
+      toast(p === 'granted' ? 'Notifikasi browser diizinkan.' : 'Notifikasi browser ditolak. Ubah di pengaturan situs browser.', p !== 'granted');
+    });
+    $('#sec-all').addEventListener('click', (e) => busy(e.currentTarget, async () => { await api('POST', '/api/me/logout-all'); toast('Sesi lain telah dikeluarkan.'); }));
+    renderWaNotify();
+  }
+  // Notifikasi ke WhatsApp pribadi pengguna (lewat gateway), tersimpan di akun — berlaku di semua perangkat
+  async function renderWaNotify() {
+    const box = $('#wa-notif'); if (!box) return;
+    let n; try { n = await api('GET', '/api/me/wa-notify'); } catch (e) { box.querySelector('.p-4').textContent = e.message; return; }
+    const ev = (k, l) => `<label class="flex items-center gap-2"><input type="checkbox" class="check" name="ev_${k}" ${n.events[k] ? 'checked' : ''}> ${l}</label>`;
+    box.innerHTML = `<form id="f-wan"><div class="card-h"><div class="card-t">Notifikasi WhatsApp</div>
+        <label class="switch ${n.enabled ? 'on' : ''} ${n.gatewayReady ? 'cursor-pointer' : ''}" title="${n.gatewayReady ? 'Aktifkan/nonaktifkan' : 'Gateway WA belum dikonfigurasi'}"><input type="checkbox" class="sr-only" name="enabled" ${n.enabled ? 'checked' : ''} ${n.gatewayReady ? '' : 'disabled'} role="switch" aria-label="Aktifkan notifikasi WhatsApp"><span></span></label></div>
+      <div class="p-4 space-y-3 text-xs">
+        ${n.gatewayReady ? '' : `<p class="p-2 rounded" style="background:var(--warn-soft)">Gateway WA belum dikonfigurasi.${S.isAdmin ? ' <a class="underline" href="#/settings/gateway">Atur gateway</a>' : ' Hubungi admin.'}</p>`}
+        <div><label class="label">Nomor WhatsApp Anda</label><input class="input mono" name="phone" value="${esc(n.phone)}" inputmode="numeric" placeholder="6281234567890"></div>
+        <div class="space-y-2">${ev('message', 'Pesan masuk (percakapan milik saya / belum ditugaskan)')}${ev('assign', 'Percakapan ditugaskan ke saya')}${ev('call', 'Panggilan masuk')}</div>
+        <label class="flex items-center gap-2"><input type="checkbox" class="check" name="onlyOffline" ${n.onlyOffline ? 'checked' : ''}> Hanya kirim saat Kontaq tidak sedang terbuka</label>
+        <p class="hint">Notifikasi pesan dari percakapan yang sama dibatasi maksimal satu tiap 2 menit. Pengaturan ini tersimpan di akun Anda.</p>
+      </div>
+      <div class="flex justify-end gap-2 px-4 py-3 border-t bd"><button type="button" class="btn" id="wan-test" ${n.gatewayReady ? '' : 'disabled'}>Kirim tes</button><button class="btn btn-primary" type="submit">Simpan</button></div></form>`;
+    const f = $('#f-wan');
+    const body = () => ({ enabled: f.enabled.checked, phone: f.phone.value, onlyOffline: f.onlyOffline.checked, events: { message: f.ev_message.checked, assign: f.ev_assign.checked, call: f.ev_call.checked } });
+    f.enabled.addEventListener('change', () => {
+      const on = f.enabled.checked; f.enabled.closest('.switch').classList.toggle('on', on);
+      busy(null, async () => {
+        try { await api('PUT', '/api/me/wa-notify', body()); toast(on ? 'Notifikasi WhatsApp aktif.' : 'Notifikasi WhatsApp dinonaktifkan.'); }
+        catch (e) { f.enabled.checked = !on; f.enabled.closest('.switch').classList.toggle('on', !on); throw e; }
+      });
+    });
+    f.addEventListener('submit', (e) => { e.preventDefault(); busy(e.submitter, async () => { await api('PUT', '/api/me/wa-notify', body()); toast('Notifikasi WhatsApp disimpan.'); renderWaNotify(); }); });
+    $('#wan-test').addEventListener('click', (e) => busy(e.currentTarget, async () => { await api('PUT', '/api/me/wa-notify', body()); await api('POST', '/api/me/wa-notify/test'); toast('Pesan tes terkirim ke WhatsApp Anda.'); }));
+  }
+  async function setAudit(q = '') {
+    const el = $('#set-body');
+    const rows = await api('GET', `/api/audit?q=${encodeURIComponent(q)}`).catch((e) => { fail(e); return []; });
+    const focused = document.activeElement?.id === 'au-q';
+    el.innerHTML = `<div class="space-y-3"><input class="input w-72" id="au-q" placeholder="Cari aksi, pengguna, IP…" value="${esc(q)}" aria-label="Cari audit log">
+      <div class="card overflow-x-auto max-h-[65vh] overflow-y-auto scroll-thin"><table class="tbl"><thead><tr><th>Waktu</th><th>Pengguna</th><th>Aksi</th><th>Detail</th><th>IP</th></tr></thead><tbody>
+      ${rows.map((a) => `<tr><td class="text-xs whitespace-nowrap ink-3">${fmtDT(a.at)}</td><td class="text-xs">${esc(a.userName)}</td><td class="mono text-xs">${esc(a.action)}</td><td class="text-xs ink-2 max-w-md truncate" title="${esc(a.detail)}">${esc(a.detail)}</td><td class="mono text-[11px] ink-3">${esc(a.ip)}</td></tr>`).join('') || '<tr><td colspan="5"><div class="empty">Tidak ada entri.</div></td></tr>'}
+      </tbody></table></div><p class="hint">Menampilkan maksimal 500 entri terbaru.</p></div>`;
+    const inp = $('#au-q'); if (focused) { inp.focus(); inp.setSelectionRange(q.length, q.length); }
+    let t; inp.addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => setAudit(inp.value), 300); });
+  }
+
+  /* ───────────── Real-time ───────────── */
+  const socket = io({ transports: ['websocket', 'polling'] });
+  const live = (ok, text) => { const el = $('#live'); el.className = 'badge ' + (ok ? 'badge-green' : 'badge-amber'); el.innerHTML = `<span class="dot"></span><span>${text}</span>`; };
+  socket.on('connect', () => { live(true, 'Live'); checkRingingCall(); if (S.view === 'inbox') loadConvs().then(renderConvList).catch(() => {}); });
+  socket.on('disconnect', () => live(false, 'Terputus'));
+  socket.on('connect_error', (e) => { live(false, 'Terputus'); if (e.message === 'unauthorized') location.reload(); });
+  socket.on('message:new', ({ message, conversation }) => {
+    if (message.userId) setTyping(conversation.id, message.userId, null);
+    if (message.direction === 'in') {
+      const viewing = conversation.id === S.inbox.activeId && S.view === 'inbox' && document.visibilityState === 'visible';
+      if (!viewing || pref('soundOpen')) playChime();
+      if (conversation.id !== S.inbox.activeId) notifyIncoming(conversation);
+    }
+    if (conversation.id === S.inbox.activeId) {
+      if (!S.inbox.messages.some((m) => m.id === message.id)) { S.inbox.messages.push(message); if (S.view === 'inbox') renderMessages(false); }
+      if (message.direction === 'in' && S.view === 'inbox' && document.visibilityState === 'visible') { conversation.unread = 0; api('POST', `/api/conversations/${conversation.id}/read`).catch(() => {}); }
+    }
+    applyConv(conversation);
+  });
+  socket.on('message:update', ({ message }) => {
+    const i = S.inbox.messages.findIndex((m) => m.id === message.id);
+    if (i >= 0) {
+      S.inbox.messages[i] = message;
+      const node = $(`[data-mid="${message.id}"]`);
+      if (node) node.outerHTML = msgHtml(message);
+      $$(`[data-mid="${message.id}"] [data-reply]`).forEach((b) => b.addEventListener('click', () => { S.inbox.replyTo = b.dataset.reply; renderComposer(); }));
+    }
+  });
+  socket.on('conversation:update', applyConv);
+  socket.on('typing', (t) => { if (t.userId !== S.user.id) setTyping(t.conversationId, t.userId, { name: t.name, seen: Date.now() }); });
+  socket.on('conversation:removed', ({ id }) => {
+    if (S.isAdmin) return;
+    S.inbox.convs = S.inbox.convs.filter((c) => c.id !== id);
+    if (S.inbox.activeId === id) { S.inbox.activeId = null; if (S.view === 'inbox') { toast('Percakapan dialihkan ke agen lain.'); location.hash = '#/inbox'; } }
+    if (S.view === 'inbox') renderConvList(); renderNav();
+  });
+  socket.on('template:update', (t) => {
+    const row = S.templates.rows.find((x) => String(x.id) === String(t.id) || (x.name === t.name && x.language === t.language));
+    if (row) { row.status = t.status; if (t.reason && t.reason !== 'NONE') row.rejected_reason = t.reason; }
+    toast(`Template ${t.name}: ${t.status}`);
+    if (S.view === 'templates') viewTemplates();
+  });
+  socket.on('campaign:update', (c) => {
+    const tr = $(`#cp-rows tr[data-cid="${c.id}"]`);
+    if (tr && S.view === 'campaigns') tr.outerHTML = campaignRow(c);
+  });
+  socket.on('call:incoming', showIncomingCall);
+  socket.on('call:answer', applyAnswer);
+  socket.on('call:update', (c) => {
+    if (S.call?.id !== c.id) { if (S.view === 'calls') viewCalls(); return; }
+    if (S.call.direction === 'BUSINESS_INITIATED') {
+      if (['calling', 'ringing', 'accepted'].includes(c.status)) { if (S.call.status !== 'accepted') { S.call.status = c.status; renderCallBar(); } }
+      else { endCallLocal(); toast(c.status === 'rejected' ? 'Pelanggan menolak panggilan.' : 'Panggilan berakhir.'); }
+      if (S.view === 'calls') viewCalls();
+      return;
+    }
+    if (c.status === 'accepted' && c.answeredBy !== S.user.id) { endCallLocal(); toast(`Panggilan diangkat oleh ${c.answeredName}.`); }
+    else if (!['ringing', 'accepted'].includes(c.status)) { endCallLocal(); toast('Panggilan berakhir.'); }
+    if (S.view === 'calls') viewCalls();
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible') return;
+    if (!socket.connected) socket.connect();
+    checkRingingCall();
+    if (S.view === 'inbox') loadConvs().then(renderConvList).catch(() => {});
+  });
+  function notifyBrowser(title, body) {
+    if (document.visibilityState === 'visible' || !('Notification' in window) || Notification.permission !== 'granted') return;
+    try { new Notification(title, { body }); } catch (e) {}
+  }
+  function notifyIncoming(conv) {
+    notifyBrowser(contactName(conv.contact), conv.preview);
+    if (document.visibilityState === 'visible' && S.view !== 'inbox') toast(`Pesan baru dari ${contactName(conv.contact)}`);
+  }
+  document.addEventListener('click', function askNotif() { if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission(); document.removeEventListener('click', askNotif); });
+  // Perbarui label sisa jendela 24 jam tiap menit
+  setInterval(() => {
+    const c = activeConv(); if (!c || S.view !== 'inbox') return;
+    const wasOpen = c.windowOpen; c.windowOpen = c.windowExpiresAt > Date.now();
+    renderChatHeaderOnly(c); if (wasOpen !== c.windowOpen) renderComposer();
+  }, 60000);
+
+  /* ───────────── Mulai ───────────── */
+  renderSoundBtn();
+  $('#me-name').textContent = S.user.name; $('#me-role').textContent = S.user.role === 'admin' ? 'Admin' : 'Agen'; $('#me-avatar').innerHTML = initials(S.user.name);
+  loadConvs().catch(() => {}).finally(renderNav);
+  route();
+  </script>
+<% } %>
+</body>
+</html>
