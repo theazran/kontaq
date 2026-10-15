@@ -208,17 +208,18 @@
     edit: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>',
     trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>',
     bolt: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2 3 14h9l-1 8 10-12h-9z"/></svg>',
+    log: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>',
     campaign: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m3 11 18-8-8 18-2-8z"/></svg>',
   };
   const tick = (s) => ({
-    pending: '<span title="Menunggu">🕓</span>', sent: '<span title="Terkirim">✓</span>', delivered: '<span title="Diterima">✓✓</span>',
+    pending: '<span title="Menunggu">🕓</span>', accepted: '<span class="ink-3" title="Diterima Meta, menunggu konfirmasi webhook">✓</span>', sent: '<span title="Terkirim">✓</span>', delivered: '<span title="Diterima">✓✓</span>',
     read: '<span class="tick-read" title="Dibaca">✓✓</span>', played: '<span class="tick-read" title="Diputar">✓✓</span>', failed: '<span class="danger-ink" title="Gagal">⚠</span>',
   }[s] || '');
   const statusBadge = (s) => {
     const map = { APPROVED: 'green', ACTIVE: 'green', done: 'green', running: 'green', delivered: 'green', read: 'green', open: 'green', ENABLED: 'green',
       PENDING: 'amber', IN_APPEAL: 'amber', paused: 'amber', pending: 'amber', queued: 'amber', PAUSED: 'amber', ringing: 'amber',
       REJECTED: 'red', DISABLED: 'red', failed: 'red', cancelled: 'red', rejected: 'red', FLAGGED: 'red' };
-    const label = { open: 'Terbuka', pending: 'Menunggu', closed: 'Selesai', draft: 'Draf', running: 'Berjalan', paused: 'Dijeda', done: 'Selesai', cancelled: 'Dibatalkan', queued: 'Antre', sent: 'Terkirim', delivered: 'Diterima', read: 'Dibaca', failed: 'Gagal', skipped: 'Dilewati' }[s] || s;
+    const label = { accepted: 'Diterima Meta', open: 'Terbuka', pending: 'Menunggu', closed: 'Selesai', draft: 'Draf', running: 'Berjalan', paused: 'Dijeda', done: 'Selesai', cancelled: 'Dibatalkan', queued: 'Antre', sent: 'Terkirim', delivered: 'Diterima', read: 'Dibaca', failed: 'Gagal', skipped: 'Dilewati' }[s] || s;
     return `<span class="badge ${map[s] ? 'badge-' + map[s] : ''}"><span class="dot"></span>${esc(label)}</span>`;
   };
 
@@ -237,6 +238,7 @@
     { id: 'contacts', label: 'Kontak', icon: 'users' },
     { id: 'templates', label: 'Template', icon: 'tpl' },
     { id: 'campaigns', label: 'Campaign', icon: 'campaign', admin: true },
+    { id: 'messagelog', label: 'Log pesan', icon: 'log', admin: true },
     { id: 'autoreply', label: 'Auto reply', icon: 'bolt', admin: true },
     { id: 'calls', label: 'Panggilan', icon: 'phone' },
     { id: 'settings', label: 'Pengaturan', icon: 'gear' },
@@ -261,7 +263,7 @@
     $('#sidebar').classList.toggle('md:flex', true);
     renderNav();
     const v = $('#view'); v.className = 'flex-1 min-h-0 overflow-y-auto scroll-thin';
-    ({ dashboard: viewDashboard, inbox: () => viewInbox(arg), contacts: viewContacts, templates: viewTemplates, campaigns: viewCampaigns, autoreply: viewAutoReply, calls: viewCalls, settings: () => viewSettings(arg) })[S.view]();
+    ({ dashboard: viewDashboard, inbox: () => viewInbox(arg), contacts: viewContacts, templates: viewTemplates, campaigns: viewCampaigns, messagelog: viewMessageLog, autoreply: viewAutoReply, calls: viewCalls, settings: () => viewSettings(arg) })[S.view]();
   }
   window.addEventListener('hashchange', route);
 
@@ -291,7 +293,7 @@
     let st;
     try { st = await api('GET', '/api/stats?days=14'); } catch (e) { v.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
     if (S.view !== 'dashboard') return;
-    const o = st.outbound, outTotal = o.sent + o.delivered + o.read + o.failed + (o.pending || 0);
+    const o = st.outbound, outTotal = (o.accepted || 0) + o.sent + o.delivered + o.read + o.failed + (o.pending || 0);
     const pct = (n) => (outTotal ? Math.round((n / outTotal) * 100) : 0);
     const max = Math.max(1, ...st.series.map((d) => Math.max(d.in, d.out)));
     const tile = (label, value, sub) => `<div class="card p-4"><div class="text-xs ink-3">${label}</div><div class="text-2xl font-semibold tracking-tight mt-1">${fmtNum(value)}</div>${sub ? `<div class="text-[11px] ink-3 mt-0.5">${sub}</div>` : ''}</div>`;
@@ -323,8 +325,8 @@
         <section class="card">
           <div class="card-h"><div class="card-t">Status pengiriman</div><span class="text-[11px] ink-3">${fmtNum(outTotal)} pesan keluar</span></div>
           <div class="p-4 space-y-3">
-            ${[['Terkirim', o.sent], ['Diterima', o.delivered], ['Dibaca', o.read], ['Gagal', o.failed]].map(([l, n]) => `<div><div class="flex justify-between text-xs mb-1"><span class="ink-2">${l}</span><span class="font-medium">${fmtNum(n)} <span class="ink-3 font-normal">· ${pct(n)}%</span></span></div><div class="h-1.5 rounded-full surface-2 overflow-hidden"><div class="h-full rounded-full" style="width:${pct(n)}%;background:${l === 'Gagal' ? 'var(--danger)' : l === 'Dibaca' ? 'var(--accent)' : 'var(--ink-3)'}"></div></div></div>`).join('')}
-            <p class="hint">Status diperbarui dari webhook Meta. "Terkirim" berarti belum ada konfirmasi diterima.</p>
+            ${[['Diterima Meta', (o.accepted || 0) + (o.pending || 0)], ['Terkirim', o.sent], ['Diterima', o.delivered], ['Dibaca', o.read], ['Gagal', o.failed]].map(([l, n]) => `<div><div class="flex justify-between text-xs mb-1"><span class="ink-2">${l}</span><span class="font-medium">${fmtNum(n)} <span class="ink-3 font-normal">· ${pct(n)}%</span></span></div><div class="h-1.5 rounded-full surface-2 overflow-hidden"><div class="h-full rounded-full" style="width:${pct(n)}%;background:${l === 'Gagal' ? 'var(--danger)' : l === 'Dibaca' ? 'var(--accent)' : 'var(--ink-3)'}"></div></div></div>`).join('')}
+            <p class="hint">Status diperbarui dari webhook Meta. "Diterima Meta" berarti request API berhasil tetapi belum ada konfirmasi webhook; "Terkirim" berarti belum ada konfirmasi sampai di perangkat.${S.isAdmin ? ' <a class="accent-ink underline" href="#/messagelog">Lihat log pesan</a>' : ''}</p>
           </div>
         </section>
       </div>
@@ -968,6 +970,119 @@
   }
 
   /* ───────────── Kontak ───────────── */
+  /* ───────────── Log pesan API ───────────── */
+  const LOG_TYPES = { text: 'Text', image: 'Image', video: 'Video', audio: 'Audio', document: 'Document', sticker: 'Sticker', template: 'Template', list: 'Interactive list', buttons: 'Buttons', location: 'Location', call_permission: 'Izin telepon', interactive: 'Interactive', contacts: 'Kontak', unknown: 'Tidak diketahui' };
+  const LOG_STATUS = { accepted: ['Diterima Meta', 'amber'], sent: ['Terkirim', ''], delivered: ['Sampai', 'green'], read: ['Dibaca', 'green'], failed: ['Gagal', 'red'] };
+  const logStatusBadge = (s) => { const [l, c] = LOG_STATUS[s] || [s, '']; return `<span class="badge ${c ? 'badge-' + c : ''}"><span class="dot"></span>${esc(l)}</span>`; };
+  const logCost = (r, cur) => (!r.pricing ? '<span class="ink-3">—</span>' : !r.cost.billable ? '<span class="ink-3">Gratis</span>' : r.cost.known ? esc(fmtMoney(r.cost.amount, cur)) : '<span class="ink-3" title="Isi tarif kategori di kartu Biaya Meta (Dashboard)">Berbayar · tarif?</span>');
+  S.mlog = { q: '', from: '', to: '', status: '', type: '', source: '', campaignId: '', template: '', phoneNumberId: '', failed: false, page: 1 };
+  const mlogQuery = (st, extra = {}) => new URLSearchParams(Object.entries({ ...st, failed: st.failed ? '1' : '', ...extra }).filter(([, v]) => v !== '' && v !== false && v != null)).toString();
+
+  async function viewMessageLog() {
+    const v = $('#view'), st = S.mlog;
+    if (!v.querySelector('#ml-root')) v.innerHTML = '<div class="empty">Memuat…</div>';
+    let d;
+    try { d = await api('GET', '/api/message-log?' + mlogQuery(st)); } catch (e) { v.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+    if (S.view !== 'messagelog') return;
+    const t = d.totals, cur = d.currency, src = d.options.sources;
+    const keepFocus = document.activeElement?.id === 'ml-q';
+    const tile = (label, value, sub, key) => `<button class="card p-3 text-left ${key && st.status === key ? 'ring-1' : ''}" ${key ? `data-ml-status="${key}"` : ''} style="${key && st.status === key ? 'border-color:var(--accent)' : ''}"><div class="text-[11px] ink-3">${label}</div><div class="text-xl font-semibold tracking-tight mt-0.5">${value}</div>${sub ? `<div class="text-[11px] ink-3 mt-0.5">${sub}</div>` : ''}</button>`;
+    const opt = (val, label, cur) => `<option value="${esc(val)}" ${String(cur) === String(val) ? 'selected' : ''}>${esc(label)}</option>`;
+    const costSub = [t.cost.billable ? `${fmtNum(t.cost.billable)} berbayar` : '', t.cost.unknownRate ? `${fmtNum(t.cost.unknownRate)} tanpa tarif` : '', t.cost.noPricing ? `${fmtNum(t.cost.noPricing)} belum ada info` : ''].filter(Boolean).join(' · ');
+    v.innerHTML = `<div class="p-4 md:p-6 max-w-7xl space-y-4" id="ml-root">
+      <div class="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2">
+        ${tile('Total pesan keluar', fmtNum(t.all), `${fmtNum(t.requestFailed)} request API gagal`, '')}
+        ${tile('Diterima Meta', fmtNum(t.byStatus.accepted), 'menunggu webhook', 'accepted')}
+        ${tile('Terkirim', fmtNum(t.byStatus.sent), 'dari server Meta', 'sent')}
+        ${tile('Sampai', fmtNum(t.byStatus.delivered), 'di perangkat penerima', 'delivered')}
+        ${tile('Dibaca', fmtNum(t.byStatus.read), 'jika tanda baca aktif', 'read')}
+        ${tile('Gagal', `<span class="${t.byStatus.failed ? 'danger-ink' : ''}">${fmtNum(t.byStatus.failed)}</span>`, 'request atau webhook', 'failed')}
+        ${tile('Estimasi biaya', t.cost.billable && t.cost.unknownRate === t.cost.billable ? '—' : esc(fmtMoney(t.cost.amount, cur)) + (t.cost.unknownRate ? '<span class="text-xs ink-3"> +?</span>' : ''), costSub || 'dari pricing webhook', '')}
+      </div>
+      <div class="flex flex-wrap gap-1.5 text-[11px]">
+        ${Object.entries(src).map(([k, l]) => `<button class="badge ${st.source === k ? 'badge-green' : ''}" data-ml-source="${k}">${esc(l)} <b class="ml-1">${fmtNum(t.bySource[k] || 0)}</b></button>`).join('')}
+        <span class="ink-3 self-center ml-1">${Object.entries(t.byType).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${esc(LOG_TYPES[k] || k)} ${fmtNum(n)}`).join(' · ')}</span>
+      </div>
+      <div class="card p-3 flex flex-wrap items-end gap-2">
+        <input class="input w-full sm:w-56" id="ml-q" placeholder="Cari nomor penerima atau Message ID" value="${esc(st.q)}" aria-label="Cari nomor atau Message ID">
+        <input class="input w-[9.5rem]" type="date" id="ml-from" value="${esc(st.from)}" aria-label="Dari tanggal">
+        <span class="ink-3 text-xs self-center">–</span>
+        <input class="input w-[9.5rem]" type="date" id="ml-to" value="${esc(st.to)}" aria-label="Sampai tanggal">
+        <select class="select w-36" data-ml="status" aria-label="Status">${opt('', 'Semua status', st.status)}${Object.entries(LOG_STATUS).map(([k, [l]]) => opt(k, l, st.status)).join('')}</select>
+        <select class="select w-36" data-ml="type" aria-label="Jenis pesan">${opt('', 'Semua jenis', st.type)}${opt('media', 'Semua media', st.type)}${['text', 'image', 'video', 'audio', 'document', 'template', 'list', 'buttons', 'location', 'call_permission', 'unknown'].map((k) => opt(k, LOG_TYPES[k], st.type)).join('')}</select>
+        <select class="select w-36" data-ml="source" aria-label="Sumber">${opt('', 'Semua sumber', st.source)}${Object.entries(src).map(([k, l]) => opt(k, l, st.source)).join('')}</select>
+        ${d.options.campaigns.length ? `<select class="select w-40" data-ml="campaignId" aria-label="Campaign">${opt('', 'Semua campaign', st.campaignId)}${d.options.campaigns.map((c) => opt(c.id, c.name, st.campaignId)).join('')}</select>` : ''}
+        ${d.options.templates.length ? `<select class="select w-40" data-ml="template" aria-label="Template">${opt('', 'Semua template', st.template)}${d.options.templates.map((x) => opt(x, x, st.template)).join('')}</select>` : ''}
+        ${d.options.phoneNumberIds.length > 1 ? `<select class="select w-44" data-ml="phoneNumberId" aria-label="Nomor bisnis">${opt('', 'Semua nomor bisnis', st.phoneNumberId)}${d.options.phoneNumberIds.map((x) => opt(x, x, st.phoneNumberId)).join('')}</select>` : ''}
+        <label class="flex items-center gap-1.5 text-xs self-center"><input type="checkbox" class="check" id="ml-failed" ${st.failed ? 'checked' : ''}> Gagal saja</label>
+        <div class="flex-1"></div>
+        <button class="btn btn-sm btn-ghost" id="ml-reset">Reset</button>
+        <button class="btn btn-sm" id="ml-refresh">Muat ulang</button>
+        <a class="btn btn-sm" href="/api/message-log/export.csv?${mlogQuery(st, { page: '' })}">Ekspor CSV</a>
+      </div>
+      <div class="card overflow-x-auto"><table class="tbl"><thead><tr><th>Waktu</th><th>Penerima</th><th>Jenis</th><th>Isi / template</th><th>Sumber</th><th>Message ID</th><th>Status</th><th class="text-right">Biaya</th><th></th></tr></thead><tbody>
+        ${d.rows.map((r) => `<tr class="cursor-pointer" data-ml-row="${r.id}">
+          <td class="text-xs whitespace-nowrap">${esc(fmtDT(r.at))}</td>
+          <td><div class="font-medium truncate max-w-[10rem]">${esc(r.contactName || '—')}</div><div class="mono text-[11px] ink-3">+${esc(r.to)}</div></td>
+          <td class="text-xs whitespace-nowrap">${esc(LOG_TYPES[r.type] || r.type)}</td>
+          <td class="max-w-[16rem] truncate ${r.summary || r.templateName ? '' : 'ink-3'}" title="${esc(r.templateName || r.summary)}">${r.templateName ? `<span class="mono text-xs">${esc(r.templateName)}</span>` : esc(r.summary) || (r.source === 'external' ? 'Isi tidak tersedia' : '—')}</td>
+          <td class="text-xs whitespace-nowrap">${esc(src[r.source] || r.source)}${r.campaignName ? `<div class="text-[11px] ink-3 truncate max-w-[9rem]">${esc(r.campaignName)}</div>` : r.userName ? `<div class="text-[11px] ink-3 truncate max-w-[9rem]">${esc(r.userName)}</div>` : ''}</td>
+          <td class="mono text-[11px] ink-3 max-w-[9rem] truncate" title="${esc(r.wamid || '')}">${esc(r.wamid ? '…' + r.wamid.slice(-14) : '—')}</td>
+          <td>${logStatusBadge(r.status)}${!r.requestOk ? `<div class="text-[11px] danger-ink">HTTP ${esc(r.httpStatus || '—')}</div>` : ''}</td>
+          <td class="text-right text-xs whitespace-nowrap">${logCost(r, cur)}</td>
+          <td class="text-right"><button class="btn btn-sm btn-ghost" data-ml-row="${r.id}">Detail</button></td></tr>`).join('') || `<tr><td colspan="9"><div class="empty">${t.all === 0 && !mlogQuery(st, { page: '' }) ? 'Belum ada pesan keluar.' : 'Tidak ada pesan yang cocok dengan filter.'}</div></td></tr>`}
+      </tbody></table></div>
+      <div class="flex flex-wrap items-center justify-between gap-2 text-xs">
+        <span class="ink-3">${fmtNum(d.total)} pesan · status hanya dianggap terkirim/dibaca setelah ada webhook Meta</span>
+        ${d.pages > 1 ? `<div class="flex items-center gap-2"><button class="btn btn-sm" id="ml-prev" ${d.page <= 1 ? 'disabled' : ''}>Sebelumnya</button><span class="ink-3">Hal. ${d.page} / ${d.pages}</span><button class="btn btn-sm" id="ml-next" ${d.page >= d.pages ? 'disabled' : ''}>Berikutnya</button></div>` : ''}
+      </div>
+    </div>`;
+    st.page = d.page;
+    const reload = (patch) => { Object.assign(st, patch, patch.page ? {} : { page: 1 }); viewMessageLog(); };
+    const q = $('#ml-q'); if (keepFocus) { q.focus(); q.setSelectionRange(q.value.length, q.value.length); }
+    let timer; q.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(() => reload({ q: q.value.trim() }), 350); });
+    $('#ml-from').addEventListener('change', (e) => reload({ from: e.target.value }));
+    $('#ml-to').addEventListener('change', (e) => reload({ to: e.target.value }));
+    $$('[data-ml]').forEach((s) => s.addEventListener('change', () => reload({ [s.dataset.ml]: s.value })));
+    $('#ml-failed').addEventListener('change', (e) => reload({ failed: e.target.checked }));
+    $$('[data-ml-status]').forEach((b) => b.addEventListener('click', () => reload({ status: st.status === b.dataset.mlStatus ? '' : b.dataset.mlStatus })));
+    $$('[data-ml-source]').forEach((b) => b.addEventListener('click', () => reload({ source: st.source === b.dataset.mlSource ? '' : b.dataset.mlSource })));
+    $('#ml-reset').addEventListener('click', () => { S.mlog = { q: '', from: '', to: '', status: '', type: '', source: '', campaignId: '', template: '', phoneNumberId: '', failed: false, page: 1 }; viewMessageLog(); });
+    $('#ml-refresh').addEventListener('click', () => viewMessageLog());
+    $('#ml-prev')?.addEventListener('click', () => reload({ page: d.page - 1 }));
+    $('#ml-next')?.addEventListener('click', () => reload({ page: d.page + 1 }));
+    $$('tr[data-ml-row]').forEach((tr) => tr.addEventListener('click', () => messageLogDetail(tr.dataset.mlRow, cur)));
+  }
+
+  async function messageLogDetail(id, cur) {
+    let r;
+    try { r = await api('GET', '/api/message-log/' + id); } catch (e) { return fail(e); }
+    const row = (k, val) => `<div class="flex justify-between gap-4 py-1.5 border-b bd last:border-0 text-[13px]"><span class="ink-3 shrink-0">${k}</span><span class="text-right min-w-0 break-all">${val}</span></div>`;
+    const ts = (t) => (t ? esc(new Date(t).toLocaleString('id-ID', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' })) : '<span class="ink-3">—</span>');
+    const json = (o) => `<pre class="kbd block p-2 text-[11px] overflow-x-auto max-h-64 whitespace-pre-wrap">${esc(JSON.stringify(o, null, 2))}</pre>`;
+    const stage = (label, ok, sub) => `<div class="flex items-start gap-2 py-1"><span class="${ok === true ? 'accent-ink' : ok === false ? 'danger-ink' : 'ink-3'}">${ok === true ? '●' : ok === false ? '✕' : '○'}</span><div><div class="text-[13px] font-medium">${label}</div>${sub ? `<div class="text-[11px] ink-3">${sub}</div>` : ''}</div></div>`;
+    const failedH = r.statusHistory.find((h) => h.status === 'failed');
+    modal('Detail pesan', `<div class="space-y-4">
+      <div class="grid sm:grid-cols-4 gap-1 card p-3">
+        ${stage('Request API', r.backfilled || r.source === 'external' ? null : r.requestOk, r.source === 'external' ? 'Tidak melalui Kontaq' : r.backfilled ? 'Tidak tercatat (pesan sebelum fitur log)' : r.requestOk ? `HTTP ${esc(r.httpStatus)}${r.http?.ms ? ` · ${r.http.ms} ms` : ''}` : `HTTP ${esc(r.httpStatus || 'tidak ada respons')}`)}
+        ${stage('Diterima Meta', r.wamid ? true : r.requestOk ? null : false, r.messageStatus ? `message_status: ${esc(r.messageStatus)}` : r.source === 'external' ? 'Diketahui dari webhook' : '')}
+        ${stage('Sampai ke penerima', r.deliveredAt ? true : failedH ? false : null, r.deliveredAt ? ts(r.deliveredAt) : r.sentAt ? `Terkirim dari Meta ${ts(r.sentAt)}` : 'Menunggu webhook')}
+        ${stage('Dibaca', r.readAt ? true : null, r.readAt ? ts(r.readAt) : 'Belum ada / tanda baca nonaktif')}
+      </div>
+      <div class="grid md:grid-cols-2 gap-4">
+        <div>${row('Message ID Meta', r.wamid ? `<span class="mono text-xs">${esc(r.wamid)}</span>` : '—')}${row('Phone Number ID', `<span class="mono text-xs">${esc(r.phoneNumberId || '—')}</span>`)}${row('WABA ID', `<span class="mono text-xs">${esc(r.wabaId || '—')}</span>`)}${row('Penerima', `${esc(r.contactName || '')} <span class="mono text-xs">+${esc(r.to)}</span>`)}${row('Jenis', esc(LOG_TYPES[r.type] || r.type))}${r.templateName ? row('Template', `<span class="mono text-xs">${esc(r.templateName)}</span> ${esc(r.templateLanguage || '')}`) : ''}${row('Kategori', esc(r.templateCategory || r.pricing?.category || '—'))}</div>
+        <div>${row('Sumber', esc(S.mlogSources?.[r.source] || { inbox: 'Dashboard', campaign: 'Campaign', auto_reply: 'Auto reply', external: 'Di luar Kontaq' }[r.source] || r.source))}${r.userName ? row('Pengirim', esc(r.userName)) : ''}${r.campaignName ? row('Campaign', esc(r.campaignName)) : ''}${row(r.source === 'external' ? 'Status pertama diterima' : 'Waktu request API', ts(r.at))}${row('Sent', ts(r.sentAt))}${row('Delivered', ts(r.deliveredAt))}${row('Read', ts(r.readAt))}${row('Failed', ts(r.failedAt))}${row('Estimasi biaya', logCost(r, cur) + (r.pricing ? ` <span class="ink-3 text-[11px]">(${esc(r.pricing.category)}${r.pricing.model ? ', ' + esc(r.pricing.model) : ''})</span>` : ''))}</div>
+      </div>
+      ${r.errorDetail || r.error ? `<div class="card p-3" style="background:var(--danger-soft);border-color:transparent"><div class="text-[13px] font-medium danger-ink">Error</div><div class="text-xs mt-1 break-words">${esc(r.errorDetail?.message || r.error)}</div>
+        ${r.errorDetail?.code != null ? `<div class="text-[11px] ink-3 mt-1">Kode ${esc(r.errorDetail.code)}${r.errorDetail.subcode ? '/' + esc(r.errorDetail.subcode) : ''}${r.errorDetail.fbtraceId ? ` · fbtrace_id ${esc(r.errorDetail.fbtraceId)}` : ''}</div>` : ''}</div>` : ''}
+      <div><div class="label">Riwayat status (webhook)</div>${r.statusHistory.length ? `<table class="tbl"><tbody>${r.statusHistory.map((h) => `<tr><td class="text-xs whitespace-nowrap">${ts(h.at)}</td><td>${logStatusBadge(h.status === 'played' ? 'read' : h.status)}</td><td class="text-[11px] danger-ink">${esc((h.errors || []).map((x) => `${x.title} (${x.code})${x.details ? ': ' + x.details : ''}`).join('; '))}</td></tr>`).join('')}</tbody></table>` : '<p class="hint">Belum ada status dari webhook. HTTP 200 dari API belum berarti pesan sampai ke pelanggan.</p>'}</div>
+      ${r.request ? `<div><div class="label">Payload request <span class="ink-3 font-normal">(nomor disamarkan; token tidak pernah dicatat)</span></div>${json(r.request)}</div>` : ''}
+      ${r.response ? `<div><div class="label">Respons Meta</div>${json(r.response)}</div>` : ''}
+      ${r.source === 'external' ? '<p class="hint">Pesan ini dikirim di luar Kontaq dengan nomor bisnis yang sama. Webhook Meta hanya memberi status dan biaya, bukan isi pesan.</p>' : ''}
+      ${r.conversationId ? `<a class="btn btn-sm" href="#/inbox/${esc(r.conversationId)}">Buka percakapan</a>` : ''}
+    </div>`, { wide: true });
+  }
+
   async function viewContacts() {
     const v = $('#view'), st = S.contacts;
     let data;
@@ -1957,6 +2072,10 @@
     }
     applyConv(conversation);
   });
+  let mlogTimer;
+  const mlogLive = () => { if (S.view === 'messagelog' && !$('#modal-root').innerHTML) { clearTimeout(mlogTimer); mlogTimer = setTimeout(viewMessageLog, 1500); } };
+  socket.on('message:new', ({ message }) => { if (message.direction === 'out') mlogLive(); });
+  socket.on('message:update', mlogLive);
   socket.on('message:update', ({ message }) => {
     const i = S.inbox.messages.findIndex((m) => m.id === message.id);
     if (i >= 0) {

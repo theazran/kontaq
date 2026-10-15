@@ -45,6 +45,19 @@ WA gateway pihak ketiga (`POST` dengan header `x-api-key`, body `{ device, to, m
 Pesan masuk mengikuti hak akses: percakapan yang sudah ditugaskan hanya memberi tahu agen pemiliknya; yang belum
 ditugaskan memberi tahu semua pengguna. Maksimal satu notifikasi per percakapan tiap 2 menit per pengguna.
 
+## Log pesan (admin)
+
+Menu **Log pesan** menampilkan semua pesan keluar via Cloud API beserta totalnya: dari Dashboard/Inbox, Campaign,
+Auto reply, dan pesan yang dikirim **di luar Kontaq** dengan nomor bisnis yang sama (terdeteksi dari webhook status;
+isinya tidak tersedia, hanya status dan biaya). Filter: nomor/Message ID, tanggal, status, jenis, sumber, campaign,
+template, nomor bisnis, gagal saja; paginasi di server; ekspor CSV; detail per pesan (payload dengan nomor
+disamarkan, respons HTTP/Meta, error, riwayat status, estimasi biaya).
+
+Status dipisah per tahap: **request API** → **Diterima Meta** (ada message ID) → **Terkirim / Sampai / Dibaca / Gagal**
+hanya dari webhook. HTTP 200 tidak dianggap terkirim. Request yang gagal juga dicatat. Estimasi biaya memakai
+`pricing` dari webhook × tarif per kategori di kartu Biaya Meta. Log menyimpan 20.000 entri terakhir;
+pesan lama diisi otomatis sekali saat server pertama kali berjalan dengan fitur ini.
+
 ## Pemakaian di HP
 
 Buka Kontaq di browser HP (Chrome/Safari) lewat **HTTPS**. Mikrofon untuk panggilan hanya diizinkan lewat HTTPS.

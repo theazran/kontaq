@@ -104,7 +104,7 @@ const csvCell = (v) => {
  */
 const EMPTY_DB = {
   settings: {}, users: [], contacts: [], conversations: [], messages: [],
-  templates: [], templatesSyncedAt: 0, campaigns: [], calls: [], audit: [], avatars: {}, autoReply: null, arMedia: {}, costs: null,
+  templates: [], templatesSyncedAt: 0, campaigns: [], calls: [], audit: [], avatars: {}, autoReply: null, arMedia: {}, costs: null, sendLog: [],
 };
 let db;
 try { db = { ...EMPTY_DB, ...JSON.parse(fs.readFileSync(DB_FILE, 'utf8')) }; }
@@ -219,9 +219,11 @@ function meta() {
 }
 function metaError(e) {
   const err = e.response?.data?.error;
-  if (!err) return new HttpError(502, `Gagal menghubungi Meta: ${e.message}`);
+  if (!err) return Object.assign(new HttpError(502, `Gagal menghubungi Meta: ${e.message}`), { httpStatus: e.response?.status || 0 });
   const details = err.error_data?.details ? ` — ${err.error_data.details}` : '';
-  return new HttpError(e.response.status >= 500 ? 502 : 400, `Meta: ${err.message}${details} (kode ${err.code}${err.error_subcode ? '/' + err.error_subcode : ''})`, err);
+  const out = new HttpError(e.response.status >= 500 ? 502 : 400, `Meta: ${err.message}${details} (kode ${err.code}${err.error_subcode ? '/' + err.error_subcode : ''})`, err);
+  out.httpStatus = e.response.status; // status HTTP asli dari Graph API (untuk log pengiriman)
+  return out;
 }
 async function graph(method, endpoint, { data, params, headers, responseType } = {}) {
   const m = meta();
@@ -324,7 +326,7 @@ function addMessage(conv, data) {
   return msg;
 }
 
-const STATUS_RANK = { pending: 0, sent: 1, delivered: 2, read: 3, played: 3 };
+const STATUS_RANK = { pending: 0, accepted: 0.5, sent: 1, delivered: 2, read: 3, played: 3 };
 
 // Bangun payload Meta dari input composer, dengan validasi batas resmi Cloud API.
 function buildOutbound(type, b) {
@@ -431,17 +433,159 @@ function renderTemplateText(tpl, comps) {
   return String(body?.text || '').replace(/\{\{\s*([\w]+)\s*\}\}/g, () => bodyParams[i++]?.text ?? '');
 }
 
-async function sendTemplateTo(contact, tpl, values, extra = {}) {
+async function sendTemplateTo(contact, tpl, values, extra = {}, ctx = {}) {
   const components = buildTemplateComponents(tpl, values, contact);
   const payload = { messaging_product: 'whatsapp', recipient_type: 'individual', to: contact.phone, type: 'template', template: { name: tpl.name, language: { code: tpl.language } } };
   if (components.length) payload.template.components = components;
-  const r = await graph('post', `${needPhone()}/messages`, { data: payload });
   const conv = getOrCreateConv(contact);
+  const r = await sendToMeta(payload, { source: 'inbox', contact, conversation: conv, template: tpl, userId: extra.userId, userName: extra.userName, ...ctx });
+  // 'accepted' = Meta menerima request; sent/delivered/read hanya dari webhook status
   const msg = addMessage(conv, {
-    direction: 'out', type: 'template', wamid: r.messages?.[0]?.id, status: 'sent',
+    direction: 'out', type: 'template', wamid: r.messages?.[0]?.id, status: 'accepted',
     content: { name: tpl.name, language: tpl.language, body: renderTemplateText(tpl, components) }, ...extra,
   });
   return msg;
+}
+
+/* ───────────────────────── 5b. Log pengiriman pesan (Cloud API) ─────────────────────────
+ * Setiap POST /{phone-number-id}/messages dari Kontaq (inbox, template, campaign, auto reply) dicatat di db.sendLog,
+ * berhasil maupun gagal. Status dipisah per tahap:
+ *   1. request  — HTTP ke Graph API berhasil/gagal
+ *   2. accepted — Meta mengembalikan message ID (belum berarti terkirim)
+ *   3. sent / delivered / read / failed — hanya dari webhook status, dihubungkan lewat message ID (wamid)
+ * Status webhook untuk wamid yang tidak dikenal (dikirim di luar Kontaq dengan nomor yang sama) dicatat sebagai sumber "external".
+ * Access token, App Secret, dan kredensial lain tidak pernah masuk ke log.
+ */
+const SEND_LOG_MAX = 20000;
+const logByWamid = new Map();
+db.sendLog.forEach((e) => e.wamid && logByWamid.set(e.wamid, e));
+const DELIVERY_RANK = { accepted: 0, sent: 1, delivered: 2, read: 3, played: 3 };
+
+function pushLog(entry) {
+  db.sendLog.push(entry);
+  if (entry.wamid) logByWamid.set(entry.wamid, entry);
+  if (db.sendLog.length > SEND_LOG_MAX) {
+    for (const old of db.sendLog.splice(0, db.sendLog.length - SEND_LOG_MAX)) if (old.wamid) logByWamid.delete(old.wamid);
+  }
+  save();
+  return entry;
+}
+
+// Ringkasan isi pesan untuk kolom "Isi pesan" (tanpa kredensial; nomor penerima disamarkan di payload).
+function payloadSummary(p) {
+  const it = p.interactive;
+  switch (p.type) {
+    case 'text': return p.text?.body || '';
+    case 'template': return p.template?.name || '';
+    case 'image': case 'video': case 'audio': case 'document': case 'sticker': return p[p.type]?.caption || p[p.type]?.filename || '';
+    case 'location': return p.location?.name || `${p.location?.latitude}, ${p.location?.longitude}`;
+    case 'interactive': return it?.body?.text || '';
+    default: return '';
+  }
+}
+function payloadKind(p) {
+  if (p.type !== 'interactive') return p.type || 'unknown';
+  return { button: 'buttons', list: 'list', call_permission_request: 'call_permission' }[p.interactive?.type] || 'interactive';
+}
+const maskPhone = (p) => (p && p.length > 6 ? p.slice(0, 4) + '•'.repeat(p.length - 6) + p.slice(-2) : p || '');
+function redactPayload(p) {
+  const copy = structuredClone(p);
+  if (copy.to) copy.to = maskPhone(String(copy.to));
+  return copy;
+}
+
+/**
+ * Kirim pesan ke Cloud API dan catat hasilnya. ctx: { source, contact, conversation, userId, userName, campaign, template }
+ * Melempar error yang sama seperti graph() bila gagal (setelah dicatat).
+ */
+async function sendToMeta(payload, ctx = {}) {
+  const m = meta();
+  const entry = {
+    id: uid('l_'), at: now(), source: ctx.source || 'inbox', userId: ctx.userId || null, userName: ctx.userName || '',
+    campaignId: ctx.campaign?.id || null, campaignName: ctx.campaign?.name || '',
+    contactId: ctx.contact?.id || null, conversationId: ctx.conversation?.id || null, to: String(payload.to || ''),
+    type: payloadKind(payload), summary: String(payloadSummary(payload) || '').slice(0, 300),
+    templateName: payload.template?.name || '', templateLanguage: payload.template?.language?.code || '',
+    templateCategory: ctx.template?.category || '', phoneNumberId: m.phoneNumberId, wabaId: m.wabaId, graphVersion: m.graphVersion,
+    request: redactPayload(payload), ok: false, http: null, response: null, error: null, wamid: null, statuses: [],
+  };
+  const started = Date.now();
+  try {
+    const r = await graph('post', `${needPhone()}/messages`, { data: payload });
+    const info = r.messages?.[0] || {};
+    Object.assign(entry, {
+      ok: true, wamid: info.id || null, http: { status: 200, ms: Date.now() - started },
+      // message_status: accepted | held_for_quality_assessment | paused (Meta). Bukan bukti pesan sampai ke pelanggan.
+      response: { messageStatus: info.message_status || 'accepted', waId: r.contacts?.[0]?.wa_id || null },
+    });
+    pushLog(entry);
+    return r;
+  } catch (e) {
+    Object.assign(entry, {
+      http: { status: e.httpStatus || 0, ms: Date.now() - started },
+      error: { message: e.message, code: e.meta?.code ?? null, subcode: e.meta?.error_subcode ?? null, type: e.meta?.type || null, fbtraceId: e.meta?.fbtrace_id || null, details: e.meta?.error_data?.details || null },
+    });
+    pushLog(entry);
+    throw e;
+  }
+}
+
+/** Catat status webhook (idempoten: status+timestamp yang sama diabaikan). Mengembalikan true bila ada perubahan. */
+function recordStatus(target, s) {
+  const at = Number(s.timestamp) * 1000 || now();
+  target.statusHistory = target.statusHistory || [];
+  if (target.statusHistory.some((h) => h.status === s.status && h.at === at)) return false;
+  const h = { status: s.status, at };
+  if (s.errors?.length) h.errors = s.errors.map((e) => ({ code: e.code, title: e.title || e.message, details: e.error_data?.details || '' }));
+  target.statusHistory.push(h);
+  target.statusHistory.sort((a, b) => a.at - b.at);
+  const key = { sent: 'sentAt', delivered: 'deliveredAt', read: 'readAt', played: 'readAt', failed: 'failedAt' }[s.status];
+  if (key && !target[key]) target[key] = at;
+  return true;
+}
+
+/** Status pesan untuk log: hanya status webhook dianggap "terkirim"; tanpa webhook = "accepted" (diterima Meta). */
+function deliveryState(entry, msg) {
+  if (!entry.ok) return 'failed';
+  const hist = (msg || entry).statusHistory || [];
+  if (hist.some((h) => h.status === 'failed') && !hist.some((h) => h.status === 'read' || h.status === 'played')) return 'failed';
+  let best = 'accepted';
+  for (const h of hist) if ((DELIVERY_RANK[h.status] ?? -1) > DELIVERY_RANK[best]) best = h.status === 'played' ? 'read' : h.status;
+  return best;
+}
+
+/** Estimasi biaya: pricing dari webhook × tarif per kategori yang diisi admin di Cost Monitor. */
+function estimateCost(pricing) {
+  if (!pricing) return { known: false };
+  if (!pricing.billable) return { known: true, billable: false, amount: 0, category: pricing.category };
+  const rate = Number(costCfg().settings.rates?.[pricing.category]);
+  return { known: Number.isFinite(rate) && rate > 0, billable: true, amount: rate > 0 ? rate : null, category: pricing.category };
+}
+
+// Isi log dari pesan keluar yang tercatat sebelum fitur log ada (sekali saja; data request/respons tidak tersedia).
+if (!db.sendLogBackfilled) {
+  for (const msg of db.messages) {
+    if (msg.direction !== 'out' || (msg.wamid && logByWamid.has(msg.wamid))) continue;
+    const conv = byId('conversations', msg.conversationId);
+    const contact = conv ? byId('contacts', conv.contactId) : null;
+    const camp = msg.campaignId ? byId('campaigns', msg.campaignId) : null;
+    pushLog({
+      id: uid('l_'), at: msg.timestamp, source: msg.campaignId ? 'campaign' : msg.auto ? 'auto_reply' : 'inbox',
+      userId: msg.userId || null, userName: msg.userName || '', campaignId: msg.campaignId || null, campaignName: camp?.name || '',
+      contactId: contact?.id || null, conversationId: conv?.id || null, to: contact?.phone || '',
+      type: msg.type === 'interactive' ? ({ button: 'buttons', list: 'list', call_permission_request: 'call_permission' }[msg.content?.kind] || 'interactive') : msg.type,
+      summary: String(msg.type === 'template' ? msg.content?.name : previewOf(msg) || '').slice(0, 300),
+      templateName: msg.type === 'template' ? msg.content?.name || '' : '', templateLanguage: msg.content?.language || '', templateCategory: '',
+      phoneNumberId: meta().phoneNumberId, wabaId: meta().wabaId, graphVersion: '',
+      request: null, ok: !!msg.wamid, http: null, response: msg.wamid ? { messageStatus: 'accepted' } : null,
+      error: msg.wamid ? null : { message: msg.error || 'Tidak ada message ID' }, wamid: msg.wamid || null, statuses: [], backfilled: true,
+    });
+    // Status lama hanya menyimpan status terakhir; jadikan satu entri riwayat agar tetap terbaca.
+    if (msg.status && msg.status !== 'pending' && msg.status !== 'sent' && !msg.statusHistory) msg.statusHistory = [{ status: msg.status, at: msg.statusAt || msg.timestamp }];
+  }
+  db.sendLog.sort((a, b) => a.at - b.at);
+  db.sendLogBackfilled = true;
+  save();
 }
 
 /* ───────────────────────── 6. Webhook ───────────────────────── */
@@ -590,8 +734,9 @@ async function runAutoReply(conv, contact, msg, prevInboundAt) {
       payload = { type: 'text', text: { body, preview_url: /https?:\/\//.test(body) } };
       record = { type: 'text', content: { body } };
     }
-    const r = await graph('post', `${needPhone()}/messages`, { data: { messaging_product: 'whatsapp', recipient_type: 'individual', to: contact.phone, ...payload, context: { message_id: msg.wamid } } });
-    addMessage(conv, { direction: 'out', ...record, wamid: r.messages?.[0]?.id, status: 'sent', userName: 'Auto reply', auto: d.kind, contextId: msg.wamid });
+    const r = await sendToMeta({ messaging_product: 'whatsapp', recipient_type: 'individual', to: contact.phone, ...payload, context: { message_id: msg.wamid } },
+      { source: 'auto_reply', contact, conversation: conv, userName: 'Auto reply' });
+    addMessage(conv, { direction: 'out', ...record, wamid: r.messages?.[0]?.id, status: 'accepted', userName: 'Auto reply', auto: d.kind, contextId: msg.wamid });
     cfg.sent = (cfg.sent || 0) + 1;
     if (d.rule) { d.rule.hits = (d.rule.hits || 0) + 1; d.rule.lastHitAt = now(); }
     save();
@@ -653,6 +798,7 @@ function handleStatuses(value) {
   for (const s of value.statuses || []) {
     const msg = idx.wamid.get(s.id);
     if (msg) {
+      recordStatus(msg, s); // riwayat lengkap untuk Log pesan (duplikat diabaikan)
       const ok = s.status === 'failed' || (STATUS_RANK[s.status] ?? -1) > (STATUS_RANK[msg.status] ?? -1);
       if (ok) {
         msg.status = s.status;
@@ -662,6 +808,22 @@ function handleStatuses(value) {
       if (s.pricing) msg.pricing = { category: String(s.pricing.category || '').toLowerCase(), billable: !!s.pricing.billable, model: s.pricing.pricing_model, type: s.pricing.type || null, at: msg.pricing?.at || Number(s.timestamp) * 1000 || now() };
       const conv = byId('conversations', msg.conversationId);
       if (conv) emitConv(conv, 'message:update', { message: msg });
+    } else if (s.id) {
+      // Pesan dikirim di luar Kontaq (aplikasi lain / WhatsApp Manager) dengan nomor yang sama: isi tidak diketahui,
+      // tetapi status dan biayanya tetap dicatat agar total pengiriman lengkap.
+      let entry = logByWamid.get(s.id);
+      if (!entry) {
+        const contact = idx.contactByPhone.get(normPhone(s.recipient_id));
+        entry = pushLog({
+          id: uid('l_'), at: Number(s.timestamp) * 1000 || now(), source: 'external', userId: null, userName: '', campaignId: null, campaignName: '',
+          contactId: contact?.id || null, conversationId: contact ? idx.convByContact.get(contact.id)?.id || null : null, to: normPhone(s.recipient_id),
+          type: 'unknown', summary: '', templateName: '', templateLanguage: '', templateCategory: s.pricing?.category || '',
+          phoneNumberId: value.metadata?.phone_number_id || meta().phoneNumberId, wabaId: meta().wabaId, graphVersion: '',
+          request: null, ok: true, http: null, response: null, error: null, wamid: s.id, statuses: [],
+        });
+      }
+      recordStatus(entry, s);
+      if (s.pricing) entry.pricing = { category: String(s.pricing.category || '').toLowerCase(), billable: !!s.pricing.billable, model: s.pricing.pricing_model, type: s.pricing.type || null };
     }
     // Laporan campaign
     for (const camp of db.campaigns) {
@@ -1185,11 +1347,100 @@ app.put('/api/costs/settings', requireAdmin, wrap(async (req, res) => {
   audit(req, 'costs.settings', `anggaran ${cfg.settings.budget} ${currency || ''}`); save();
   res.json(cfg.settings);
 }));
+/* Log pesan API (admin): semua pesan keluar via Cloud API + status pengiriman dari webhook */
+const LOG_SOURCES = { inbox: 'Dashboard', campaign: 'Campaign', auto_reply: 'Auto reply', external: 'Di luar Kontaq' };
+function logRow(e) {
+  const msg = e.wamid ? idx.wamid.get(e.wamid) : null;
+  const contact = e.contactId ? byId('contacts', e.contactId) : idx.contactByPhone.get(e.to);
+  const hist = (msg || e).statusHistory || [];
+  const pricing = msg?.pricing || e.pricing || null;
+  return {
+    id: e.id, at: e.at, source: e.source, userName: e.userName, campaignId: e.campaignId, campaignName: e.campaignName,
+    to: e.to, contactName: contact?.name || contact?.waName || '', conversationId: e.conversationId || msg?.conversationId || null,
+    type: e.type, summary: e.summary, templateName: e.templateName, templateCategory: e.templateCategory || (pricing?.category ?? ''),
+    wamid: e.wamid, requestOk: e.ok, httpStatus: e.http?.status ?? null, messageStatus: e.response?.messageStatus || null,
+    status: deliveryState(e, msg), sentAt: (msg || e).sentAt || null, deliveredAt: (msg || e).deliveredAt || null, readAt: (msg || e).readAt || null,
+    failedAt: (msg || e).failedAt || null, error: e.error?.message || hist.filter((h) => h.status === 'failed').flatMap((h) => h.errors || []).map((x) => `${x.title} (${x.code})`).join('; ') || null,
+    pricing, cost: estimateCost(pricing), backfilled: !!e.backfilled,
+  };
+}
+function filterLog(q) {
+  const from = q.from ? Date.parse(q.from + 'T00:00:00') : 0;
+  const to = q.to ? Date.parse(q.to + 'T23:59:59.999') : Infinity;
+  const term = str(q.q, 100).toLowerCase(), termDigits = normPhone(term);
+  const types = q.type === 'media' ? ['image', 'video', 'audio', 'document', 'sticker'] : q.type ? [q.type] : null;
+  const rows = [];
+  for (let i = db.sendLog.length - 1; i >= 0; i--) {
+    const e = db.sendLog[i];
+    if (e.at < from || e.at > to) continue;
+    if (q.source && e.source !== q.source) continue;
+    if (types && !types.includes(e.type)) continue;
+    if (q.campaignId && e.campaignId !== q.campaignId) continue;
+    if (q.template && e.templateName !== q.template) continue;
+    if (q.phoneNumberId && e.phoneNumberId !== q.phoneNumberId) continue;
+    if (term && !(String(e.wamid || '').toLowerCase().includes(term) || (termDigits.length >= 4 && e.to.includes(termDigits)))) continue;
+    const row = logRow(e);
+    if (q.status && row.status !== q.status) continue;
+    if (q.failed === '1' && row.status !== 'failed') continue;
+    rows.push(row);
+  }
+  return rows;
+}
+function logTotals(rows) {
+  const t = { all: rows.length, byStatus: { accepted: 0, sent: 0, delivered: 0, read: 0, failed: 0 }, bySource: {}, byType: {}, requestFailed: 0, cost: { amount: 0, billable: 0, free: 0, unknownRate: 0, noPricing: 0 } };
+  for (const r of rows) {
+    t.byStatus[r.status] = (t.byStatus[r.status] || 0) + 1;
+    t.bySource[r.source] = (t.bySource[r.source] || 0) + 1;
+    t.byType[r.type] = (t.byType[r.type] || 0) + 1;
+    if (!r.requestOk) t.requestFailed++;
+    if (!r.pricing) t.cost.noPricing++;
+    else if (!r.cost.billable) t.cost.free++;
+    else { t.cost.billable++; if (r.cost.known) t.cost.amount += r.cost.amount; else t.cost.unknownRate++; }
+  }
+  return t;
+}
+app.get('/api/message-log', requireAdmin, (req, res) => {
+  const rows = filterLog(req.query);
+  const per = Math.min(200, Math.max(10, Number(req.query.per) || 50));
+  const pages = Math.max(1, Math.ceil(rows.length / per));
+  const page = Math.min(pages, Math.max(1, Number(req.query.page) || 1));
+  res.json({
+    rows: rows.slice((page - 1) * per, page * per), total: rows.length, page, per, pages, totals: logTotals(rows),
+    currency: costCfg().settings.currency || db.settings.connection?.waba?.currency || '',
+    options: {
+      sources: LOG_SOURCES,
+      campaigns: db.campaigns.map((c) => ({ id: c.id, name: c.name })).reverse(),
+      templates: [...new Set(db.sendLog.map((e) => e.templateName).filter(Boolean))].sort(),
+      phoneNumberIds: [...new Set(db.sendLog.map((e) => e.phoneNumberId).filter(Boolean))],
+    },
+  });
+});
+app.get('/api/message-log/export.csv', requireAdmin, (req, res) => {
+  const rows = filterLog(req.query);
+  const head = ['waktu', 'penerima', 'nama_kontak', 'jenis', 'isi_atau_template', 'sumber', 'pengirim', 'campaign', 'message_id', 'http', 'status', 'sent_at', 'delivered_at', 'read_at', 'error', 'kategori_biaya', 'estimasi_biaya'];
+  const iso = (t) => (t ? new Date(t).toISOString() : '');
+  const lines = [head.join(',')].concat(rows.map((r) => [iso(r.at), r.to, r.contactName, r.type, r.templateName || r.summary, LOG_SOURCES[r.source] || r.source, r.userName, r.campaignName, r.wamid, r.httpStatus,
+    r.status, iso(r.sentAt), iso(r.deliveredAt), iso(r.readAt), r.error, r.pricing?.category || '', r.cost.billable ? (r.cost.known ? r.cost.amount : 'tarif belum diisi') : r.pricing ? 0 : ''].map(csvCell).join(',')));
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="log-pesan-${new Date().toISOString().slice(0, 10)}.csv"`);
+  audit(req, 'message_log.export', `${rows.length} baris`);
+  res.send('﻿' + lines.join('\n'));
+});
+app.get('/api/message-log/:id', requireAdmin, (req, res) => {
+  const e = db.sendLog.find((x) => x.id === req.params.id);
+  if (!e) throw new HttpError(404, 'Log tidak ditemukan.');
+  const msg = e.wamid ? idx.wamid.get(e.wamid) : null;
+  res.json({
+    ...logRow(e), phoneNumberId: e.phoneNumberId, wabaId: e.wabaId, graphVersion: e.graphVersion, templateLanguage: e.templateLanguage,
+    request: e.request, http: e.http, response: e.response, errorDetail: e.error, statusHistory: (msg || e).statusHistory || [],
+  });
+});
+
 app.get('/api/stats', (req, res) => {
   const days = Math.min(90, Math.max(7, Number(req.query.days) || 14));
   const start = new Date(); start.setHours(0, 0, 0, 0); start.setDate(start.getDate() - (days - 1));
   const series = Array.from({ length: days }, (_, i) => { const d = new Date(start); d.setDate(d.getDate() + i); return { date: d.toISOString().slice(0, 10), t: d.getTime(), in: 0, out: 0 }; });
-  const st = { sent: 0, delivered: 0, read: 0, failed: 0, pending: 0 };
+  const st = { accepted: 0, sent: 0, delivered: 0, read: 0, failed: 0, pending: 0 };
   for (const m of db.messages) {
     if (m.timestamp < start.getTime()) continue;
     const i = Math.floor((m.timestamp - start.getTime()) / 86400000);
@@ -1463,7 +1714,7 @@ app.post('/api/conversations/:id/messages', wrap(async (req, res) => {
     const tpl = findTemplate(str(req.body.name, 512), str(req.body.language, 15));
     if (!tpl) throw new HttpError(400, 'Template tidak ditemukan. Sinkronkan template terlebih dahulu.');
     if (tpl.status !== 'APPROVED') throw new HttpError(400, `Template berstatus ${tpl.status}, hanya APPROVED yang dapat dikirim.`);
-    const msg = await sendTemplateTo(contact, tpl, req.body.values || {}, { userId: req.user.id });
+    const msg = await sendTemplateTo(contact, tpl, req.body.values || {}, { userId: req.user.id, userName: req.user.name });
     if (!conv.assignedTo && req.user.role !== 'admin') { conv.assignedTo = req.user.id; save(); }
     audit(req, 'message.send', `template ${tpl.name} → ${contact.phone}`);
     return res.json(msg);
@@ -1473,9 +1724,9 @@ app.post('/api/conversations/:id/messages', wrap(async (req, res) => {
   const built = buildOutbound(type, req.body);
   const payload = { messaging_product: 'whatsapp', recipient_type: 'individual', to: contact.phone, type: built.type || type, ...built.payload };
   if (req.body.replyTo) { const ctx = byId('messages', req.body.replyTo); if (ctx?.wamid) payload.context = { message_id: ctx.wamid }; }
-  const r = await graph('post', `${needPhone()}/messages`, { data: payload });
+  const r = await sendToMeta(payload, { source: 'inbox', contact, conversation: conv, userId: req.user.id, userName: req.user.name });
   if (!conv.assignedTo && req.user.role !== 'admin') conv.assignedTo = req.user.id;
-  const msg = addMessage(conv, { direction: 'out', type: built.type || type, content: built.content, wamid: r.messages?.[0]?.id, status: 'sent', userId: req.user.id, userName: req.user.name, contextId: payload.context?.message_id || null });
+  const msg = addMessage(conv, { direction: 'out', type: built.type || type, content: built.content, wamid: r.messages?.[0]?.id, status: 'accepted', userId: req.user.id, userName: req.user.name, contextId: payload.context?.message_id || null });
   res.json(msg);
 }));
 
@@ -1711,7 +1962,7 @@ setInterval(async () => {
       const contact = byId('contacts', r.contactId);
       if (!contact) { r.status = 'skipped'; r.error = 'Kontak dihapus'; continue; }
       try {
-        const msg = await sendTemplateTo(contact, tpl, camp.values, { campaignId: camp.id, userName: 'Campaign: ' + camp.name });
+        const msg = await sendTemplateTo(contact, tpl, camp.values, { campaignId: camp.id, userName: 'Campaign: ' + camp.name }, { source: 'campaign', campaign: camp });
         r.status = 'sent'; r.wamid = msg.wamid; r.sentAt = now();
       } catch (e) {
         r.status = 'failed'; r.error = e.message;
