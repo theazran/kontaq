@@ -2054,7 +2054,9 @@
   }
 
   /* ───────────── Real-time ───────────── */
-  const socket = io({ transports: ['websocket', 'polling'] });
+  // Mulai dengan long-polling lalu upgrade ke WebSocket bila proxy mendukung. Urutan ini tetap tersambung
+  // di belakang reverse proxy yang tidak meneruskan header Upgrade (mis. Apache tanpa mod_proxy_wstunnel).
+  const socket = io({ transports: ['polling', 'websocket'], tryAllTransports: true });
   const live = (ok, text) => { const el = $('#live'); el.className = 'badge ' + (ok ? 'badge-green' : 'badge-amber'); el.innerHTML = `<span class="dot"></span><span>${text}</span>`; };
   socket.on('connect', () => { live(true, 'Live'); checkRingingCall(); if (S.view === 'inbox') loadConvs().then(renderConvList).catch(() => {}); });
   socket.on('disconnect', () => live(false, 'Terputus'));
