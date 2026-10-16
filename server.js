@@ -105,7 +105,7 @@ const csvCell = (v) => {
 const EMPTY_DB = {
   settings: {}, users: [], contacts: [], conversations: [], messages: [],
   templates: [], templatesSyncedAt: 0, campaigns: [], calls: [], audit: [], avatars: {}, autoReply: null, arMedia: {}, costs: null, sendLog: [],
-  flows: [], flowRuns: [],
+  flows: [], flowRuns: [], groups: [], csat: null,
 };
 let db;
 try { db = { ...EMPTY_DB, ...JSON.parse(fs.readFileSync(DB_FILE, 'utf8')) }; }
@@ -300,6 +300,7 @@ function serializeConv(conv) {
   return {
     ...conv, contact, assignedName: agent?.name || null,
     windowOpen: !!windowOpen(conv), windowExpiresAt: conv.lastInboundAt ? conv.lastInboundAt + SERVICE_WINDOW_MS : 0,
+    csat: csatPublic(csatOf(conv)),
   };
 }
 
@@ -425,6 +426,14 @@ function buildTemplateComponents(tpl, values = {}, contact = {}) {
     const vars = templateVars(body.text);
     if (vars.length) comps.push({ type: 'body', parameters: vars.map((v, i) => param(v, (values.body || [])[i])) });
   }
+  // Tombol URL dinamis (mis. template undangan grup https://chat.whatsapp.com/{{1}}): values.buttonUrl[index] = akhiran URL
+  const buttons = (tpl.components || []).find((c) => c.type === 'BUTTONS');
+  (buttons?.buttons || []).forEach((btn, i) => {
+    if (btn.type !== 'URL' || !/\{\{/.test(btn.url || '')) return;
+    const text = fill((values.buttonUrl || [])[i]);
+    if (!text) throw new HttpError(400, `Tombol URL "${btn.text}" memerlukan nilai variabel.`);
+    comps.push({ type: 'button', sub_type: 'url', index: String(i), parameters: [{ type: 'text', text }] });
+  });
   return comps;
 }
 function renderTemplateText(tpl, comps) {
@@ -630,6 +639,7 @@ function handleMessages(value) {
   const profiles = Object.fromEntries((value.contacts || []).map((c) => [c.wa_id, c.profile?.name]));
   for (const m of value.messages || []) {
     if (idx.wamid.has(m.id)) continue; // dedup retry Meta
+    if (m.group_id) { handleGroupMessage(m, profiles); continue; } // pesan grup: bukan percakapan pribadi pengirimnya
     const phone = normPhone(m.from);
     const contact = getOrCreateContact(phone, profiles[m.from]);
     const conv = getOrCreateConv(contact);
@@ -646,8 +656,14 @@ function handleMessages(value) {
       contact.callPermission = { status: content.response, permanent: content.permanent, expiresAt: content.expiresAt, at: Number(m.timestamp) * 1000 || now() };
       contact.updatedAt = now();
     }
-    const prevInboundAt = conv.lastInboundAt || 0;
+    const prevInboundAt = conv.lastInboundAt || 0, prevStatus = conv.status, prevUnread = conv.unread || 0;
     const msg = addMessage(conv, { direction: 'in', type, content, wamid: m.id, timestamp: Number(m.timestamp) * 1000 || now(), contextId: m.context?.id || null });
+    // Jawaban survei CSAT: jangan buka ulang percakapan yang sudah selesai, jangan beri notifikasi, jangan jalankan flow
+    if (handleCsatReply(conv, contact, msg)) {
+      Object.assign(conv, { status: prevStatus, unread: prevStatus === 'closed' ? prevUnread : conv.unread });
+      save(); emitConv(conv, 'conversation:update', serializeConv(conv));
+      continue;
+    }
     if (type !== 'call_permission') notifyInboundMessage(conv, msg);
     // Flow otomatis lebih dulu; auto reply hanya bila tidak ada flow yang menjalankan aksi (mencegah balasan ganda)
     if (type !== 'call_permission') {
@@ -1026,7 +1042,10 @@ async function execFlowNode(flow, n, ctx, dry) {
     case 'status': {
       if (ctx.conv.status === c.status) return { next: n.next, log: `Status sudah ${STATUS_LABEL[c.status]}.` };
       ctx.conv.status = c.status;
-      if (!dry) emitConv(ctx.conv, 'conversation:update', serializeConv(ctx.conv));
+      if (!dry) {
+        emitConv(ctx.conv, 'conversation:update', serializeConv(ctx.conv));
+        if (c.status === 'closed') maybeSendCsat(ctx.conv, 'flow', null);
+      }
       return { next: n.next, action: true, log: `Status → ${STATUS_LABEL[c.status]}` };
     }
     case 'note': {
@@ -1183,6 +1202,7 @@ function handleStatuses(value) {
       if (s.pricing) msg.pricing = { category: String(s.pricing.category || '').toLowerCase(), billable: !!s.pricing.billable, model: s.pricing.pricing_model, type: s.pricing.type || null, at: msg.pricing?.at || Number(s.timestamp) * 1000 || now() };
       const conv = byId('conversations', msg.conversationId);
       if (conv) emitConv(conv, 'message:update', { message: msg });
+      if (msg.groupId) io?.to('admins').emit('group:message', { groupId: msg.groupId, message: msg });
     } else if (s.id) {
       // Pesan dikirim di luar Kontaq (aplikasi lain / WhatsApp Manager) dengan nomor yang sama: isi tidak diketahui,
       // tetapi status dan biayanya tetap dicatat agar total pengiriman lengkap.
@@ -1214,6 +1234,389 @@ function handleStatuses(value) {
     }
   }
   save();
+}
+
+/* ── Grup WhatsApp (Groups API) ──
+ * Hanya untuk Official Business Account (OBA). Grup hanya-undangan, maks. 8 peserta.
+ * Buat/hapus/ubah pengaturan/keluarkan peserta bersifat asinkron: API mengembalikan request_id, hasil akhirnya datang
+ * lewat webhook (group_lifecycle_update, group_settings_update, group_participants_update). Status di Kontaq baru
+ * diubah setelah webhook tersebut tiba — permintaan yang diterima API belum dianggap berhasil.
+ * Peserta tidak dapat ditambahkan langsung: bergabung lewat tautan undangan atau permintaan bergabung yang disetujui.
+ */
+const GROUP_MAX_PARTICIPANTS = 8;
+const GROUP_EVENTS_MAX = 200;
+const GROUP_SEND_TYPES = ['text', 'image', 'video', 'audio', 'document'];
+const GROUP_FIELDS = ['group_lifecycle_update', 'group_participants_update', 'group_settings_update', 'group_status_update'];
+
+const groupByMeta = (gid) => (gid ? db.groups.find((g) => g.groupId === String(gid)) : null);
+const groupOr404 = (id) => { const g = byId('groups', id); if (!g) throw new HttpError(404, 'Grup tidak ditemukan.'); return g; };
+const metaErrText = (errs) => (errs || []).map((e) => `${e.title || e.message} (${e.code})${e.error_data?.details ? ': ' + e.error_data.details : ''}`).join('; ');
+const samePerson = (p, key) => !!key && (p.waId === key || p.phone === normPhone(key));
+function newGroup(data) {
+  return { id: uid('g_'), groupId: null, requestId: null, subject: '', description: '', joinApprovalMode: 'auto_approve', inviteLink: null,
+    status: 'creating', error: null, suspended: false, participants: [], joinRequests: [], invites: [], pending: {}, events: [],
+    photo: null, unread: 0, lastMessageAt: 0, preview: '', createdAt: now(), createdBy: null, external: false, ...data };
+}
+function groupEvent(g, type, text) {
+  g.events.unshift({ at: now(), type, text: String(text).slice(0, 500) });
+  if (g.events.length > GROUP_EVENTS_MAX) g.events.length = GROUP_EVENTS_MAX;
+}
+const groupSummary = (g) => {
+  const { events, invites, photo, ...rest } = g;
+  return { ...rest, hasPhoto: !!photo?.data, photoStatus: photo?.status || null, photoAt: photo?.at || 0, inviteCount: invites.length };
+};
+function emitGroup(g) { io?.to('admins').emit('group:update', groupSummary(g)); }
+// Grup yang dibuat di luar Kontaq dengan nomor yang sama: buat catatan agar event-nya tetap terekam
+function ensureGroup(gid, ev) {
+  let g = groupByMeta(gid);
+  if (!g) {
+    g = newGroup({ groupId: String(gid), subject: ev?.subject || '(Grup tanpa nama)', status: 'active', external: true });
+    db.groups.push(g);
+    groupEvent(g, 'import', 'Grup tercatat dari webhook (dibuat di luar Kontaq atau sebelum fitur ini).');
+  }
+  return g;
+}
+function addParticipant(g, p, via) {
+  const waId = String(p.wa_id || ''), phone = normPhone(p.input || p.wa_id);
+  if (!waId && !phone) return null;
+  let row = g.participants.find((x) => samePerson(x, waId) || samePerson(x, phone));
+  if (!row) { row = { waId: waId || phone, phone: phone || waId, joinedAt: now(), via }; g.participants.push(row); }
+  g.joinRequests = g.joinRequests.filter((r) => !samePerson({ waId: r.waId, phone: normPhone(r.waId) }, waId));
+  // Pantau undangan: tandai undangan ke nomor ini sebagai sudah bergabung
+  for (const inv of g.invites) if (!inv.joinedAt && (inv.phone === row.phone || inv.phone === normPhone(waId))) inv.joinedAt = now();
+  return row;
+}
+const personLabel = (key) => {
+  const c = idx.contactByPhone.get(normPhone(key));
+  return c ? `${c.name || c.waName || 'Kontak'} (+${c.phone})` : '+' + normPhone(key);
+};
+
+function handleGroupWebhook(field, value) {
+  for (const ev of value.groups || []) {
+    const errs = metaErrText(ev.errors);
+    switch (ev.type) {
+      case 'group_create': {
+        // Cocokkan dengan request_id; cadangan: grup "creating" terbaru dengan nama yang sama
+        let g = db.groups.find((x) => ev.request_id && x.requestId === ev.request_id)
+          || groupByMeta(ev.group_id)
+          || db.groups.filter((x) => x.status === 'creating' && x.subject === ev.subject).pop();
+        if (!g) { g = newGroup({ subject: ev.subject || '(Grup tanpa nama)', external: true }); db.groups.push(g); }
+        if (errs) { g.status = 'failed'; g.error = errs; groupEvent(g, 'create_failed', 'Gagal membuat grup: ' + errs); break; }
+        Object.assign(g, { groupId: String(ev.group_id), status: 'active', error: null, inviteLink: ev.invite_link || g.inviteLink,
+          joinApprovalMode: ev.join_approval_mode || g.joinApprovalMode, subject: ev.subject || g.subject });
+        groupEvent(g, 'created', 'Grup berhasil dibuat oleh Meta.');
+        break;
+      }
+      case 'group_delete': {
+        const g = groupByMeta(ev.group_id);
+        if (!g) break;
+        if (errs) { g.status = g.suspended ? 'suspended' : 'active'; g.error = errs; groupEvent(g, 'delete_failed', 'Gagal menghapus grup: ' + errs); break; }
+        Object.assign(g, { status: 'deleted', inviteLink: null, participants: [], joinRequests: [], error: null });
+        groupEvent(g, 'deleted', 'Grup dihapus. Semua peserta dikeluarkan.');
+        break;
+      }
+      case 'group_participants_add': {
+        const g = ensureGroup(ev.group_id, ev);
+        const via = ev.reason === 'invite_link' ? 'tautan undangan' : ev.reason || 'undangan';
+        for (const p of ev.added_participants || []) if (addParticipant(g, p, via)) groupEvent(g, 'join', `${personLabel(p.input || p.wa_id)} bergabung lewat ${via}.`);
+        break;
+      }
+      case 'group_participants_remove': {
+        const g = ensureGroup(ev.group_id, ev);
+        for (const p of ev.removed_participants || []) {
+          const key = p.wa_id || p.input;
+          g.participants = g.participants.filter((x) => !samePerson(x, key));
+          groupEvent(g, 'leave', ev.initiated_by === 'participant' ? `${personLabel(key)} keluar dari grup.` : `${personLabel(key)} dikeluarkan dari grup.`);
+        }
+        for (const p of ev.failed_participants || []) groupEvent(g, 'remove_failed', `Gagal mengeluarkan ${personLabel(p.input || p.wa_id)}: ${metaErrText(p.errors) || errs}`);
+        delete g.pending.remove;
+        if (errs && !(ev.failed_participants || []).length) g.error = errs;
+        break;
+      }
+      case 'group_join_request_created': {
+        const g = ensureGroup(ev.group_id, ev);
+        if (!g.joinRequests.some((r) => r.id === ev.join_request_id)) g.joinRequests.push({ id: String(ev.join_request_id), waId: String(ev.wa_id || ''), at: Number(ev.timestamp) * 1000 || now() });
+        groupEvent(g, 'join_request', `${personLabel(ev.wa_id)} meminta bergabung.`);
+        break;
+      }
+      case 'group_join_request_revoked': {
+        const g = ensureGroup(ev.group_id, ev);
+        g.joinRequests = g.joinRequests.filter((r) => r.id !== String(ev.join_request_id));
+        groupEvent(g, 'join_request_revoked', `Permintaan bergabung ${personLabel(ev.wa_id)} ditarik.`);
+        break;
+      }
+      case 'group_settings_update': {
+        const g = ensureGroup(ev.group_id, ev);
+        const parts = [];
+        const apply = (src, key, label) => {
+          if (!src) return;
+          if (src.update_successful) { if (key) g[key] = src.text ?? g[key]; parts.push(`${label} diperbarui`); }
+          else parts.push(`${label} gagal: ${metaErrText(src.errors) || 'ditolak Meta'}`);
+        };
+        apply(ev.group_subject, 'subject', 'Nama grup');
+        apply(ev.group_description, 'description', 'Deskripsi');
+        if (ev.profile_picture) {
+          apply(ev.profile_picture, null, 'Foto grup');
+          if (g.photo) g.photo.status = ev.profile_picture.update_successful ? 'ok' : 'failed';
+        }
+        g.pending = {};
+        g.error = parts.some((p) => p.includes('gagal')) ? parts.filter((p) => p.includes('gagal')).join('; ') : null;
+        groupEvent(g, 'settings', parts.join(' · ') || 'Pengaturan diperbarui.');
+        break;
+      }
+      case 'group_suspend': {
+        const g = ensureGroup(ev.group_id, ev);
+        Object.assign(g, { suspended: true, status: 'suspended' });
+        groupEvent(g, 'suspended', 'Grup ditangguhkan oleh WhatsApp. Pesan tidak dapat dikirim.');
+        break;
+      }
+      case 'group_suspend_cleared': {
+        const g = ensureGroup(ev.group_id, ev);
+        Object.assign(g, { suspended: false, status: 'active' });
+        groupEvent(g, 'suspend_cleared', 'Penangguhan grup dicabut.');
+        break;
+      }
+      default: continue;
+    }
+    const g = groupByMeta(ev.group_id) || db.groups.find((x) => ev.request_id && x.requestId === ev.request_id);
+    if (g) emitGroup(g);
+  }
+  save();
+}
+
+function handleGroupMessage(m, profiles) {
+  const g = ensureGroup(m.group_id);
+  if (m.type === 'reaction') {
+    const target = idx.wamid.get(m.reaction?.message_id);
+    if (target?.groupId === g.id) { target.reaction = m.reaction.emoji || null; save(); io?.to('admins').emit('group:message', { groupId: g.id, message: target }); }
+    return;
+  }
+  const { type, content } = parseInbound(m);
+  const from = normPhone(m.from);
+  // Pengirim pasti anggota; catat bila belum ada (mis. grup lama sebelum sinkronisasi)
+  if (from && !g.participants.some((p) => samePerson(p, from))) g.participants.push({ waId: from, phone: from, joinedAt: 0, via: 'terdeteksi dari pesan' });
+  const msg = { id: uid('m_'), groupId: g.id, direction: 'in', type, content, wamid: m.id, status: 'received', timestamp: Number(m.timestamp) * 1000 || now(),
+    from, fromName: profiles[m.from] || idx.contactByPhone.get(from)?.name || '', contextId: m.context?.id || null };
+  db.messages.push(msg); idx.wamid.set(msg.wamid, msg);
+  g.lastMessageAt = msg.timestamp; g.unread = (g.unread || 0) + 1;
+  g.preview = `${msg.fromName || '+' + from}: ${String(previewOf(msg) || '').slice(0, 120)}`;
+  save();
+  io?.to('admins').emit('group:message', { groupId: g.id, message: msg, group: groupSummary(g) });
+}
+
+// Kirim pesan ke grup. Pesan yang gagal tetap dicatat (status failed + error) agar terlihat di riwayat grup.
+async function sendToGroup(g, b, user) {
+  if (g.status !== 'active' || !g.groupId) throw new HttpError(400, g.status === 'suspended' ? 'Grup sedang ditangguhkan WhatsApp.' : 'Grup belum aktif (menunggu konfirmasi Meta) atau sudah dihapus.');
+  const type = str(b.type, 40);
+  let payload, record;
+  if (type === 'template') {
+    const tpl = findTemplate(str(b.name, 512), str(b.language, 15));
+    if (!tpl) throw new HttpError(400, 'Template tidak ditemukan. Sinkronkan template terlebih dahulu.');
+    if (tpl.status !== 'APPROVED') throw new HttpError(400, `Template berstatus ${tpl.status}, hanya APPROVED yang dapat dikirim.`);
+    const components = buildTemplateComponents(tpl, b.values || {}, {});
+    payload = { type: 'template', template: { name: tpl.name, language: { code: tpl.language }, ...(components.length ? { components } : {}) } };
+    record = { type: 'template', content: { name: tpl.name, language: tpl.language, body: renderTemplateText(tpl, components) } };
+  } else {
+    if (!GROUP_SEND_TYPES.includes(type)) throw new HttpError(400, 'Grup mendukung pesan teks, media, dan template.');
+    const built = buildOutbound(type, b);
+    payload = { type, ...built.payload };
+    record = { type, content: built.content };
+  }
+  const full = { messaging_product: 'whatsapp', recipient_type: 'group', to: g.groupId, ...payload };
+  if (b.replyTo) { const ctx = byId('messages', b.replyTo); if (ctx?.groupId === g.id && ctx.wamid) full.context = { message_id: ctx.wamid }; }
+  const msg = { id: uid('m_'), groupId: g.id, direction: 'out', ...record, status: 'pending', timestamp: now(), userId: user.id, userName: user.name, contextId: full.context?.message_id || null };
+  try {
+    const r = await sendToMeta(full, { source: 'group', userId: user.id, userName: user.name, template: type === 'template' ? findTemplate(b.name, b.language) : null });
+    Object.assign(msg, { wamid: r.messages?.[0]?.id || null, status: 'accepted' });
+  } catch (e) {
+    Object.assign(msg, { status: 'failed', error: e.message });
+    throw Object.assign(e, { groupMessage: msg });
+  } finally {
+    db.messages.push(msg);
+    if (msg.wamid) idx.wamid.set(msg.wamid, msg);
+    g.lastMessageAt = msg.timestamp; g.preview = 'Anda: ' + String(previewOf(msg) || '').slice(0, 120);
+    save();
+    io?.to('admins').emit('group:message', { groupId: g.id, message: msg, group: groupSummary(g) });
+  }
+  return msg;
+}
+
+/* ── CSAT (survei kepuasan pelanggan) ──
+ * Dikirim saat percakapan ditutup (oleh agen, opsional oleh flow) atau manual dari inbox, hanya bila jendela layanan
+ * 24 jam masih terbuka. Skala 5 memakai pesan daftar (list), skala 3 memakai tombol balasan.
+ * Jawaban (interactive reply berawalan "csat_") dan komentar lanjutan tidak membuka kembali percakapan dan tidak memicu
+ * flow/auto reply. CSAT % = jawaban "puas" (skala 5: nilai 4–5; skala 3: Puas) ÷ jumlah jawaban.
+ */
+const CSAT_SURVEYS_MAX = 20000;
+const CSAT_SCALES = {
+  5: [[5, 'Sangat puas', '★★★★★'], [4, 'Puas', '★★★★☆'], [3, 'Cukup', '★★★☆☆'], [2, 'Kurang puas', '★★☆☆☆'], [1, 'Sangat kecewa', '★☆☆☆☆']],
+  3: [[3, 'Puas'], [2, 'Biasa saja'], [1, 'Tidak puas']],
+};
+const csatSatisfied = (scale, score) => (Number(scale) === 3 ? score === 3 : score >= 4);
+const csatScore5 = (scale, score) => (Number(scale) === 3 ? { 1: 1, 2: 3, 3: 5 }[score] : score); // rata-rata dinormalkan ke skala 5
+function csatDefaults() {
+  return {
+    settings: {
+      enabled: false, scale: 5, sendOnClose: true, sendOnFlowClose: false, onlyIfAgentReplied: true,
+      question: 'Halo {{name}}, terima kasih telah menghubungi kami. Bagaimana penilaian Anda terhadap layanan kami?',
+      button: 'Beri penilaian', footer: 'Survei singkat, cukup satu ketukan',
+      askComment: true, commentPrompt: 'Terima kasih atas penilaiannya! Ada masukan agar kami bisa lebih baik? Silakan balas pesan ini (opsional).',
+      thanks: 'Terima kasih, masukan Anda sangat berarti bagi kami 🙏', commentMinutes: 30, expireHours: 24, cooldownHours: 24,
+    },
+    surveys: [],
+  };
+}
+const csatCfg = () => (db.csat = db.csat || csatDefaults());
+function validateCsat(b) {
+  const prev = csatCfg().settings;
+  const num = (v, min, max, label) => { const n = Number(v); if (!Number.isInteger(n) || n < min || n > max) throw new HttpError(400, `${label} harus bilangan bulat ${min}–${max}.`); return n; };
+  const text = (v, max, label, required = true) => { const t = str(v, max); if (required && !t) throw new HttpError(400, `${label} wajib diisi.`); return t; };
+  const s = {
+    enabled: !!b.enabled, scale: Number(b.scale) === 3 ? 3 : 5,
+    sendOnClose: b.sendOnClose !== false, sendOnFlowClose: !!b.sendOnFlowClose, onlyIfAgentReplied: b.onlyIfAgentReplied !== false,
+    question: text(b.question ?? prev.question, 1024, 'Pertanyaan survei'),
+    button: text(b.button ?? prev.button, 20, 'Teks tombol daftar'),
+    footer: text(b.footer ?? '', 60, 'Footer', false),
+    askComment: !!b.askComment,
+    commentPrompt: text(b.commentPrompt ?? prev.commentPrompt, 1024, 'Pesan permintaan masukan', !!b.askComment),
+    thanks: text(b.thanks ?? prev.thanks, 1024, 'Pesan terima kasih'),
+    commentMinutes: num(b.commentMinutes ?? 30, 1, 1440, 'Batas waktu masukan (menit)'),
+    expireHours: num(b.expireHours ?? 24, 1, 24, 'Masa berlaku survei (jam)'),
+    cooldownHours: num(b.cooldownHours ?? 24, 0, 720, 'Jeda survei per kontak (jam)'),
+  };
+  return s;
+}
+// Survei terakhir per percakapan (indeks in-memory; dibangun saat pertama dipakai)
+let csatIdx = null;
+const csatOf = (conv) => {
+  if (!csatIdx) { csatIdx = new Map(); for (const x of csatCfg().surveys) csatIdx.set(x.conversationId, x); }
+  return csatIdx.get(conv.id) || null;
+};
+const csatPush = (survey) => {
+  const list = csatCfg().surveys;
+  list.push(survey); csatOf({}); csatIdx.set(survey.conversationId, survey);
+  if (list.length > CSAT_SURVEYS_MAX) list.splice(0, list.length - CSAT_SURVEYS_MAX);
+};
+const csatPublic = (x) => x && { id: x.id, status: x.status, score: x.score ?? null, scale: x.scale, comment: x.comment || '', sentAt: x.sentAt, answeredAt: x.answeredAt || 0, reason: x.reason || '' };
+
+// Kirim survei. trigger: 'close' | 'flow' | 'manual'. Mengembalikan catatan survei (status sent / skipped / failed).
+async function sendCsat(conv, { trigger, user }) {
+  const cfg = csatCfg(), s = cfg.settings, contact = byId('contacts', conv.contactId);
+  if (!contact) return null;
+  const manual = trigger === 'manual', at = now();
+  const last = cfg.surveys.slice().reverse().find((x) => x.contactId === contact.id && x.status !== 'skipped');
+  let reason = null;
+  if (!windowOpen(conv)) reason = 'Jendela layanan 24 jam sudah tertutup.';
+  else if (last?.status === 'sent' && last.expiresAt > at) reason = 'Masih ada survei yang belum dijawab.';
+  else if (!manual && s.cooldownHours && last && at - last.sentAt < s.cooldownHours * 3600000) reason = `Kontak sudah disurvei dalam ${s.cooldownHours} jam terakhir.`;
+  else if (!manual && s.onlyIfAgentReplied && lastHumanReplyAt(conv) <= (csatOf(conv)?.sentAt || 0)) reason = 'Belum ada balasan agen sejak survei terakhir.';
+  const agent = conv.assignedTo ? byId('users', conv.assignedTo) : null;
+  const survey = { id: uid('cs').replace(/[^A-Za-z0-9]/g, '').slice(0, 14), conversationId: conv.id, contactId: contact.id, phone: contact.phone,
+    agentId: agent?.id || null, agentName: agent?.name || '', scale: s.scale, trigger, by: user?.name || (trigger === 'flow' ? 'Flow' : 'Sistem'),
+    sentAt: at, expiresAt: at + s.expireHours * 3600000, status: reason ? 'skipped' : 'sent', reason, score: null, comment: '', wamid: null };
+  if (reason) {
+    // Lewati tanpa mencatat untuk pemicu otomatis biasa (tidak menambah noise); catat bila diminta manual
+    if (manual) throw new HttpError(400, 'Survei tidak dikirim: ' + reason);
+    return survey;
+  }
+  const rows = CSAT_SCALES[s.scale];
+  const body = fillVars(s.question, contact).slice(0, 1024);
+  let interactive, record;
+  if (s.scale === 5) {
+    const list = rows.map(([score, title, desc]) => ({ id: `csat_${survey.id}_${score}`, title, description: desc }));
+    interactive = { type: 'list', body: { text: body }, action: { button: s.button, sections: [{ title: 'Penilaian', rows: list }] } };
+    record = { kind: 'list', header: '', body, footer: s.footer, button: s.button, rows: list.map((r) => ({ id: r.id, title: r.title, description: r.description })) };
+  } else {
+    interactive = { type: 'button', body: { text: body }, action: { buttons: rows.map(([score, title]) => ({ type: 'reply', reply: { id: `csat_${survey.id}_${score}`, title } })) } };
+    record = { kind: 'button', header: '', body, footer: s.footer, buttons: rows.map((r) => r[1]) };
+  }
+  if (s.footer) interactive.footer = { text: s.footer };
+  try {
+    const r = await sendToMeta({ messaging_product: 'whatsapp', recipient_type: 'individual', to: contact.phone, type: 'interactive', interactive },
+      { source: 'csat', contact, conversation: conv, userId: user?.id, userName: 'CSAT' });
+    survey.wamid = r.messages?.[0]?.id || null;
+    addMessage(conv, { direction: 'out', type: 'interactive', content: record, wamid: survey.wamid, status: 'accepted', userName: 'Survei CSAT', auto: 'csat' });
+  } catch (e) {
+    Object.assign(survey, { status: 'failed', reason: e.message });
+    if (manual) { csatPush(survey); save(); throw e; }
+  }
+  csatPush(survey);
+  save();
+  emitConv(conv, 'conversation:update', serializeConv(conv));
+  return survey;
+}
+function maybeSendCsat(conv, trigger, user) {
+  const s = csatCfg().settings;
+  if (!s.enabled || (trigger === 'close' && !s.sendOnClose) || (trigger === 'flow' && !s.sendOnFlowClose)) return;
+  sendCsat(conv, { trigger, user }).catch((e) => console.warn('[csat]', e.message));
+}
+async function csatText(conv, contact, text) {
+  try {
+    const body = fillVars(text, contact).slice(0, 4096);
+    const r = await sendToMeta({ messaging_product: 'whatsapp', recipient_type: 'individual', to: contact.phone, type: 'text', text: { body } },
+      { source: 'csat', contact, conversation: conv, userName: 'CSAT' });
+    addMessage(conv, { direction: 'out', type: 'text', content: { body }, wamid: r.messages?.[0]?.id, status: 'accepted', userName: 'Survei CSAT', auto: 'csat' });
+  } catch (e) { console.warn('[csat]', e.message); }
+}
+// Tangani jawaban survei. true = pesan ini milik survei (jangan buka ulang percakapan / jalankan flow).
+function handleCsatReply(conv, contact, msg) {
+  const cfg = csatCfg(), s = cfg.settings;
+  const m = msg.type === 'interactive_reply' && /^csat_([A-Za-z0-9]+)_([1-5])$/.exec(msg.content.id || '');
+  if (m) {
+    const survey = cfg.surveys.find((x) => x.id === m[1] && x.conversationId === conv.id);
+    if (!survey) return false;
+    if (survey.status === 'answered') return true; // jawaban ganda: abaikan
+    const score = Number(m[2]);
+    Object.assign(survey, { status: 'answered', score, satisfied: csatSatisfied(survey.scale, score), answeredAt: now(), late: now() > survey.expiresAt });
+    if (s.askComment) survey.commentUntil = now() + s.commentMinutes * 60000;
+    save();
+    csatText(conv, contact, s.askComment ? s.commentPrompt : s.thanks);
+    io?.to('admins').emit('csat:update', csatPublic(survey));
+    return true;
+  }
+  if (msg.type === 'text') {
+    const survey = csatOf(conv);
+    if (survey?.status === 'answered' && !survey.comment && survey.commentUntil > now()) {
+      Object.assign(survey, { comment: str(msg.content.body, 2000), commentAt: now(), commentUntil: 0 });
+      save();
+      csatText(conv, contact, s.thanks);
+      io?.to('admins').emit('csat:update', csatPublic(survey));
+      return true;
+    }
+  }
+  return false;
+}
+// Survei yang tidak dijawab sampai masa berlakunya habis
+setInterval(() => {
+  let n = 0;
+  for (const x of csatCfg().surveys) if (x.status === 'sent' && x.expiresAt < now()) { x.status = 'expired'; n++; }
+  if (n) save();
+}, 5 * 60000);
+
+function csatReport({ from, to, agentId }) {
+  const rows = csatCfg().surveys.filter((x) => x.sentAt >= from && x.sentAt < to && (!agentId || x.agentId === agentId) && x.status !== 'skipped');
+  const delivered = rows.filter((x) => x.status !== 'failed');
+  const answered = rows.filter((x) => x.status === 'answered');
+  const pct = (a, b) => (b ? Math.round((a / b) * 1000) / 10 : null);
+  const avg = (list) => (list.length ? Math.round((list.reduce((t, x) => t + csatScore5(x.scale, x.score), 0) / list.length) * 100) / 100 : null);
+  const sum = (list) => ({ sent: list.filter((x) => x.status !== 'failed').length, answered: list.filter((x) => x.status === 'answered').length,
+    csat: pct(list.filter((x) => x.satisfied).length, list.filter((x) => x.status === 'answered').length), avg: avg(list.filter((x) => x.status === 'answered')) });
+  const dist = {};
+  for (const x of answered) { const k = `${x.scale}:${x.score}`; dist[k] = (dist[k] || 0) + 1; }
+  const agents = {};
+  for (const x of rows) (agents[x.agentId || ''] = agents[x.agentId || ''] || { id: x.agentId, name: x.agentName || 'Belum ditugaskan', list: [] }).list.push(x);
+  const days = Math.min(366, Math.ceil((to - from) / 86400000));
+  const daily = Array.from({ length: days }, (_, i) => ({ t: from + i * 86400000, list: [] }));
+  for (const x of answered) { const d = daily[Math.floor((x.sentAt - from) / 86400000)]; if (d) d.list.push(x); }
+  return {
+    from, to, ...sum(rows), responseRate: pct(answered.length, delivered.length), failed: rows.filter((x) => x.status === 'failed').length,
+    expired: rows.filter((x) => x.status === 'expired').length, satisfied: answered.filter((x) => x.satisfied).length,
+    distribution: dist,
+    agents: Object.values(agents).map((a) => ({ id: a.id, name: a.name, ...sum(a.list) })).sort((a, b) => b.answered - a.answered),
+    daily: daily.map((d) => ({ t: d.t, answered: d.list.length, csat: pct(d.list.filter((x) => x.satisfied).length, d.list.length) })),
+    comments: answered.filter((x) => x.comment).slice(-50).reverse().map((x) => ({ ...csatPublic(x), agentName: x.agentName, contact: contactLabel(byId('contacts', x.contactId) || { phone: x.phone }), conversationId: x.conversationId })),
+    recent: rows.slice(-100).reverse().map((x) => ({ ...csatPublic(x), agentName: x.agentName, trigger: x.trigger, contact: contactLabel(byId('contacts', x.contactId) || { phone: x.phone }), conversationId: x.conversationId })),
+  };
 }
 
 function handleTemplateStatus(value) {
@@ -1416,6 +1819,11 @@ app.post('/webhook', (req, res) => {
           handleMessages(v); handleStatuses(v);
         } else if (change.field === 'message_template_status_update') handleTemplateStatus(v);
         else if (change.field === 'calls') handleCalls(v);
+        else if (GROUP_FIELDS.includes(change.field)) {
+          const ourPhone = meta().phoneNumberId;
+          if (ourPhone && v.metadata?.phone_number_id && v.metadata.phone_number_id !== ourPhone) continue;
+          handleGroupWebhook(change.field, v);
+        }
       }
     }
     save();
@@ -1705,6 +2113,249 @@ app.delete('/api/flows/:id', requireAdmin, wrap(async (req, res) => {
   audit(req, 'flow.delete', f.name); save();
   res.json({ ok: true });
 }));
+
+/* Grup WhatsApp (admin) */
+const groupMsgs = (g, n = 300) => db.messages.filter((m) => m.groupId === g.id).slice(-n);
+const groupDetail = (g) => ({ ...groupSummary(g), events: g.events.slice(0, 100), invites: g.invites.slice(-100).reverse(), messages: groupMsgs(g) });
+const needActiveGroup = (g) => { if (!g.groupId || ['creating', 'deleted', 'failed'].includes(g.status)) throw new HttpError(400, 'Grup belum aktif atau sudah dihapus.'); return g.groupId; };
+app.get('/api/groups', requireAdmin, (req, res) => {
+  res.json({
+    groups: db.groups.slice().sort((a, b) => (b.lastMessageAt || b.createdAt) - (a.lastMessageAt || a.createdAt)).map(groupSummary),
+    maxParticipants: GROUP_MAX_PARTICIPANTS, webhookFields: GROUP_FIELDS, configured: !!meta().phoneNumberId && !!meta().accessToken,
+  });
+});
+// Ambil daftar grup aktif dari Meta (mis. grup yang dibuat sebelum fitur ini) lalu gabungkan berdasarkan ID grup
+app.post('/api/groups/sync', requireAdmin, wrap(async (req, res) => {
+  const seen = []; let after, pages = 0;
+  do {
+    const r = await graph('get', `${needPhone()}/groups`, { params: { limit: 100, after } });
+    seen.push(...(r.data?.groups || r.data || []));
+    after = r.paging?.next ? r.paging.cursors?.after : null;
+  } while (after && ++pages < 50);
+  let added = 0;
+  for (const x of seen) {
+    let g = groupByMeta(x.id);
+    if (!g) { g = newGroup({ groupId: String(x.id), status: 'active', external: true, createdAt: Number(x.created_at) * 1000 || now() }); db.groups.push(g); added++; groupEvent(g, 'import', 'Diimpor dari Meta.'); }
+    if (x.subject) g.subject = x.subject;
+    if (g.status === 'creating' || g.status === 'deleted') g.status = 'active';
+  }
+  audit(req, 'group.sync', `${seen.length} grup aktif, ${added} baru`); save();
+  res.json({ total: seen.length, added, groups: db.groups.map(groupSummary) });
+}));
+app.post('/api/groups', requireAdmin, wrap(async (req, res) => {
+  const subject = str(req.body.subject, 128), description = str(req.body.description, 2048);
+  if (!subject) throw new HttpError(400, 'Nama grup wajib diisi (maks. 128 karakter).');
+  const joinApprovalMode = req.body.joinApprovalMode === 'approval_required' ? 'approval_required' : 'auto_approve';
+  const r = await graph('post', `${needPhone()}/groups`, { data: { messaging_product: 'whatsapp', subject, ...(description ? { description } : {}), join_approval_mode: joinApprovalMode } });
+  // Hasil akhir (ID grup & tautan undangan) datang lewat webhook group_lifecycle_update
+  const g = newGroup({ subject, description, joinApprovalMode, requestId: r.request_id || null, groupId: r.group_id || null, createdBy: req.user.name });
+  groupEvent(g, 'create_requested', `Permintaan pembuatan dikirim oleh ${req.user.name}. Menunggu konfirmasi Meta.`);
+  db.groups.push(g); audit(req, 'group.create', subject); save();
+  emitGroup(g);
+  res.json(groupDetail(g));
+}));
+app.get('/api/groups/:id', requireAdmin, (req, res) => res.json(groupDetail(groupOr404(req.params.id))));
+// Muat ulang info, tautan undangan, dan permintaan bergabung dari Meta
+app.post('/api/groups/:id/refresh', requireAdmin, wrap(async (req, res) => {
+  const g = groupOr404(req.params.id), gid = needActiveGroup(g);
+  const info = await graph('get', gid, { params: { fields: 'subject,description,participants,join_approval_mode,suspended,creation_timestamp,total_participant_count' } });
+  Object.assign(g, { subject: info.subject ?? g.subject, description: info.description ?? g.description, joinApprovalMode: info.join_approval_mode || g.joinApprovalMode, suspended: !!info.suspended });
+  g.status = g.suspended ? 'suspended' : 'active';
+  if (Array.isArray(info.participants)) {
+    const prev = g.participants;
+    g.participants = info.participants.map((p) => prev.find((x) => samePerson(x, p.wa_id)) || { waId: String(p.wa_id), phone: normPhone(p.wa_id), joinedAt: 0, via: 'sinkronisasi' });
+  }
+  const warn = [];
+  try { g.inviteLink = (await graph('get', `${gid}/invite_link`)).invite_link || g.inviteLink; } catch (e) { warn.push('Tautan undangan: ' + e.message); }
+  try {
+    const jr = await graph('get', `${gid}/join_requests`);
+    g.joinRequests = (jr.data || []).map((x) => ({ id: String(x.join_request_id), waId: String(x.wa_id || ''), at: Number(x.creation_timestamp) * 1000 || 0 }));
+  } catch (e) { warn.push('Permintaan bergabung: ' + e.message); }
+  g.syncedAt = now(); save(); emitGroup(g);
+  res.json({ ...groupDetail(g), warnings: warn });
+}));
+app.patch('/api/groups/:id', requireAdmin, wrap(async (req, res) => {
+  const g = groupOr404(req.params.id), gid = needActiveGroup(g);
+  const data = { messaging_product: 'whatsapp' }, changes = [];
+  if (req.body.subject !== undefined) { const s = str(req.body.subject, 128); if (!s) throw new HttpError(400, 'Nama grup tidak boleh kosong.'); if (s !== g.subject) { data.subject = s; changes.push('nama'); } }
+  if (req.body.description !== undefined) { const d = str(req.body.description, 2048); if (d !== g.description) { data.description = d; changes.push('deskripsi'); } }
+  if (!changes.length) throw new HttpError(400, 'Tidak ada perubahan.');
+  await graph('post', gid, { data });
+  // Nilai baru diterapkan saat webhook group_settings_update mengonfirmasi
+  g.pending = { ...g.pending, ...(data.subject ? { subject: data.subject } : {}), ...(data.description !== undefined ? { description: data.description } : {}) };
+  groupEvent(g, 'settings_requested', `Perubahan ${changes.join(' & ')} dikirim oleh ${req.user.name}. Menunggu konfirmasi Meta.`);
+  audit(req, 'group.update', `${g.subject}: ${changes.join(', ')}`); save(); emitGroup(g);
+  res.json(groupDetail(g));
+}));
+app.post('/api/groups/:id/photo', requireAdmin, wrap(async (req, res) => {
+  const g = groupOr404(req.params.id), gid = needActiveGroup(g);
+  const m = /^data:image\/jpeg;base64,([A-Za-z0-9+/=]+)$/.exec(String(req.body.dataUrl || ''));
+  if (!m) throw new HttpError(400, 'Foto grup harus JPEG.');
+  const buf = Buffer.from(m[1], 'base64');
+  if (buf.length > 5 * 1024 * 1024) throw new HttpError(400, 'Foto grup maksimal 5 MB.');
+  const fd = new FormData();
+  fd.append('messaging_product', 'whatsapp');
+  fd.append('profile_picture_file', new Blob([buf], { type: 'image/jpeg' }), 'group.jpg');
+  await graph('post', gid, { data: fd });
+  g.photo = { data: m[1], status: 'pending', at: now() };
+  groupEvent(g, 'settings_requested', `Foto grup dikirim oleh ${req.user.name}. Menunggu konfirmasi Meta.`);
+  audit(req, 'group.photo', g.subject); save(); emitGroup(g);
+  res.json(groupDetail(g));
+}));
+app.get('/api/groups/:id/photo', requireAdmin, (req, res) => {
+  const g = groupOr404(req.params.id);
+  if (!g.photo?.data) return res.sendStatus(404);
+  res.set('Cache-Control', 'private, max-age=300').type('image/jpeg').send(Buffer.from(g.photo.data, 'base64'));
+});
+app.delete('/api/groups/:id', requireAdmin, wrap(async (req, res) => {
+  const g = groupOr404(req.params.id);
+  // Grup yang gagal dibuat / sudah dihapus di Meta: cukup hapus catatan lokal beserta pesannya
+  if (!g.groupId || ['failed', 'deleted'].includes(g.status)) {
+    db.groups.splice(db.groups.indexOf(g), 1);
+    db.messages = db.messages.filter((m) => { if (m.groupId !== g.id) return true; if (m.wamid) idx.wamid.delete(m.wamid); return false; });
+    audit(req, 'group.forget', g.subject); save();
+    return res.json({ ok: true, removed: true });
+  }
+  await graph('delete', g.groupId);
+  g.status = 'deleting';
+  groupEvent(g, 'delete_requested', `Penghapusan diminta oleh ${req.user.name}. Menunggu konfirmasi Meta.`);
+  audit(req, 'group.delete', g.subject); save(); emitGroup(g);
+  res.json(groupDetail(g));
+}));
+app.post('/api/groups/:id/invite-link/reset', requireAdmin, wrap(async (req, res) => {
+  const g = groupOr404(req.params.id), gid = needActiveGroup(g);
+  const r = await graph('post', `${gid}/invite_link`, { data: { messaging_product: 'whatsapp' } });
+  if (!r.invite_link) throw new HttpError(502, 'Meta tidak mengembalikan tautan undangan baru.');
+  g.inviteLink = r.invite_link;
+  groupEvent(g, 'invite_reset', `Tautan undangan diperbarui oleh ${req.user.name}. Tautan lama tidak berlaku lagi.`);
+  audit(req, 'group.invite_reset', g.subject); save(); emitGroup(g);
+  res.json(groupDetail(g));
+}));
+// Kirim tautan undangan ke kontak: pesan teks bila jendela 24 jam terbuka, selain itu wajib template APPROVED
+app.post('/api/groups/:id/invite', requireAdmin, wrap(async (req, res) => {
+  const g = groupOr404(req.params.id); needActiveGroup(g);
+  if (!g.inviteLink) throw new HttpError(400, 'Tautan undangan belum tersedia. Klik Muat ulang dari Meta.');
+  const ids = [...new Set((Array.isArray(req.body.contactIds) ? req.body.contactIds : []).map(String))].slice(0, 50);
+  if (!ids.length) throw new HttpError(400, 'Pilih minimal satu kontak.');
+  const text = str(req.body.text, 4000);
+  const tpl = req.body.template?.name ? findTemplate(str(req.body.template.name, 512), str(req.body.template.language, 15)) : null;
+  if (req.body.template?.name && (!tpl || tpl.status !== 'APPROVED')) throw new HttpError(400, 'Template undangan tidak ditemukan atau belum APPROVED.');
+  const withLink = (v) => String(v ?? '').replace(/\{\{\s*link\s*\}\}/g, g.inviteLink);
+  const results = [];
+  for (const cid of ids) {
+    const contact = byId('contacts', cid);
+    if (!contact) { results.push({ contactId: cid, ok: false, error: 'Kontak tidak ditemukan.' }); continue; }
+    const conv = getOrCreateConv(contact);
+    const row = { contactId: cid, phone: contact.phone, name: contact.name || contact.waName || '' };
+    try {
+      if (windowOpen(conv) && text) {
+        const body = fillVars(withLink(text.includes('{{link}}') ? text : `${text}\n\n{{link}}`), contact).slice(0, 4096);
+        const r = await sendToMeta({ messaging_product: 'whatsapp', recipient_type: 'individual', to: contact.phone, type: 'text', text: { body, preview_url: true } },
+          { source: 'inbox', contact, conversation: conv, userId: req.user.id, userName: req.user.name });
+        addMessage(conv, { direction: 'out', type: 'text', content: { body }, wamid: r.messages?.[0]?.id, status: 'accepted', userId: req.user.id, userName: req.user.name });
+        row.via = 'text';
+      } else if (tpl) {
+        const v = req.body.template.values || {};
+        const base = (tpl.components || []).find((c) => c.type === 'BUTTONS')?.buttons || [];
+        // Akhiran URL tombol: bila URL template "https://chat.whatsapp.com/{{1}}", isi dengan ID tautan saja
+        const buttonUrl = base.map((btn) => {
+          if (btn.type !== 'URL' || !/\{\{/.test(btn.url || '')) return '';
+          const prefix = btn.url.replace(/\{\{.*$/, '');
+          return g.inviteLink.startsWith(prefix) ? g.inviteLink.slice(prefix.length) : g.inviteLink;
+        });
+        await sendTemplateTo(contact, tpl, { header: (v.header || []).map(withLink), body: (v.body || []).map(withLink), headerMedia: v.headerMedia, buttonUrl },
+          { userId: req.user.id, userName: req.user.name });
+        row.via = 'template';
+      } else throw new HttpError(400, 'Di luar jendela layanan 24 jam: pilih template undangan yang disetujui.');
+      row.ok = true;
+    } catch (e) { row.ok = false; row.error = e.message; }
+    results.push(row);
+    g.invites.push({ ...row, at: now(), by: req.user.name, joinedAt: g.participants.some((p) => p.phone === contact.phone) ? now() : null });
+  }
+  const sent = results.filter((r) => r.ok).length;
+  groupEvent(g, 'invite_sent', `${req.user.name} mengirim undangan: ${sent} berhasil, ${results.length - sent} gagal.`);
+  if (g.invites.length > 500) g.invites.splice(0, g.invites.length - 500);
+  audit(req, 'group.invite', `${g.subject}: ${sent}/${results.length}`); save(); emitGroup(g);
+  res.json({ results, group: groupDetail(g) });
+}));
+app.post('/api/groups/:id/participants/remove', requireAdmin, wrap(async (req, res) => {
+  const g = groupOr404(req.params.id), gid = needActiveGroup(g);
+  const users = [...new Set((Array.isArray(req.body.participants) ? req.body.participants : []).map((x) => str(String(x), 40)).filter(Boolean))];
+  if (!users.length || users.length > GROUP_MAX_PARTICIPANTS) throw new HttpError(400, `Pilih 1–${GROUP_MAX_PARTICIPANTS} peserta.`);
+  await graph('delete', `${gid}/participants`, { data: { messaging_product: 'whatsapp', participants: users.map((user) => ({ user })) } });
+  g.pending = { ...g.pending, remove: users };
+  groupEvent(g, 'remove_requested', `${req.user.name} meminta mengeluarkan ${users.map(personLabel).join(', ')}. Menunggu konfirmasi Meta.`);
+  audit(req, 'group.participants_remove', `${g.subject}: ${users.length}`); save(); emitGroup(g);
+  res.json(groupDetail(g));
+}));
+app.post('/api/groups/:id/join-requests/:action', requireAdmin, wrap(async (req, res) => {
+  const g = groupOr404(req.params.id), gid = needActiveGroup(g);
+  const approve = req.params.action === 'approve';
+  if (!approve && req.params.action !== 'reject') throw new HttpError(404, 'Aksi tidak dikenal.');
+  const ids = [...new Set((Array.isArray(req.body.ids) ? req.body.ids : []).map(String))].filter((id) => g.joinRequests.some((r) => r.id === id));
+  if (!ids.length) throw new HttpError(400, 'Pilih permintaan bergabung.');
+  const r = await graph(approve ? 'post' : 'delete', `${gid}/join_requests`, { data: { messaging_product: 'whatsapp', join_requests: ids } });
+  const done = (approve ? r.approved_join_requests : r.rejected_join_requests) || [];
+  const failed = r.failed_join_requests || [];
+  const doneIds = new Set(done.map((x) => String(x.join_request_id || x)));
+  // Yang disetujui masuk ke daftar peserta saat webhook group_participants_add tiba
+  g.joinRequests = g.joinRequests.filter((x) => !doneIds.has(x.id));
+  groupEvent(g, approve ? 'join_approved' : 'join_rejected', `${req.user.name} ${approve ? 'menyetujui' : 'menolak'} ${doneIds.size} permintaan bergabung${failed.length ? `, ${failed.length} gagal` : ''}.`);
+  audit(req, 'group.join_' + req.params.action, `${g.subject}: ${doneIds.size}`); save(); emitGroup(g);
+  res.json({ done: [...doneIds], failed, errors: metaErrText(r.errors), group: groupDetail(g) });
+}));
+app.post('/api/groups/:id/messages', requireAdmin, wrap(async (req, res) => {
+  // Bila gagal, pesan tetap tercatat berstatus failed (lihat sendToGroup) dan error diteruskan ke pengirim
+  res.json(await sendToGroup(groupOr404(req.params.id), req.body || {}, req.user));
+}));
+app.post('/api/groups/:id/read', requireAdmin, (req, res) => {
+  const g = groupOr404(req.params.id);
+  g.unread = 0; save();
+  res.json({ ok: true });
+});
+
+/* CSAT */
+// Rentang laporan: from/to berupa tanggal YYYY-MM-DD (inklusif), default 30 hari terakhir
+function csatRange(q) {
+  const day = (v) => (/^\d{4}-\d{2}-\d{2}$/.test(v || '') ? new Date(v + 'T00:00:00').getTime() : NaN);
+  let to = day(q.to), from = day(q.from);
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  if (!Number.isFinite(to)) to = today.getTime();
+  if (!Number.isFinite(from)) from = to - 29 * 86400000;
+  if (from > to) throw new HttpError(400, 'Tanggal mulai harus sebelum tanggal selesai.');
+  if (to - from > 365 * 86400000) throw new HttpError(400, 'Rentang maksimal 1 tahun.');
+  return { from, to: to + 86400000 };
+}
+// Agen hanya melihat nilai miliknya sendiri
+const csatAgentFilter = (req) => (req.user.role === 'admin' ? str(req.query.agent, 40) || null : req.user.id);
+app.get('/api/csat/settings', requireAdmin, (req, res) => res.json(csatCfg().settings));
+app.put('/api/csat/settings', requireAdmin, wrap(async (req, res) => {
+  const s = validateCsat(req.body || {});
+  csatCfg().settings = s;
+  audit(req, 'csat.settings', `${s.enabled ? 'aktif' : 'nonaktif'}, skala ${s.scale}`); save();
+  res.json(s);
+}));
+app.get('/api/csat/report', (req, res) => {
+  const r = csatReport({ ...csatRange(req.query), agentId: csatAgentFilter(req) });
+  res.json({ ...r, settings: req.user.role === 'admin' ? csatCfg().settings : { enabled: csatCfg().settings.enabled, scale: csatCfg().settings.scale } });
+});
+app.get('/api/csat/export', requireAdmin, (req, res) => {
+  const { from, to } = csatRange(req.query), agentId = csatAgentFilter(req);
+  const rows = csatCfg().surveys.filter((x) => x.sentAt >= from && x.sentAt < to && (!agentId || x.agentId === agentId));
+  const iso = (t) => (t ? new Date(t).toISOString() : '');
+  const STATUS = { sent: 'menunggu jawaban', answered: 'dijawab', expired: 'kedaluwarsa', failed: 'gagal', skipped: 'dilewati' };
+  const lines = ['dikirim,nomor,kontak,agen,pemicu,status,skala,nilai,puas,komentar,dijawab,keterangan',
+    ...rows.map((x) => [iso(x.sentAt), x.phone, byId('contacts', x.contactId)?.name || '', x.agentName, x.trigger, STATUS[x.status] || x.status, x.scale, x.score ?? '',
+      x.status === 'answered' ? (x.satisfied ? 'ya' : 'tidak') : '', x.comment, iso(x.answeredAt), x.reason || ''].map(csvCell).join(','))];
+  audit(req, 'csat.export', rows.length + ' baris');
+  res.set('Content-Disposition', `attachment; filename="csat-${new Date(from).toISOString().slice(0, 10)}.csv"`).type('text/csv').send('﻿' + lines.join('\n'));
+});
+app.post('/api/conversations/:id/csat', wrap(async (req, res) => {
+  const conv = convOr404(req);
+  const survey = await sendCsat(conv, { trigger: 'manual', user: req.user });
+  audit(req, 'csat.send', byId('contacts', conv.contactId)?.phone);
+  res.json(csatPublic(survey));
+}));
 app.get('/api/audit', requireAdmin, (req, res) => {
   const q = str(req.query.q, 100).toLowerCase();
   let rows = db.audit.slice().reverse();
@@ -1793,7 +2444,7 @@ app.put('/api/costs/settings', requireAdmin, wrap(async (req, res) => {
   res.json(cfg.settings);
 }));
 /* Log pesan API (admin): semua pesan keluar via Cloud API + status pengiriman dari webhook */
-const LOG_SOURCES = { inbox: 'Dashboard', campaign: 'Campaign', auto_reply: 'Auto reply', flow: 'Flow otomatis', external: 'Di luar Kontaq' };
+const LOG_SOURCES = { inbox: 'Dashboard', campaign: 'Campaign', auto_reply: 'Auto reply', flow: 'Flow otomatis', group: 'Grup', csat: 'Survei CSAT', external: 'Di luar Kontaq' };
 function logRow(e) {
   const msg = e.wamid ? idx.wamid.get(e.wamid) : null;
   const contact = e.contactId ? byId('contacts', e.contactId) : idx.contactByPhone.get(e.to);
@@ -2086,8 +2737,10 @@ app.post('/api/conversations/:id/read', wrap(async (req, res) => {
 app.patch('/api/conversations/:id', wrap(async (req, res) => {
   const conv = convOr404(req);
   const b = req.body, changes = [];
+  let closing = false;
   if (b.status !== undefined) {
     if (!['open', 'pending', 'closed'].includes(b.status)) throw new HttpError(400, 'Status tidak valid.');
+    if (b.status === 'closed' && conv.status !== 'closed') closing = true;
     conv.status = b.status; changes.push('status=' + b.status);
   }
   if (b.assignedTo !== undefined) {
@@ -2103,6 +2756,7 @@ app.patch('/api/conversations/:id', wrap(async (req, res) => {
   }
   audit(req, 'conversation.update', `${byId('contacts', conv.contactId)?.phone}: ${changes.join(', ')}`); save();
   emitConv(conv, 'conversation:update', serializeConv(conv));
+  if (closing) maybeSendCsat(conv, 'close', req.user);
   res.json(serializeConv(conv));
 }));
 app.post('/api/conversations/:id/notes', wrap(async (req, res) => {
@@ -2139,8 +2793,11 @@ app.get('/api/media/:id', wrap(async (req, res) => {
   if (!/^\d+$/.test(req.params.id)) throw new HttpError(400, 'ID media tidak valid.');
   const owner = db.messages.find((m) => m.content?.mediaId === req.params.id);
   if (!owner) throw new HttpError(404, 'Media tidak ditemukan.');
-  const conv = byId('conversations', owner.conversationId);
-  if (!conv || !canSeeConv(req.user, conv)) throw new HttpError(404, 'Media tidak ditemukan.');
+  if (owner.groupId) { if (req.user.role !== 'admin') throw new HttpError(404, 'Media tidak ditemukan.'); }
+  else {
+    const conv = byId('conversations', owner.conversationId);
+    if (!conv || !canSeeConv(req.user, conv)) throw new HttpError(404, 'Media tidak ditemukan.');
+  }
   const info = await graph('get', req.params.id);
   try {
     const r = await axios.get(info.url, { responseType: 'stream', headers: { Authorization: `Bearer ${meta().accessToken}` }, timeout: 60000 });

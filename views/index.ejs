@@ -70,7 +70,7 @@
         </span>
         <span class="font-semibold tracking-tight text-[14px]">Kontaq</span>
       </div>
-      <nav id="nav" class="flex-1 p-2 space-y-0.5 overflow-y-auto"></nav>
+      <nav id="nav" class="flex-1 p-2 overflow-y-auto scroll-thin flex flex-col" aria-label="Menu utama"></nav>
       <div class="p-3 border-t bd">
         <div class="flex items-center gap-1.5">
           <span class="avatar" id="me-avatar"></span>
@@ -216,6 +216,11 @@
     tag: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.6 13.4 13.4 20.6a2 2 0 0 1-2.8 0L2 12V2h10l8.6 8.6a2 2 0 0 1 0 2.8z"/><circle cx="7" cy="7" r="1.5"/></svg>',
     check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6 9 17l-5-5"/></svg>',
     copy: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
+    group: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="8" r="3"/><path d="M2 20v-1.5A4.5 4.5 0 0 1 6.5 14h5A4.5 4.5 0 0 1 16 18.5V20"/><path d="M17 5.1a3 3 0 0 1 0 5.8M19 20v-1.5a4.5 4.5 0 0 0-2-3.7"/></svg>',
+    star: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1 6.2-5.5-2.9-5.5 2.9 1-6.2L3 9.6l6.2-.9z"/></svg>',
+    link: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7 0l2-2a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-2 2a5 5 0 0 0 7 7l1-1"/></svg>',
+    userPlus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6M22 11h-6"/></svg>',
+    userX: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="m17 9 5 5m0-5-5 5"/></svg>',
   };
   const tick = (s) => ({
     pending: '<span title="Menunggu">🕓</span>', accepted: '<span class="ink-3" title="Diterima Meta, menunggu konfirmasi webhook">✓</span>', sent: '<span title="Terkirim">✓</span>', delivered: '<span title="Diterima">✓✓</span>',
@@ -238,17 +243,27 @@
     settingsTab: null,
     call: null, pc: null,
   };
+  // Menu dikelompokkan per fungsi; bagian tanpa menu yang boleh diakses (mis. agen) disembunyikan
+  const NAV_SECTIONS = [
+    { id: 'main', label: '' },
+    { id: 'customers', label: 'Pelanggan' },
+    { id: 'messaging', label: 'Pesan' },
+    { id: 'automation', label: 'Otomasi' },
+    { id: 'system', label: '' },
+  ];
   const VIEWS = [
-    { id: 'dashboard', label: 'Dashboard', icon: 'dash' },
-    { id: 'inbox', label: 'Inbox', icon: 'inbox' },
-    { id: 'contacts', label: 'Kontak', icon: 'users' },
-    { id: 'templates', label: 'Template', icon: 'tpl' },
-    { id: 'campaigns', label: 'Campaign', icon: 'campaign', admin: true },
-    { id: 'messagelog', label: 'Log pesan', icon: 'log', admin: true },
-    { id: 'autoreply', label: 'Auto reply', icon: 'bolt', admin: true },
-    { id: 'flows', label: 'Flow otomatis', icon: 'flow', admin: true },
-    { id: 'calls', label: 'Panggilan', icon: 'phone' },
-    { id: 'settings', label: 'Pengaturan', icon: 'gear' },
+    { id: 'dashboard', label: 'Dashboard', icon: 'dash', section: 'main' },
+    { id: 'inbox', label: 'Inbox', icon: 'inbox', section: 'main' },
+    { id: 'calls', label: 'Panggilan', icon: 'phone', section: 'main' },
+    { id: 'contacts', label: 'Kontak', icon: 'users', section: 'customers' },
+    { id: 'groups', label: 'Grup', icon: 'group', section: 'customers', admin: true },
+    { id: 'csat', label: 'Kepuasan (CSAT)', icon: 'star', section: 'customers' },
+    { id: 'templates', label: 'Template', icon: 'tpl', section: 'messaging' },
+    { id: 'campaigns', label: 'Campaign', icon: 'campaign', section: 'messaging', admin: true },
+    { id: 'messagelog', label: 'Log pesan', icon: 'log', section: 'messaging', admin: true },
+    { id: 'autoreply', label: 'Auto reply', icon: 'bolt', section: 'automation', admin: true },
+    { id: 'flows', label: 'Flow otomatis', icon: 'flow', section: 'automation', admin: true },
+    { id: 'settings', label: 'Pengaturan', icon: 'gear', section: 'system' },
   ];
   const isTouch = window.matchMedia('(pointer: coarse)').matches;
   const isMobile = () => window.innerWidth < 768;
@@ -259,7 +274,12 @@
     $('#tabbar').innerHTML = tabs.map(([id, label]) => `<a href="#/${id}" class="tab-item ${S.view === id ? 'active' : ''}">${ICON[VIEWS.find((x) => x.id === id).icon]}<span>${label}</span>${id === 'inbox' && unread ? `<span class="tab-badge">${unread > 99 ? '99+' : unread}</span>` : ''}</a>`).join('')
       + `<button class="tab-item ${inMenu ? 'active' : ''}" data-act="nav-open">${ICON.menu}<span>Lainnya</span></button>`;
     document.body.classList.toggle('chat-open', S.view === 'inbox' && !!S.inbox.activeId);
-    $('#nav').innerHTML = VIEWS.filter((v) => !v.admin || S.isAdmin).map((v) => `<a href="#/${v.id}" class="nav-item ${S.view === v.id ? 'active' : ''}">${ICON[v.icon]}<span class="flex-1">${v.label}</span>${v.id === 'inbox' && unread ? `<span class="badge badge-green">${unread}</span>` : ''}</a>`).join('');
+    const item = (v) => `<a href="#/${v.id}" class="nav-item ${S.view === v.id ? 'active' : ''}" ${S.view === v.id ? 'aria-current="page"' : ''}>${ICON[v.icon]}<span class="flex-1 truncate">${v.label}</span>${v.id === 'inbox' && unread ? `<span class="badge badge-green">${unread}</span>` : ''}</a>`;
+    $('#nav').innerHTML = NAV_SECTIONS.map((s) => {
+      const items = VIEWS.filter((v) => v.section === s.id && (!v.admin || S.isAdmin));
+      if (!items.length) return '';
+      return `<div class="nav-section ${s.id === 'system' ? 'nav-section-end' : ''}">${s.label ? `<div class="nav-heading">${s.label}</div>` : ''}${items.map(item).join('')}</div>`;
+    }).join('');
   }
   function route() {
     const [view, arg] = location.hash.replace(/^#\/?/, '').split('/');
@@ -270,7 +290,7 @@
     $('#sidebar').classList.toggle('md:flex', true);
     renderNav();
     const v = $('#view'); v.className = 'flex-1 min-h-0 overflow-y-auto scroll-thin';
-    ({ dashboard: viewDashboard, inbox: () => viewInbox(arg), contacts: viewContacts, templates: viewTemplates, campaigns: viewCampaigns, messagelog: viewMessageLog, autoreply: viewAutoReply, flows: () => viewFlows(arg), calls: viewCalls, settings: () => viewSettings(arg) })[S.view]();
+    ({ dashboard: viewDashboard, inbox: () => viewInbox(arg), contacts: viewContacts, templates: viewTemplates, campaigns: viewCampaigns, messagelog: viewMessageLog, autoreply: viewAutoReply, flows: () => viewFlows(arg), groups: () => viewGroups(arg), csat: viewCsat, calls: viewCalls, settings: () => viewSettings(arg) })[S.view]();
   }
   window.addEventListener('hashchange', route);
 
@@ -836,15 +856,20 @@
   /* Template: pengisian variabel (dipakai inbox & campaign) */
   const tplVars = (text) => [...new Set([...String(text || '').matchAll(/\{\{\s*(\w+)\s*\}\}/g)].map((m) => m[1]))];
   const comp = (t, type) => (t.components || []).find((c) => c.type === type);
-  function tplFieldsHtml(t, { campaign } = {}) {
+  function tplFieldsHtml(t, { campaign, invite } = {}) {
     if (!t) return '';
-    const h = comp(t, 'HEADER'), b = comp(t, 'BODY'), hint = campaign ? '<p class="hint">Gunakan <span class="kbd">{{name}}</span> atau <span class="kbd">{{phone}}</span> untuk nilai per kontak.</p>' : '';
+    const h = comp(t, 'HEADER'), b = comp(t, 'BODY');
+    const hint = invite ? '<p class="hint">Gunakan <span class="kbd">{{link}}</span> untuk tautan undangan grup, <span class="kbd">{{name}}</span> untuk nama kontak. Tombol URL undangan diisi otomatis.</p>'
+      : campaign ? '<p class="hint">Gunakan <span class="kbd">{{name}}</span> atau <span class="kbd">{{phone}}</span> untuk nilai per kontak.</p>' : '';
     let out = '';
     if (h?.format === 'TEXT') out += tplVars(h.text).map((v, i) => `<div><label class="label">Header {{${esc(v)}}}</label><input class="input" name="header_${i}" required></div>`).join('');
     if (h && ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(h.format)) out += `<div><label class="label">URL ${h.format.toLowerCase()} header (HTTPS publik)</label><input class="input" name="headerMedia" type="url" required placeholder="https://…"></div>`;
-    out += tplVars(b?.text).map((v, i) => `<div><label class="label">Body {{${esc(v)}}}</label><input class="input" name="body_${i}" required></div>`).join('');
+    out += tplVars(b?.text).map((v, i) => `<div><label class="label">Body {{${esc(v)}}}</label><input class="input" name="body_${i}" required ${invite && i === 0 ? 'value="{{link}}"' : ''}></div>`).join('');
+    if (!invite) out += urlButtons(t).map(({ btn, i }) => `<div><label class="label">Tombol "${esc(btn.text)}" — akhiran URL</label><input class="input" name="btn_${i}" required placeholder="${esc(btn.url.replace(/\{\{.*$/, ''))}…"></div>`).join('');
     return (out ? out + hint : '<p class="text-xs ink-3">Template ini tidak memiliki variabel.</p>');
   }
+  // Tombol URL dengan variabel, mis. https://contoh.com/pesanan/{{1}}
+  const urlButtons = (t) => (comp(t, 'BUTTONS')?.buttons || []).map((btn, i) => ({ btn, i })).filter(({ btn }) => btn.type === 'URL' && /\{\{/.test(btn.url || ''));
   function tplPreview(t, form) {
     if (!t) return '';
     const h = comp(t, 'HEADER'), b = comp(t, 'BODY'), f = comp(t, 'FOOTER'), btns = comp(t, 'BUTTONS');
@@ -860,6 +885,7 @@
       header: h?.format === 'TEXT' ? tplVars(h.text).map((_, i) => form['header_' + i].value) : [],
       headerMedia: form.headerMedia?.value || '',
       body: tplVars(b?.text).map((_, i) => form['body_' + i].value),
+      buttonUrl: (comp(t, 'BUTTONS')?.buttons || []).map((_, i) => form['btn_' + i]?.value || ''),
     };
   }
   async function ensureTemplates() {
@@ -902,6 +928,7 @@
         ${callbackOk(k) ? `<button class="btn btn-accent btn-sm mt-3" data-act="callback" data-contact="${k.id}" data-name="${esc(k.name || k.waName || '')}" data-phone="${esc(k.phone)}" title="Telepon balik" aria-label="Telepon balik">${ICON.phone} Telepon balik</button>` : ''}
       </div>
       <div class="p-4 border-b bd"><div class="text-xs font-semibold mb-2">Profil pelanggan</div><div id="info-stats" class="text-xs space-y-1.5"><div class="ink-3">Memuat…</div></div></div>
+      <div class="p-4 border-b bd" id="info-csat">${csatInfoHtml(c)}</div>
       <form id="f-contact" class="p-4 space-y-3 border-b bd">
         <div class="sm:hidden grid grid-cols-2 gap-2">
           <select class="select" id="cv-status-m" aria-label="Status percakapan">${[['open', 'Terbuka'], ['pending', 'Menunggu'], ['closed', 'Selesai']].map(([v, l]) => `<option value="${v}" ${c.status === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
@@ -931,6 +958,9 @@
     }); });
     $('#av-del')?.addEventListener('click', () => busy(null, async () => { await api('DELETE', `/api/contacts/${k.id}/avatar`); setAvatar(0); toast('Foto profil dihapus.'); }));
     $('#info-close').addEventListener('click', () => { S.inbox.showInfo = false; renderInfo(); });
+    $('#csat-send')?.addEventListener('click', (e) => busy(e.currentTarget, async () => {
+      c.csat = await api('POST', `/api/conversations/${c.id}/csat`); renderInfo(); toast('Survei CSAT dikirim.');
+    }));
     $('#cv-status-m')?.addEventListener('change', (e) => patchConv({ status: e.target.value }));
     const am = $('#cv-assign-m'); if (am) { am.value = c.assignedTo || ''; am.addEventListener('change', (e) => patchConv({ assignedTo: e.target.value || null })); }
     $('#f-contact').addEventListener('submit', (e) => { e.preventDefault(); busy(e.submitter, async () => {
@@ -2056,6 +2086,620 @@
     });
   }
 
+  /* ───────────── CSAT (kepuasan pelanggan) ───────────── */
+  const CSAT_LABEL = { 5: { 5: 'Sangat puas', 4: 'Puas', 3: 'Cukup', 2: 'Kurang puas', 1: 'Sangat kecewa' }, 3: { 3: 'Puas', 2: 'Biasa saja', 1: 'Tidak puas' } };
+  const CSAT_STATUS = { sent: ['amber', 'Menunggu jawaban'], answered: ['green', 'Dijawab'], expired: ['', 'Kedaluwarsa'], failed: ['red', 'Gagal'], skipped: ['', 'Dilewati'] };
+  const csatBadge = (s) => { const [c, l] = CSAT_STATUS[s] || ['', s]; return `<span class="badge ${c ? 'badge-' + c : ''}">${esc(l)}</span>`; };
+  const csatScoreText = (x) => (x.score ? `${x.scale === 5 ? '★'.repeat(x.score) + '☆'.repeat(5 - x.score) + ' ' : ''}${CSAT_LABEL[x.scale]?.[x.score] || x.score}` : '');
+  const fmtPct = (n) => (n == null || n === '' ? '—' : String(n).replace('.', ',') + '%');
+  function csatInfoHtml(c) {
+    const x = c.csat;
+    return `<div class="flex items-center justify-between mb-2"><div class="text-xs font-semibold">Survei kepuasan</div>${x ? csatBadge(x.status) : ''}</div>
+      ${x ? `<div class="text-xs space-y-1">${x.score ? `<div class="font-medium">${esc(csatScoreText(x))}</div>` : ''}
+          ${x.comment ? `<div class="ink-2 whitespace-pre-wrap">“${esc(x.comment)}”</div>` : ''}
+          <div class="ink-3">${x.answeredAt ? 'Dijawab ' + esc(fmtDT(x.answeredAt)) : 'Dikirim ' + esc(fmtDT(x.sentAt))}${x.reason ? ' · ' + esc(x.reason) : ''}</div></div>`
+        : '<p class="text-xs ink-3">Belum ada survei untuk percakapan ini.</p>'}
+      <button class="btn btn-sm w-full mt-2" id="csat-send" ${c.windowOpen ? '' : 'disabled title="Jendela layanan 24 jam sudah tertutup"'}>${ICON.star} Kirim survei sekarang</button>
+      ${c.windowOpen ? '' : '<p class="hint">Survei hanya dapat dikirim selama jendela layanan 24 jam terbuka.</p>'}`;
+  }
+
+  async function viewCsat() {
+    const v = $('#view'), tok = location.hash;
+    S.csat = S.csat || { range: '30', from: '', to: '', agent: '' };
+    v.innerHTML = '<div class="p-4 md:p-6"><div class="card p-4 text-xs ink-3">Memuat laporan CSAT…</div></div>';
+    try {
+      const [r, users] = await Promise.all([api('GET', '/api/csat/report?' + csatQuery()), S.isAdmin && !S.users.length ? api('GET', '/api/users').catch(() => []) : S.users]);
+      S.users = users; S.csat.report = r;
+    } catch (e) { v.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+    if (location.hash !== tok) return;
+    renderCsat();
+  }
+  const isoDay = (t) => { const d = new Date(t); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+  function csatQuery() {
+    const s = S.csat, p = new URLSearchParams();
+    if (s.range === 'custom') { if (s.from) p.set('from', s.from); if (s.to) p.set('to', s.to); }
+    else { p.set('from', isoDay(Date.now() - (Number(s.range) - 1) * 864e5)); p.set('to', isoDay(Date.now())); }
+    if (s.agent) p.set('agent', s.agent);
+    return p.toString();
+  }
+  function renderCsat() {
+    const s = S.csat, r = s.report, v = $('#view');
+    const tile = (label, value, sub) => `<div class="card p-4"><div class="text-xs ink-3">${label}</div><div class="text-2xl font-semibold tracking-tight mt-1">${value}</div>${sub ? `<div class="text-[11px] ink-3 mt-0.5">${sub}</div>` : ''}</div>`;
+    const scale = r.settings.scale;
+    // Distribusi nilai skala aktif; jawaban skala lain (bila pengaturan pernah diubah) dicatat terpisah
+    const dist = Object.keys(CSAT_LABEL[scale]).map(Number).sort((a, b) => b - a).map((score) => ({ score, n: r.distribution[`${scale}:${score}`] || 0 }));
+    const otherScale = Object.entries(r.distribution).filter(([k]) => !k.startsWith(scale + ':')).reduce((t, [, n]) => t + n, 0);
+    const distTotal = dist.reduce((t, d) => t + d.n, 0) || 1;
+    const days = r.daily.filter((d) => d.answered);
+    v.innerHTML = `<div class="p-4 md:p-6 space-y-4 max-w-7xl">
+      ${S.isAdmin && !r.settings.enabled ? `<div class="card p-3 flex flex-wrap items-center gap-3" style="background:var(--warn-soft);border-color:transparent"><span style="color:var(--warn)">${ICON.info}</span><div class="flex-1 min-w-0 text-[13px]">Survei otomatis saat percakapan ditutup belum aktif. Survei manual dari inbox tetap bisa dikirim.</div><button class="btn btn-sm" id="cs-settings-2">Atur survei</button></div>` : ''}
+      <div class="flex flex-wrap items-center gap-2">
+        <div class="seg" id="cs-range">${[['7', '7 hari'], ['30', '30 hari'], ['90', '90 hari'], ['custom', 'Pilih tanggal']].map(([k, l]) => `<button data-v="${k}" class="${s.range === k ? 'active' : ''}">${l}</button>`).join('')}</div>
+        ${s.range === 'custom' ? `<input type="date" class="input h-8 w-auto" id="cs-from" value="${esc(s.from)}" aria-label="Dari tanggal"><span class="ink-3 text-xs">s.d.</span><input type="date" class="input h-8 w-auto" id="cs-to" value="${esc(s.to)}" aria-label="Sampai tanggal">` : ''}
+        ${S.isAdmin ? `<select class="select h-8 w-auto" id="cs-agent" aria-label="Filter agen"><option value="">Semua agen</option>${S.users.map((u) => `<option value="${esc(u.id)}" ${s.agent === u.id ? 'selected' : ''}>${esc(u.name)}</option>`).join('')}</select>` : '<span class="text-xs ink-3">Menampilkan survei percakapan Anda.</span>'}
+        <div class="flex-1"></div>
+        ${S.isAdmin ? `<a class="btn btn-sm" href="/api/csat/export?${esc(csatQuery())}">Ekspor CSV</a><button class="btn btn-sm" id="cs-settings">${ICON.gear} Pengaturan survei</button>` : ''}
+      </div>
+      <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        ${tile('Skor CSAT', fmtPct(r.csat), r.answered ? `${fmtNum(r.satisfied)} dari ${fmtNum(r.answered)} jawaban puas` : 'belum ada jawaban')}
+        ${tile('Rata-rata nilai', r.avg == null ? '—' : String(r.avg).replace('.', ',') + ' <span class="text-sm ink-3 font-normal">/ 5</span>', scale === 3 || otherScale ? 'jawaban skala 3 dinormalkan ke 5' : 'dari 5 bintang')}
+        ${tile('Tingkat respons', fmtPct(r.responseRate), `${fmtNum(r.answered)} dijawab dari ${fmtNum(r.sent)} terkirim`)}
+        ${tile('Survei terkirim', fmtNum(r.sent), `${fmtNum(r.expired)} kedaluwarsa · ${fmtNum(r.failed)} gagal`)}
+      </div>
+      <div class="grid lg:grid-cols-3 gap-4">
+        <section class="card lg:col-span-2">
+          <div class="card-h"><div><div class="card-t">Skor CSAT harian</div><div class="text-[11px] ink-3">% jawaban puas, menurut hari survei dikirim</div></div><button class="btn btn-ghost btn-sm" id="cs-table-toggle">Tabel</button></div>
+          <div class="p-4">
+            <div id="cs-chart-wrap">${days.length ? `
+              <div class="bar-chart" id="cs-chart" role="img" aria-label="Grafik skor CSAT harian">
+                ${r.daily.map((d) => `<div class="bar-col" data-tip="${esc(fmtDate(d.t))}|${d.csat ?? ''}|${d.answered}"><div class="bar bar-csat" style="height:${d.csat ?? 0}%"></div></div>`).join('')}
+              </div>
+              <div class="flex justify-between text-[10px] ink-3 mt-2 border-t bd pt-1.5"><span>${esc(fmtDate(r.from))}</span><span>skala 0–100%</span><span>${esc(fmtDate(r.to - 864e5))}</span></div>`
+              : '<div class="empty">Belum ada jawaban survei pada rentang ini.</div>'}</div>
+            <div id="cs-table" class="hidden max-h-64 overflow-y-auto scroll-thin"><table class="tbl"><thead><tr><th>Tanggal</th><th class="text-right">Jawaban</th><th class="text-right">CSAT</th></tr></thead>
+              <tbody>${days.map((d) => `<tr><td>${esc(fmtDate(d.t))}</td><td class="text-right">${d.answered}</td><td class="text-right">${fmtPct(d.csat)}</td></tr>`).join('') || '<tr><td colspan="3" class="ink-3">Belum ada data.</td></tr>'}</tbody></table></div>
+          </div>
+        </section>
+        <section class="card">
+          <div class="card-h"><div class="card-t">Distribusi nilai</div><span class="text-[11px] ink-3">skala ${scale}</span></div>
+          <div class="p-4 space-y-3">
+            ${dist.map((d) => `<div><div class="flex justify-between text-xs mb-1"><span class="ink-2">${esc(scale === 5 ? `${d.score} · ` : '')}${esc(CSAT_LABEL[scale][d.score])}</span><span class="font-medium">${fmtNum(d.n)} <span class="ink-3 font-normal">· ${Math.round((d.n / distTotal) * 100)}%</span></span></div>
+              <div class="h-1.5 rounded-full surface-2 overflow-hidden"><div class="h-full rounded-full" style="width:${(d.n / distTotal) * 100}%;background:var(--accent)"></div></div></div>`).join('')}
+            ${otherScale ? `<p class="hint">${fmtNum(otherScale)} jawaban memakai skala lain (sebelum pengaturan diubah) — tetap dihitung di skor CSAT dan rata-rata.</p>` : ''}
+            <p class="hint">Puas = nilai ${scale === 5 ? '4–5' : '"Puas"'}. CSAT = jawaban puas ÷ semua jawaban.</p>
+          </div>
+        </section>
+      </div>
+      <div class="grid lg:grid-cols-2 gap-4">
+        <section class="card overflow-hidden">
+          <div class="card-h"><div class="card-t">Per agen</div><span class="text-[11px] ink-3">agen yang menangani saat survei dikirim</span></div>
+          <div class="overflow-x-auto"><table class="tbl"><thead><tr><th>Agen</th><th class="text-right">Terkirim</th><th class="text-right">Dijawab</th><th class="text-right">Rata-rata</th><th class="text-right">CSAT</th></tr></thead>
+            <tbody>${r.agents.map((a) => `<tr><td><div class="flex items-center gap-2"><span class="avatar" style="width:1.5rem;height:1.5rem;font-size:10px">${initials(a.name)}</span>${esc(a.name)}</div></td><td class="text-right">${fmtNum(a.sent)}</td><td class="text-right">${fmtNum(a.answered)}</td><td class="text-right">${a.avg == null ? '—' : String(a.avg).replace('.', ',')}</td><td class="text-right font-medium">${fmtPct(a.csat)}</td></tr>`).join('') || '<tr><td colspan="5" class="ink-3">Belum ada data.</td></tr>'}</tbody></table></div>
+        </section>
+        <section class="card">
+          <div class="card-h"><div class="card-t">Masukan pelanggan</div><span class="text-[11px] ink-3">${fmtNum(r.comments.length)} terbaru</span></div>
+          <div class="max-h-[22rem] overflow-y-auto scroll-thin">${r.comments.map((x) => `<a href="#/inbox/${esc(x.conversationId)}" class="block px-4 py-3 border-b bd last:border-0 hover:bg-[var(--surface-2)]">
+              <div class="flex items-center gap-2 text-xs"><span class="font-medium">${esc(csatScoreText(x))}</span><span class="flex-1"></span><span class="ink-3">${esc(fmtDT(x.answeredAt))}</span></div>
+              <div class="text-[13px] ink mt-1 whitespace-pre-wrap break-words">“${esc(x.comment)}”</div>
+              <div class="text-[11px] ink-3 mt-1">${esc(x.contact)}${x.agentName ? ' · ' + esc(x.agentName) : ''}</div></a>`).join('') || '<div class="empty">Belum ada masukan tertulis.</div>'}</div>
+        </section>
+      </div>
+      <section class="card overflow-hidden">
+        <div class="card-h"><div class="card-t">Survei terbaru</div><span class="text-[11px] ink-3">100 terakhir pada rentang ini</span></div>
+        <div class="overflow-x-auto"><table class="tbl"><thead><tr><th>Dikirim</th><th>Kontak</th><th>Agen</th><th>Pemicu</th><th>Status</th><th>Nilai</th></tr></thead>
+          <tbody>${r.recent.map((x) => `<tr><td class="whitespace-nowrap">${esc(fmtDT(x.sentAt))}</td><td><a class="hover:underline" href="#/inbox/${esc(x.conversationId)}">${esc(x.contact)}</a></td><td>${esc(x.agentName || '—')}</td>
+            <td>${esc({ close: 'Ditutup agen', flow: 'Flow', manual: 'Manual' }[x.trigger] || x.trigger)}</td><td>${csatBadge(x.status)}${x.status === 'failed' && x.reason ? `<div class="text-[11px] danger-ink">${esc(x.reason)}</div>` : ''}</td><td class="whitespace-nowrap">${esc(csatScoreText(x) || '—')}</td></tr>`).join('') || '<tr><td colspan="6" class="ink-3">Belum ada survei.</td></tr>'}</tbody></table></div>
+      </section>
+    </div>`;
+    $$('#cs-range [data-v]').forEach((b) => b.addEventListener('click', () => {
+      s.range = b.dataset.v;
+      if (s.range === 'custom' && !s.from) { s.from = isoDay(Date.now() - 29 * 864e5); s.to = isoDay(Date.now()); }
+      viewCsat();
+    }));
+    $('#cs-from')?.addEventListener('change', (e) => { s.from = e.target.value; viewCsat(); });
+    $('#cs-to')?.addEventListener('change', (e) => { s.to = e.target.value; viewCsat(); });
+    $('#cs-agent')?.addEventListener('change', (e) => { s.agent = e.target.value; viewCsat(); });
+    $('#cs-settings')?.addEventListener('click', csatSettingsModal);
+    $('#cs-settings-2')?.addEventListener('click', csatSettingsModal);
+    $('#cs-table-toggle').addEventListener('click', (e) => {
+      const showTable = $('#cs-table').classList.toggle('hidden') === false;
+      $('#cs-chart-wrap').classList.toggle('hidden', showTable);
+      e.target.textContent = showTable ? 'Grafik' : 'Tabel';
+    });
+    const tip = $('#chart-tip');
+    $$('#cs-chart .bar-col').forEach((col) => {
+      col.addEventListener('mousemove', (e) => {
+        const [d, pct, n] = col.dataset.tip.split('|');
+        tip.innerHTML = `<b>${esc(d)}</b><br>${Number(n) ? `CSAT: ${esc(fmtPct(pct))}<br>Jawaban: ${esc(n)}` : 'Belum ada jawaban'}`;
+        tip.classList.remove('hidden'); tip.style.left = e.clientX + 12 + 'px'; tip.style.top = e.clientY - 40 + 'px';
+      });
+      col.addEventListener('mouseleave', () => tip.classList.add('hidden'));
+    });
+  }
+  async function csatSettingsModal() {
+    let s;
+    try { s = await api('GET', '/api/csat/settings'); } catch (e) { return fail(e); }
+    const preview = (x) => `<div class="chat-bg rounded-md p-3"><div class="bubble out">${waFormat(x.question.replace(/\{\{\s*name\s*\}\}/g, 'Budi'))}${x.footer ? `<div class="text-[11px] ink-3 mt-1">${esc(x.footer)}</div>` : ''}
+      ${Number(x.scale) === 5 ? `<span class="ib-btn">☰ ${esc(x.button)}</span><div class="text-[11px] ink-3 mt-1">${Object.entries(CSAT_LABEL[5]).reverse().map(([k, l]) => `${k} · ${esc(l)}`).join(' / ')}</div>` : Object.values(CSAT_LABEL[3]).reverse().map((l) => `<span class="ib-btn">${esc(l)}</span>`).join('')}</div></div>`;
+    modal('Pengaturan survei CSAT', `<form id="f-csat" class="grid md:grid-cols-[1fr_17rem] gap-5">
+      <div class="space-y-4">
+        <div class="flex items-center justify-between gap-3"><span><span class="block font-medium text-[13px]">Kirim survei otomatis</span><span class="block text-[11px] ink-3">Saat percakapan ditandai Selesai.</span></span>${sw('cs-enabled', s.enabled, 'Aktifkan survei otomatis')}</div>
+        <div class="space-y-1.5 pl-0.5">
+          <label class="flex items-center gap-2 text-[13px]"><input type="checkbox" class="check" name="sendOnClose" ${s.sendOnClose ? 'checked' : ''}> Saat agen menutup percakapan</label>
+          <label class="flex items-center gap-2 text-[13px]"><input type="checkbox" class="check" name="sendOnFlowClose" ${s.sendOnFlowClose ? 'checked' : ''}> Saat flow otomatis menutup percakapan</label>
+          <label class="flex items-center gap-2 text-[13px]"><input type="checkbox" class="check" name="onlyIfAgentReplied" ${s.onlyIfAgentReplied ? 'checked' : ''}> Hanya bila agen sudah membalas sejak survei terakhir</label>
+        </div>
+        <div><div class="label">Skala penilaian</div>
+          <div class="seg" id="cs-scale"><button type="button" data-v="5" class="${s.scale === 5 ? 'active' : ''}">1–5 (daftar pilihan)</button><button type="button" data-v="3" class="${s.scale === 3 ? 'active' : ''}">3 tombol</button></div></div>
+        <div><label class="label" for="cs-q">Pertanyaan</label><textarea class="textarea" id="cs-q" name="question" rows="3" maxlength="1024">${esc(s.question)}</textarea><p class="hint">Variabel <span class="kbd">{{name}}</span>.</p></div>
+        <div class="grid sm:grid-cols-2 gap-3">
+          <div id="cs-button-wrap" class="${s.scale === 5 ? '' : 'hidden'}"><label class="label" for="cs-b">Teks tombol daftar</label><input class="input" id="cs-b" name="button" maxlength="20" value="${esc(s.button)}"></div>
+          <div><label class="label" for="cs-f">Footer (opsional)</label><input class="input" id="cs-f" name="footer" maxlength="60" value="${esc(s.footer)}"></div>
+        </div>
+        <label class="flex items-center gap-2 text-[13px]"><input type="checkbox" class="check" name="askComment" id="cs-ask" ${s.askComment ? 'checked' : ''}> Minta masukan tertulis setelah menilai</label>
+        <div id="cs-comment-wrap" class="${s.askComment ? '' : 'hidden'} grid sm:grid-cols-[1fr_9rem] gap-3">
+          <div><label class="label" for="cs-cp">Pesan permintaan masukan</label><textarea class="textarea" id="cs-cp" name="commentPrompt" rows="2" maxlength="1024">${esc(s.commentPrompt)}</textarea></div>
+          <div><label class="label" for="cs-cm">Tunggu masukan (menit)</label><input class="input" type="number" min="1" max="1440" id="cs-cm" name="commentMinutes" value="${s.commentMinutes}"></div>
+        </div>
+        <div><label class="label" for="cs-t">Pesan terima kasih</label><textarea class="textarea" id="cs-t" name="thanks" rows="2" maxlength="1024">${esc(s.thanks)}</textarea></div>
+        <div class="grid grid-cols-2 gap-3">
+          <div><label class="label" for="cs-exp">Masa berlaku survei (jam)</label><input class="input" type="number" min="1" max="24" id="cs-exp" name="expireHours" value="${s.expireHours}"></div>
+          <div><label class="label" for="cs-cd">Jeda per kontak (jam)</label><input class="input" type="number" min="0" max="720" id="cs-cd" name="cooldownHours" value="${s.cooldownHours}"></div>
+        </div>
+        <p class="hint">Survei dan balasannya hanya dikirim selama jendela layanan 24 jam terbuka. Jawaban survei tidak membuka kembali percakapan yang sudah selesai dan tidak memicu flow maupun auto reply.</p>
+      </div>
+      <div><div class="label">Pratinjau</div><div id="cs-prev">${preview(s)}</div></div>
+    </form>`, { wide: true, footer: '<button class="btn" data-act="modal-close">Batal</button><button class="btn btn-primary" id="cs-save">Simpan</button>' });
+    const f = $('#f-csat');
+    let scale = s.scale;
+    const read = () => {
+      const d = formData(f);
+      return { ...d, enabled: $('#cs-enabled').checked, scale, sendOnClose: !!d.sendOnClose, sendOnFlowClose: !!d.sendOnFlowClose, onlyIfAgentReplied: !!d.onlyIfAgentReplied,
+        askComment: !!d.askComment, commentMinutes: Number(d.commentMinutes), expireHours: Number(d.expireHours), cooldownHours: Number(d.cooldownHours) };
+    };
+    const redraw = () => { $('#cs-prev').innerHTML = preview(read()); };
+    f.addEventListener('input', redraw);
+    f.addEventListener('change', (e) => {
+      if (e.target.id === 'cs-enabled') e.target.closest('.switch').classList.toggle('on', e.target.checked);
+      if (e.target.id === 'cs-ask') $('#cs-comment-wrap').classList.toggle('hidden', !e.target.checked);
+    });
+    $$('#cs-scale [data-v]').forEach((b) => b.addEventListener('click', () => {
+      scale = Number(b.dataset.v);
+      $$('#cs-scale [data-v]').forEach((x) => x.classList.toggle('active', x === b));
+      $('#cs-button-wrap').classList.toggle('hidden', scale !== 5); redraw();
+    }));
+    $('#cs-save').addEventListener('click', (e) => busy(e.currentTarget, async () => {
+      await api('PUT', '/api/csat/settings', read()); closeModal(); toast('Pengaturan survei disimpan.');
+      if (S.view === 'csat') viewCsat();
+    }));
+  }
+
+  /* ───────────── Grup WhatsApp (Groups API) ─────────────
+   * Banyak aksi bersifat asinkron di Meta (buat, hapus, ubah pengaturan, keluarkan peserta): UI menampilkan
+   * "Menunggu konfirmasi Meta" sampai webhook tiba, tidak langsung menganggap berhasil.
+   */
+  const GR_STATUS = { creating: ['amber', 'Menunggu Meta'], active: ['green', 'Aktif'], suspended: ['red', 'Ditangguhkan'], deleting: ['amber', 'Menghapus…'], deleted: ['', 'Dihapus'], failed: ['red', 'Gagal dibuat'] };
+  const GR_TABS = [['chat', 'Pesan'], ['people', 'Peserta'], ['invite', 'Undangan'], ['settings', 'Pengaturan'], ['activity', 'Aktivitas']];
+  const grBadge = (s) => { const [c, l] = GR_STATUS[s] || ['', s]; return `<span class="badge ${c ? 'badge-' + c : ''}"><span class="dot"></span>${esc(l)}</span>`; };
+  const grActive = (g) => g && g.groupId && ['active', 'suspended'].includes(g.status);
+  const grAvatar = (g, cls = 'w-9 h-9') => (g.hasPhoto && g.photoStatus !== 'failed'
+    ? `<img src="/api/groups/${esc(g.id)}/photo?v=${g.photoAt || 0}" alt="" class="${cls} rounded-full object-cover flex-none">`
+    : `<span class="${cls} rounded-full surface-2 flex items-center justify-center flex-none ink-2">${ICON.group.replace('<svg', '<svg width="16" height="16"')}</span>`);
+  const grPerson = (key) => {
+    const c = (S.gr.contacts || []).find((x) => x.phone === key);
+    return c ? `${esc(c.name || c.waName || 'Kontak')} <span class="ink-3">+${esc(c.phone)}</span>` : `+${esc(key)}`;
+  };
+
+  async function viewGroups(arg) {
+    const v = $('#view'), tok = location.hash;
+    v.className = 'flex-1 min-h-0 overflow-hidden';
+    S.gr = { tab: S.gr?.tab || 'chat', contacts: S.gr?.contacts || [], ...S.gr, activeId: arg || (isMobile() ? null : S.gr?.activeId || null), detail: null };
+    v.innerHTML = '<div class="p-4"><div class="card p-4 text-xs ink-3">Memuat grup…</div></div>';
+    try { Object.assign(S.gr, await api('GET', '/api/groups')); } catch (e) { v.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+    if (location.hash !== tok) return;
+    if (S.gr.activeId && !S.gr.groups.some((g) => g.id === S.gr.activeId)) S.gr.activeId = null;
+    renderGroups();
+    if (S.gr.activeId) loadGroup(S.gr.activeId);
+  }
+  async function loadGroup(id) {
+    try {
+      const d = await api('GET', '/api/groups/' + encodeURIComponent(id));
+      if (S.view !== 'groups' || S.gr.activeId !== id) return;
+      S.gr.detail = d; renderGroupDetail(true);
+      if (d.unread) { api('POST', `/api/groups/${encodeURIComponent(id)}/read`).catch(() => {}); const row = S.gr.groups.find((g) => g.id === id); if (row) row.unread = 0; renderGroupList(); }
+    } catch (e) { fail(e); }
+  }
+  function renderGroups() {
+    const a = S.gr.activeId;
+    $('#view').innerHTML = `<div class="h-full flex">
+      <section id="gr-list" class="w-full md:w-80 flex-none border-r bd surface flex-col ${a ? 'hidden md:flex' : 'flex'}">
+        <div class="p-3 border-b bd flex items-center gap-2">
+          <div class="flex-1 min-w-0"><div class="text-[13px] font-semibold">Grup WhatsApp</div><div class="text-[11px] ink-3">${S.gr.groups.length} grup · maks. ${S.gr.maxParticipants} peserta/grup</div></div>
+          <button class="btn btn-ghost btn-icon btn-sm" id="gr-sync" title="Sinkronkan dari Meta" aria-label="Sinkronkan dari Meta">${ICON.refresh}</button>
+          <button class="btn btn-primary btn-sm" id="gr-new">${ICON.plus} Grup</button>
+        </div>
+        <div id="gr-rows" class="flex-1 overflow-y-auto scroll-thin"></div>
+      </section>
+      <section id="gr-detail" class="flex-1 min-w-0 flex-col ${a ? 'flex' : 'hidden md:flex'}"></section>
+    </div>`;
+    renderGroupList();
+    renderGroupDetail();
+    $('#gr-new').addEventListener('click', groupCreateModal);
+    $('#gr-sync').addEventListener('click', (e) => busy(e.currentTarget, async () => {
+      const r = await api('POST', '/api/groups/sync');
+      S.gr.groups = r.groups; renderGroupList(); toast(`${r.total} grup aktif di Meta, ${r.added} baru ditambahkan.`);
+    }));
+  }
+  function renderGroupList() {
+    const el = $('#gr-rows'); if (!el) return;
+    const rows = S.gr.groups.slice().sort((x, y) => (y.lastMessageAt || y.createdAt) - (x.lastMessageAt || x.createdAt));
+    el.innerHTML = rows.map((g) => `<a href="#/groups/${esc(g.id)}" class="flex gap-3 px-3 py-2.5 border-b bd ${S.gr.activeId === g.id ? 'surface-2' : 'hover:bg-[var(--surface-2)]'}">
+        ${grAvatar(g)}
+        <div class="min-w-0 flex-1">
+          <div class="flex items-center gap-2"><span class="font-medium text-[13px] truncate flex-1">${esc(g.subject)}</span><span class="text-[11px] ink-3 flex-none">${esc(relTime(g.lastMessageAt || g.createdAt))}</span></div>
+          <div class="flex items-center gap-2 mt-0.5"><span class="text-xs ink-3 truncate flex-1">${esc(g.preview || `${g.participants.length} peserta`)}</span>
+            ${g.unread ? `<span class="badge badge-green flex-none">${g.unread}</span>` : g.status !== 'active' ? `<span class="flex-none">${grBadge(g.status)}</span>` : ''}
+            ${g.joinRequests.length ? `<span class="badge badge-amber flex-none" title="Permintaan bergabung">${g.joinRequests.length}</span>` : ''}</div>
+        </div></a>`).join('')
+      || `<div class="empty">Belum ada grup.<br><span class="text-xs">Buat grup baru, atau klik ${ICON.refresh.replace('<svg', '<svg width="12" height="12" style="display:inline"')} untuk mengambil grup yang sudah ada di Meta.</span></div>`;
+  }
+  function renderGroupDetail(scroll) {
+    const el = $('#gr-detail'); if (!el) return;
+    const g = S.gr.detail;
+    if (!S.gr.activeId || !g) {
+      el.innerHTML = S.gr.activeId ? '<div class="p-6 text-xs ink-3">Memuat…</div>' : `<div class="m-auto max-w-md p-6 text-center">
+        <div class="inline-flex w-10 h-10 rounded-lg surface-2 items-center justify-center ink-2 mb-3">${ICON.group.replace('<svg', '<svg width="20" height="20"')}</div>
+        <div class="font-semibold">Kelola grup lewat Groups API resmi</div>
+        <p class="text-xs ink-3 mt-1.5">Buat grup, bagikan tautan undangan, kirim pesan & media ke grup, serta kelola peserta dan permintaan bergabung.</p>
+        <div class="text-left text-xs ink-2 surface-2 rounded-md p-3 mt-4 space-y-1.5">
+          <div><b>Syarat:</b> nomor bisnis berstatus <i>Official Business Account</i> (OBA). Maks. ${S.gr.maxParticipants} peserta per grup.</div>
+          <div><b>Webhook:</b> subscribe field ${S.gr.webhookFields.map((f) => `<span class="kbd">${esc(f)}</span>`).join(' ')} di Meta App Dashboard — ID grup, tautan undangan, dan perubahan peserta hanya datang lewat webhook.</div>
+          <div><b>Peserta</b> bergabung lewat tautan undangan atau permintaan bergabung yang Anda setujui; bisnis tidak dapat menambahkan peserta secara langsung.</div>
+        </div></div>`;
+      return;
+    }
+    const pendingText = [g.pending?.subject && `nama "${g.pending.subject}"`, g.pending?.description !== undefined && 'deskripsi', g.photoStatus === 'pending' && 'foto', g.pending?.remove && `${g.pending.remove.length} peserta dikeluarkan`].filter(Boolean);
+    el.innerHTML = `<div class="flex items-center gap-3 px-3 md:px-4 py-2.5 border-b bd surface">
+        <a href="#/groups" class="btn btn-ghost btn-icon btn-sm md:hidden" aria-label="Kembali">${ICON.back}</a>
+        ${grAvatar(g)}
+        <div class="min-w-0 flex-1"><div class="flex items-center gap-2"><span class="font-semibold text-[13px] truncate">${esc(g.subject)}</span>${grBadge(g.status)}</div>
+          <div class="text-[11px] ink-3 truncate">${g.participants.length}/${S.gr.maxParticipants} peserta · ${g.joinApprovalMode === 'approval_required' ? 'Perlu persetujuan admin' : 'Langsung bergabung'}${g.syncedAt ? ' · disinkronkan ' + esc(fmtDT(g.syncedAt)) : ''}</div></div>
+        ${grActive(g) ? `<button class="btn btn-sm" id="gr-refresh" title="Muat info, tautan undangan, dan permintaan bergabung dari Meta">${ICON.refresh}<span class="hidden sm:inline">Muat ulang</span></button>` : ''}
+      </div>
+      ${g.status === 'creating' ? `<div class="px-4 py-2 text-xs border-b bd" style="background:var(--warn-soft);color:var(--warn)">Permintaan diterima Meta. ID grup dan tautan undangan akan muncul setelah webhook <span class="kbd">group_lifecycle_update</span> tiba.</div>` : ''}
+      ${g.error ? `<div class="px-4 py-2 text-xs border-b bd" style="background:var(--danger-soft);color:var(--danger)">${esc(g.error)}</div>` : ''}
+      ${pendingText.length ? `<div class="px-4 py-2 text-xs border-b bd ink-2 surface-2">Menunggu konfirmasi Meta: ${esc(pendingText.join(', '))}.</div>` : ''}
+      <div class="tabs px-4 surface flex-none">${GR_TABS.map(([k, l]) => `<button class="tab ${S.gr.tab === k ? 'active' : ''}" data-gr-tab="${k}">${l}${k === 'people' && g.joinRequests.length ? ` <span class="badge badge-amber ml-1">${g.joinRequests.length}</span>` : ''}</button>`).join('')}</div>
+      <div id="gr-body" class="flex-1 min-h-0 flex flex-col"></div>`;
+    $$('[data-gr-tab]', el).forEach((b) => b.addEventListener('click', () => { S.gr.tab = b.dataset.grTab; renderGroupDetail(true); }));
+    $('#gr-refresh')?.addEventListener('click', (e) => busy(e.currentTarget, async () => {
+      const d = await api('POST', `/api/groups/${encodeURIComponent(g.id)}/refresh`);
+      S.gr.detail = d; grSyncRow(d); renderGroupDetail();
+      toast(d.warnings?.length ? 'Dimuat ulang dengan catatan: ' + d.warnings.join('; ') : 'Info grup dimuat ulang dari Meta.', !!d.warnings?.length);
+    }));
+    ({ chat: grChatTab, people: grPeopleTab, invite: grInviteTab, settings: grSettingsTab, activity: grActivityTab })[S.gr.tab](g, scroll);
+  }
+  function grSyncRow(d) {
+    const i = S.gr.groups.findIndex((x) => x.id === d.id);
+    const { messages, events, invites, ...row } = d;
+    if (i >= 0) S.gr.groups[i] = { ...S.gr.groups[i], ...row }; else S.gr.groups.unshift(row);
+    renderGroupList();
+  }
+  const grApply = (d) => { S.gr.detail = d; grSyncRow(d); renderGroupDetail(); };
+  const grApi = (method, path, body) => api(method, `/api/groups/${encodeURIComponent(S.gr.detail.id)}${path}`, body);
+  const grNotActive = (g) => `<div class="empty">${g.status === 'creating' ? 'Menunggu Meta selesai membuat grup.' : g.status === 'deleted' ? 'Grup sudah dihapus.' : 'Grup tidak aktif.'}</div>`;
+
+  /* Tab: pesan grup */
+  function grChatTab(g, scroll) {
+    const body = $('#gr-body');
+    body.innerHTML = `<div id="gr-msgs" class="flex-1 min-h-0 overflow-y-auto scroll-thin chat-bg px-3 md:px-6 py-3 space-y-1"></div>
+      ${grActive(g) ? `<div class="border-t bd surface p-2">
+        ${S.gr.replyTo ? `<div class="flex items-center gap-2 px-2 pb-2 text-xs"><span class="ink-3 flex-1 truncate">Membalas: ${esc(quoteText(g.messages.find((m) => m.id === S.gr.replyTo) || {}).slice(0, 80))}</span><button class="btn btn-ghost btn-icon btn-sm" id="gr-reply-x" aria-label="Batal membalas">${ICON.x}</button></div>` : ''}
+        <div class="flex items-end gap-1.5">
+          <button class="btn btn-ghost btn-icon flex-none" id="gr-attach" title="Kirim media" aria-label="Kirim media">${ICON.clip}</button>
+          <button class="btn btn-ghost btn-icon flex-none" id="gr-tpl" title="Kirim template" aria-label="Kirim template">${ICON.tpl}</button>
+          <textarea class="textarea flex-1 min-w-0" id="gr-text" rows="1" maxlength="4096" placeholder="${g.status === 'suspended' ? 'Grup ditangguhkan — pesan tidak dapat dikirim' : 'Tulis pesan ke grup…'}" ${g.status === 'suspended' ? 'disabled' : ''} style="max-height:8rem"></textarea>
+          <button class="btn btn-primary btn-icon flex-none" id="gr-send" aria-label="Kirim" ${g.status === 'suspended' ? 'disabled' : ''}>${ICON.send}</button>
+        </div>
+        <p class="hint px-2">Grup mendukung teks, media, dan template. Pesan interaktif, lokasi, dan panggilan tidak tersedia di grup. Status terkirim/dibaca dari webhook (gabungan semua peserta).</p>
+      </div>` : ''}`;
+    grRenderMsgs(true);
+    if (!grActive(g)) return;
+    const ta = $('#gr-text');
+    const send = () => busy($('#gr-send'), async () => {
+      const text = ta.value.trim(); if (!text) return;
+      await grSend({ type: 'text', body: text }); ta.value = '';
+    });
+    $('#gr-send').addEventListener('click', send);
+    ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey && !isTouch) { e.preventDefault(); send(); } });
+    ta.addEventListener('input', () => { ta.style.height = 'auto'; ta.style.height = ta.scrollHeight + 'px'; });
+    $('#gr-reply-x')?.addEventListener('click', () => { S.gr.replyTo = null; grChatTab(g); });
+    $('#gr-attach').addEventListener('click', grMediaModal);
+    $('#gr-tpl').addEventListener('click', grTemplateModal);
+    if (!isTouch) ta.focus();
+  }
+  // Pesan yang gagal tetap dicatat server (status failed) dan tiba lewat socket; error-nya diteruskan ke pemanggil (toast)
+  async function grSend(body) {
+    const g = S.gr.detail;
+    const msg = await grApi('POST', '/messages', { ...body, replyTo: S.gr.replyTo || undefined });
+    if (!g.messages.some((m) => m.id === msg.id)) g.messages.push(msg);
+    S.gr.replyTo = null;
+    if (S.gr.tab === 'chat') grChatTab(g);
+  }
+  function grRenderMsgs(scroll) {
+    const el = $('#gr-msgs'); if (!el) return;
+    const g = S.gr.detail, near = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+    let lastDay = '';
+    el.innerHTML = g.messages.map((m) => {
+      const out = m.direction === 'out', day = new Date(m.timestamp).toDateString();
+      const sep = day !== lastDay ? `<div class="flex justify-center py-2"><span class="day-sep">${esc(fmtDate(m.timestamp))}</span></div>` : '';
+      lastDay = day;
+      const quoted = m.contextId ? g.messages.find((x) => x.wamid === m.contextId) : null;
+      return sep + `<div class="msg-row flex ${out ? 'justify-end' : 'justify-start'} group">
+        ${out ? `<button class="reply-btn opacity-0 group-hover:opacity-100 ink-3 self-center p-1 mr-1" data-gr-reply="${m.id}" title="Balas" aria-label="Balas">${ICON.reply.replace('<svg', '<svg width="14" height="14"')}</button>` : ''}
+        <div class="bubble ${out ? 'out' : 'in'} ${m.reaction ? 'mb-3' : ''}">
+          ${!out ? `<div class="text-[11px] font-semibold mb-0.5" style="color:var(--info)">${esc(m.fromName || '+' + m.from)}</div>` : ''}
+          ${quoted ? `<div class="text-[11px] ink-3 border-l-2 pl-2 mb-1" style="border-color:var(--accent)">${esc(quoteText(quoted).slice(0, 80))}</div>` : ''}
+          ${msgBody(m)}
+          <div class="meta">${out && m.userName ? `<span>${esc(m.userName)} ·</span>` : ''}<span>${fmtTime(m.timestamp)}</span>${out ? tick(m.status) : ''}</div>
+          ${m.status === 'failed' ? `<div class="text-[11px] danger-ink mt-1">${esc(m.error || 'Gagal terkirim')}</div>` : ''}
+          ${m.reaction ? `<span class="reaction">${esc(m.reaction)}</span>` : ''}
+        </div>
+        ${!out ? `<button class="reply-btn opacity-0 group-hover:opacity-100 ink-3 self-center p-1 ml-1" data-gr-reply="${m.id}" title="Balas" aria-label="Balas">${ICON.reply.replace('<svg', '<svg width="14" height="14"')}</button>` : ''}
+      </div>`;
+    }).join('') || '<div class="empty">Belum ada pesan di grup ini.</div>';
+    $$('[data-gr-reply]', el).forEach((b) => b.addEventListener('click', () => { S.gr.replyTo = b.dataset.grReply; grChatTab(g); }));
+    if (scroll || near) el.scrollTop = el.scrollHeight;
+  }
+  function grMediaModal() {
+    modal('Kirim media ke grup', `<form id="f-grm" class="space-y-3">
+      <div><label class="label">Jenis</label><select class="select" name="kind"><option value="image">Gambar (JPEG/PNG, maks. 5 MB)</option><option value="video">Video (MP4/3GP, maks. 16 MB)</option><option value="audio">Audio (maks. 16 MB)</option><option value="document">Dokumen (maks. 100 MB)</option></select></div>
+      <div><label class="label">File</label><input type="file" name="file" class="text-xs"></div>
+      <div id="grm-cap"><label class="label">Keterangan (opsional)</label><textarea class="textarea" name="caption" rows="2" maxlength="1024"></textarea></div>
+    </form>`, { footer: '<button class="btn" data-act="modal-close">Batal</button><button class="btn btn-primary" id="grm-go">Unggah & kirim</button>' });
+    const f = $('#f-grm');
+    const sync = () => { $('#grm-cap').classList.toggle('hidden', f.kind.value === 'audio'); f.file.accept = { image: 'image/jpeg,image/png', video: 'video/mp4,video/3gpp', audio: 'audio/*', document: '' }[f.kind.value]; };
+    f.kind.addEventListener('change', sync); sync();
+    $('#grm-go').addEventListener('click', (e) => busy(e.currentTarget, async () => {
+      if (!f.file.files[0]) throw new Error('Pilih file terlebih dahulu.');
+      const fd = new FormData(); fd.append('kind', f.kind.value); fd.append('file', f.file.files[0]);
+      // Unggah dan kirim ditangani terpisah: unggahan gagal tidak membuat pesan
+      const up = await api('POST', '/api/media', fd);
+      closeModal();
+      await grSend({ type: f.kind.value, mediaId: up.id, mime: up.mime, filename: up.filename, caption: f.kind.value === 'audio' ? '' : f.caption.value });
+    }));
+  }
+  async function grTemplateModal() {
+    const rows = (await ensureTemplates().catch((e) => { fail(e); return []; })).filter((t) => t.status === 'APPROVED');
+    modal('Kirim template ke grup', rows.length ? `<form id="f-grt" class="grid md:grid-cols-2 gap-4">
+      <div class="space-y-3"><div><label class="label">Template</label><select class="select" name="tpl">${rows.map((t, i) => `<option value="${i}">${esc(t.name)} · ${esc(t.language)} · ${esc(t.category)}</option>`).join('')}</select></div><div id="grt-fields" class="space-y-3"></div></div>
+      <div><div class="label">Pratinjau</div><div id="grt-prev"></div></div></form>`
+      : '<div class="empty">Belum ada template APPROVED. Buka menu Template lalu klik Sinkronkan.</div>',
+    { wide: true, footer: rows.length ? '<button class="btn" data-act="modal-close">Batal</button><button class="btn btn-primary" id="grt-go">Kirim template</button>' : '' });
+    if (!rows.length) return;
+    const f = $('#f-grt'), cur = () => rows[f.tpl.value];
+    const draw = () => { $('#grt-fields').innerHTML = tplFieldsHtml(cur()); $('#grt-prev').innerHTML = tplPreview(cur(), f); };
+    f.tpl.addEventListener('change', draw); f.addEventListener('input', () => { $('#grt-prev').innerHTML = tplPreview(cur(), f); }); draw();
+    $('#grt-go').addEventListener('click', (e) => busy(e.currentTarget, async () => {
+      if (!f.reportValidity()) return;
+      const t = cur();
+      await grSend({ type: 'template', name: t.name, language: t.language, values: readTplValues(t, f) });
+      closeModal();
+    }));
+  }
+
+  /* Tab: peserta & permintaan bergabung */
+  function grPeopleTab(g) {
+    const body = $('#gr-body'), act = grActive(g);
+    body.innerHTML = `<div class="flex-1 overflow-y-auto scroll-thin p-4 space-y-4">
+      <section class="card">
+        <div class="card-h"><div class="min-w-0"><div class="card-t">Permintaan bergabung (${g.joinRequests.length})</div><div class="text-[11px] ink-3">${g.joinApprovalMode === 'approval_required' ? 'Grup ini memerlukan persetujuan admin.' : 'Grup ini langsung menerima peserta lewat tautan; permintaan hanya muncul bila mode persetujuan aktif.'}</div></div>
+          ${act && g.joinRequests.length ? `<div class="flex gap-1.5 flex-none"><button class="btn btn-sm" data-jr-all="reject">Tolak terpilih</button><button class="btn btn-sm btn-primary" data-jr-all="approve">Setujui terpilih</button></div>` : ''}</div>
+        <div>${g.joinRequests.map((r) => `<label class="flex items-center gap-3 px-4 py-2.5 border-b bd last:border-0">
+            ${act ? `<input type="checkbox" class="check" data-jr="${esc(r.id)}">` : ''}
+            <div class="min-w-0 flex-1 text-[13px]">${grPerson(r.waId)}<div class="text-[11px] ink-3">${r.at ? esc(fmtDT(r.at)) : ''}</div></div>
+            ${act ? `<button type="button" class="btn btn-sm btn-ghost btn-danger" data-jr-one="reject:${esc(r.id)}">Tolak</button><button type="button" class="btn btn-sm" data-jr-one="approve:${esc(r.id)}">Setujui</button>` : ''}
+          </label>`).join('') || '<div class="p-4 text-xs ink-3">Tidak ada permintaan yang menunggu.</div>'}</div>
+      </section>
+      <section class="card">
+        <div class="card-h"><div class="min-w-0"><div class="card-t">Peserta (${g.participants.length}/${S.gr.maxParticipants})</div><div class="text-[11px] ink-3">Peserta bergabung lewat tautan undangan. Bisnis hanya dapat mengeluarkan peserta.</div></div>
+          ${act && g.participants.length ? `<button class="btn btn-sm btn-danger flex-none" id="gr-remove" disabled>${ICON.userX} Keluarkan</button>` : ''}</div>
+        <div>${g.participants.map((p) => {
+          const pending = g.pending?.remove?.includes(p.waId) || g.pending?.remove?.includes(p.phone);
+          return `<label class="flex items-center gap-3 px-4 py-2.5 border-b bd last:border-0">
+            ${act ? `<input type="checkbox" class="check" data-pp="${esc(p.waId)}" ${pending ? 'disabled' : ''}>` : ''}
+            <div class="min-w-0 flex-1 text-[13px]">${grPerson(p.phone)}<div class="text-[11px] ink-3">${p.joinedAt ? 'Bergabung ' + esc(fmtDT(p.joinedAt)) + ' · ' : ''}${esc(p.via || '')}</div></div>
+            ${pending ? '<span class="badge badge-amber">Menunggu Meta</span>' : ''}</label>`;
+        }).join('') || '<div class="p-4 text-xs ink-3">Belum ada peserta. Bagikan tautan undangan di tab Undangan.</div>'}</div>
+      </section>
+    </div>`;
+    if (!act) return;
+    const decide = (action, ids) => busy(null, async () => {
+      if (!ids.length) throw new Error('Pilih permintaan bergabung terlebih dahulu.');
+      const r = await grApi('POST', `/join-requests/${action}`, { ids });
+      grApply(r.group);
+      toast(`${r.done.length} permintaan ${action === 'approve' ? 'disetujui — peserta muncul setelah webhook tiba' : 'ditolak'}${r.failed?.length ? `, ${r.failed.length} gagal${r.errors ? ': ' + r.errors : ''}` : ''}.`, !!r.failed?.length);
+    });
+    $$('[data-jr-one]', body).forEach((b) => b.addEventListener('click', (e) => { e.preventDefault(); const [action, id] = b.dataset.jrOne.split(':'); decide(action, [id]); }));
+    $$('[data-jr-all]', body).forEach((b) => b.addEventListener('click', () => decide(b.dataset.jrAll, $$('[data-jr]:checked', body).map((x) => x.dataset.jr))));
+    const rm = $('#gr-remove');
+    body.addEventListener('change', () => { if (rm) rm.disabled = !$$('[data-pp]:checked', body).length; });
+    rm?.addEventListener('click', async () => {
+      const ids = $$('[data-pp]:checked', body).map((x) => x.dataset.pp);
+      if (!await confirmBox(`Keluarkan ${ids.length} peserta dari "${g.subject}"? Mereka dapat bergabung lagi bila masih memiliki tautan undangan yang berlaku.`, 'Keluarkan', true)) return;
+      busy(rm, async () => { grApply(await grApi('POST', '/participants/remove', { participants: ids })); toast('Permintaan dikirim. Daftar peserta diperbarui setelah konfirmasi Meta.'); });
+    });
+  }
+
+  /* Tab: tautan undangan & riwayat undangan */
+  function grInviteTab(g) {
+    const body = $('#gr-body'), act = grActive(g);
+    body.innerHTML = `<div class="flex-1 overflow-y-auto scroll-thin p-4 space-y-4">
+      <section class="card"><div class="card-h"><div class="card-t">Tautan undangan</div></div>
+        <div class="p-4 space-y-3">${g.inviteLink ? `
+          <div class="flex gap-2"><input class="input mono text-xs flex-1 min-w-0" readonly value="${esc(g.inviteLink)}" id="gr-link" aria-label="Tautan undangan"><button class="btn flex-none" id="gr-copy">${ICON.copy} Salin</button></div>
+          ${act ? `<div class="flex flex-wrap gap-2"><button class="btn btn-primary" id="gr-invite">${ICON.userPlus} Kirim undangan ke kontak</button><button class="btn btn-ghost btn-danger" id="gr-reset">${ICON.refresh} Buat tautan baru</button></div>` : ''}
+          <p class="hint">Membuat tautan baru membatalkan semua tautan lama. ${g.participants.length >= S.gr.maxParticipants ? '<b>Grup sudah penuh</b> — undangan baru tidak dapat dipakai sampai ada peserta yang keluar.' : ''}</p>`
+          : `<p class="text-xs ink-3">${act ? 'Tautan belum tersedia. Klik <b>Muat ulang</b> di atas untuk mengambilnya dari Meta.' : 'Tautan tersedia setelah grup aktif.'}</p>`}</div></section>
+      <section class="card"><div class="card-h"><div class="min-w-0"><div class="card-t">Riwayat undangan</div><div class="text-[11px] ink-3">Status bergabung diperbarui dari webhook peserta.</div></div></div>
+        <div class="overflow-x-auto"><table class="tbl"><thead><tr><th>Kontak</th><th>Dikirim</th><th>Cara</th><th>Status</th></tr></thead><tbody>
+          ${g.invites.map((i) => `<tr><td>${esc(i.name || '')} <span class="ink-3">+${esc(i.phone || '')}</span></td><td class="whitespace-nowrap">${esc(fmtDT(i.at))}</td><td>${esc(i.via === 'template' ? 'Template' : i.via === 'text' ? 'Pesan teks' : '—')}</td>
+            <td>${i.joinedAt ? '<span class="badge badge-green">Bergabung</span>' : !i.ok ? `<span class="badge badge-red">Gagal</span> <span class="text-[11px] danger-ink">${esc(i.error || '')}</span>` : '<span class="badge">Terkirim, belum bergabung</span>'}</td></tr>`).join('')
+            || '<tr><td colspan="4" class="ink-3 text-xs">Belum ada undangan yang dikirim dari Kontaq.</td></tr>'}
+        </tbody></table></div></section>
+    </div>`;
+    $('#gr-copy')?.addEventListener('click', async () => { try { await navigator.clipboard.writeText(g.inviteLink); toast('Tautan disalin.'); } catch { $('#gr-link').select(); toast('Tekan Ctrl+C untuk menyalin.'); } });
+    $('#gr-reset')?.addEventListener('click', async () => {
+      if (!await confirmBox('Buat tautan undangan baru? Semua tautan lama langsung tidak berlaku.', 'Buat tautan baru', true)) return;
+      busy($('#gr-reset'), async () => { grApply(await grApi('POST', '/invite-link/reset')); toast('Tautan undangan baru dibuat.'); });
+    });
+    $('#gr-invite')?.addEventListener('click', grInviteModal);
+  }
+  async function grInviteModal() {
+    const g = S.gr.detail;
+    const tpls = (await ensureTemplates().catch(() => [])).filter((t) => t.status === 'APPROVED');
+    const picked = new Map();
+    modal('Kirim undangan grup', `<div class="space-y-4">
+      <div><label class="label" for="gi-q">Kontak penerima (maks. 50)</label><input class="input" id="gi-q" placeholder="Cari nama atau nomor…">
+        <div id="gi-picked" class="flex flex-wrap gap-1 mt-2"></div>
+        <div id="gi-results" class="mt-2 border bd rounded-md max-h-48 overflow-y-auto scroll-thin"></div></div>
+      <div><label class="label" for="gi-text">Pesan teks — untuk kontak dalam jendela layanan 24 jam</label>
+        <textarea class="textarea" id="gi-text" rows="3" maxlength="4000">Halo {{name}}, Anda diundang bergabung ke grup WhatsApp "${esc(g.subject)}": {{link}}</textarea>
+        <p class="hint"><span class="kbd">{{link}}</span> diganti tautan undangan (ditambahkan di akhir bila tidak ada), <span class="kbd">{{name}}</span> nama kontak.</p></div>
+      <div><label class="label" for="gi-tpl">Template — untuk kontak di luar jendela 24 jam</label>
+        <select class="select" id="gi-tpl"><option value="">Tanpa template (kontak di luar jendela akan dilewati)</option>${tpls.map((t, i) => `<option value="${i}">${esc(t.name)} · ${esc(t.language)} · ${esc(t.category)}</option>`).join('')}</select>
+        <form id="gi-fields" class="space-y-3 mt-3"></form>
+        <p class="hint">Gunakan template undangan grup dari Template Library Meta yang sudah APPROVED.</p></div>
+    </div>`, { wide: true, footer: '<button class="btn" data-act="modal-close">Batal</button><button class="btn btn-primary" id="gi-go">Kirim undangan</button>' });
+    const drawPicked = () => {
+      $('#gi-picked').innerHTML = [...picked.values()].map((c) => `<span class="badge">${esc(c.name || c.waName || '+' + c.phone)} <button type="button" data-unpick="${esc(c.id)}" aria-label="Hapus">${ICON.x.replace('<svg', '<svg width="10" height="10"')}</button></span>`).join('');
+      $$('[data-unpick]').forEach((b) => b.addEventListener('click', () => { picked.delete(b.dataset.unpick); drawPicked(); search(); }));
+    };
+    let timer;
+    const search = async () => {
+      const q = $('#gi-q').value.trim();
+      const r = await api('GET', `/api/contacts?q=${encodeURIComponent(q)}&page=1`).catch(() => ({ rows: [] }));
+      S.gr.contacts = [...new Map([...(S.gr.contacts || []), ...r.rows].map((c) => [c.id, c])).values()];
+      const inGroup = new Set(g.participants.map((p) => p.phone));
+      $('#gi-results').innerHTML = r.rows.slice(0, 30).map((c) => `<label class="flex items-center gap-2 px-3 py-2 border-b bd last:border-0 text-[13px] ${inGroup.has(c.phone) ? 'opacity-60' : ''}">
+          <input type="checkbox" class="check" data-pick="${esc(c.id)}" ${picked.has(c.id) ? 'checked' : ''} ${inGroup.has(c.phone) ? 'disabled' : ''}>
+          <span class="flex-1 min-w-0 truncate">${esc(c.name || c.waName || 'Tanpa nama')} <span class="ink-3">+${esc(c.phone)}</span></span>${inGroup.has(c.phone) ? '<span class="text-[11px] ink-3">sudah anggota</span>' : ''}</label>`).join('') || '<div class="p-3 text-xs ink-3">Tidak ada kontak.</div>';
+      $$('[data-pick]', $('#gi-results')).forEach((x) => x.addEventListener('change', () => {
+        const c = r.rows.find((y) => y.id === x.dataset.pick);
+        if (x.checked) { if (picked.size >= 50) { x.checked = false; return fail(new Error('Maksimal 50 kontak per pengiriman.')); } picked.set(c.id, c); } else picked.delete(c.id);
+        drawPicked();
+      }));
+    };
+    $('#gi-q').addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(search, 250); });
+    search();
+    const tplSel = $('#gi-tpl'), cur = () => tpls[tplSel.value];
+    tplSel.addEventListener('change', () => { $('#gi-fields').innerHTML = cur() ? tplFieldsHtml(cur(), { invite: true }) + tplPreview(cur(), null) : ''; });
+    $('#gi-go').addEventListener('click', (e) => busy(e.currentTarget, async () => {
+      if (!picked.size) throw new Error('Pilih minimal satu kontak.');
+      const form = $('#gi-fields'), t = cur();
+      if (t && !form.reportValidity()) return;
+      const r = await grApi('POST', '/invite', { contactIds: [...picked.keys()], text: $('#gi-text').value, template: t ? { name: t.name, language: t.language, values: readTplValues(t, form) } : null });
+      closeModal(); grApply(r.group);
+      const ok = r.results.filter((x) => x.ok).length, bad = r.results.filter((x) => !x.ok);
+      toast(`${ok} undangan terkirim${bad.length ? `, ${bad.length} gagal (lihat Riwayat undangan)` : ''}.`, !!bad.length);
+    }));
+  }
+
+  /* Tab: pengaturan grup */
+  function grSettingsTab(g) {
+    const body = $('#gr-body'), act = grActive(g);
+    body.innerHTML = `<div class="flex-1 overflow-y-auto scroll-thin p-4 space-y-4 max-w-3xl">
+      <section class="card"><div class="card-h"><div class="card-t">Info grup</div></div>
+        <form id="gr-info" class="p-4 space-y-3">
+          <div class="flex items-center gap-4">
+            ${grAvatar(g, 'w-16 h-16')}
+            ${act ? `<div><label class="btn btn-sm cursor-pointer">${ICON.camera} Ganti foto<input type="file" accept="image/jpeg,image/png" class="hidden" id="gr-photo"></label>
+              <p class="hint">Dipotong persegi & dikirim sebagai JPEG.${g.photoStatus === 'pending' ? ' <b>Menunggu konfirmasi Meta.</b>' : g.photoStatus === 'failed' ? ' <span class="danger-ink">Foto terakhir ditolak Meta.</span>' : ''}</p></div>` : ''}
+          </div>
+          <div><label class="label" for="gr-subject">Nama grup</label><input class="input" id="gr-subject" name="subject" maxlength="128" value="${esc(g.subject)}" ${act ? '' : 'disabled'}></div>
+          <div><label class="label" for="gr-desc">Deskripsi</label><textarea class="textarea" id="gr-desc" name="description" rows="3" maxlength="2048" ${act ? '' : 'disabled'}>${esc(g.description || '')}</textarea></div>
+          <div class="text-xs ink-3 space-y-0.5">
+            <div>ID grup: <span class="mono">${esc(g.groupId || '—')}</span></div>
+            <div>Mode bergabung: ${g.joinApprovalMode === 'approval_required' ? 'perlu persetujuan admin' : 'langsung bergabung'} (ditentukan saat grup dibuat)</div>
+            <div>Dibuat ${esc(fmtDT(g.createdAt))}${g.createdBy ? ' oleh ' + esc(g.createdBy) : ''}${g.external ? ' · tercatat dari Meta' : ''}</div>
+          </div>
+          ${act ? '<div class="flex justify-end"><button class="btn btn-primary" id="gr-save">Simpan perubahan</button></div>' : ''}
+        </form></section>
+      <section class="card" style="border-color:var(--danger-soft)"><div class="card-h"><div class="card-t danger-ink">${g.groupId && !['failed', 'deleted'].includes(g.status) ? 'Hapus grup' : 'Hapus catatan'}</div></div>
+        <div class="p-4 flex flex-col sm:flex-row sm:items-center gap-3">
+          <p class="text-xs ink-2 flex-1">${g.groupId && !['failed', 'deleted'].includes(g.status) ? 'Menghapus grup di WhatsApp dan mengeluarkan semua peserta. Tidak dapat dibatalkan.' : 'Grup tidak ada lagi di Meta. Hapus catatan dan riwayat pesannya dari Kontaq.'}</p>
+          <button class="btn btn-danger flex-none" id="gr-del" ${g.status === 'deleting' ? 'disabled' : ''}>${ICON.trash} ${g.status === 'deleting' ? 'Menunggu Meta…' : 'Hapus'}</button>
+        </div></section>
+    </div>`;
+    $('#gr-save')?.addEventListener('click', (e) => { e.preventDefault(); busy(e.currentTarget, async () => {
+      grApply(await grApi('PATCH', '', { subject: $('#gr-subject').value, description: $('#gr-desc').value }));
+      toast('Perubahan dikirim. Diterapkan setelah dikonfirmasi Meta.');
+    }); });
+    $('#gr-photo')?.addEventListener('change', (e) => busy(null, async () => {
+      const file = e.target.files[0]; if (!file) return;
+      grApply(await grApi('POST', '/photo', { dataUrl: await squareJpeg(file, 640) }));
+      toast('Foto dikirim. Diterapkan setelah dikonfirmasi Meta.');
+    }));
+    $('#gr-del').addEventListener('click', async () => {
+      const remote = g.groupId && !['failed', 'deleted'].includes(g.status);
+      if (!await confirmBox(remote ? `Hapus grup "${g.subject}" di WhatsApp? Semua peserta dikeluarkan dan grup tidak dapat dipulihkan.` : `Hapus catatan grup "${g.subject}" dari Kontaq?`, 'Hapus', true)) return;
+      busy($('#gr-del'), async () => {
+        const r = await grApi('DELETE', '');
+        if (r.removed) { S.gr.groups = S.gr.groups.filter((x) => x.id !== g.id); toast('Catatan grup dihapus.'); location.hash = '#/groups'; return; }
+        grApply(r); toast('Permintaan hapus dikirim. Menunggu konfirmasi Meta.');
+      });
+    });
+  }
+  // Potong tengah menjadi persegi lalu JPEG (syarat foto grup: JPEG persegi, min. 192 px)
+  async function squareJpeg(file, size) {
+    const img = await new Promise((ok, no) => { const i = new Image(); i.onload = () => ok(i); i.onerror = () => no(new Error('Gambar tidak dapat dibaca.')); i.src = URL.createObjectURL(file); });
+    const s = Math.min(img.naturalWidth, img.naturalHeight);
+    if (s < 192) throw new Error('Foto minimal 192×192 piksel.');
+    const c = document.createElement('canvas'); c.width = c.height = Math.min(size, s);
+    c.getContext('2d').drawImage(img, (img.naturalWidth - s) / 2, (img.naturalHeight - s) / 2, s, s, 0, 0, c.width, c.height);
+    return c.toDataURL('image/jpeg', 0.88);
+  }
+
+  /* Tab: aktivitas (event webhook & tindakan admin) */
+  function grActivityTab(g) {
+    $('#gr-body').innerHTML = `<div class="flex-1 overflow-y-auto scroll-thin p-4"><section class="card">
+      ${g.events.map((e) => `<div class="px-4 py-2.5 border-b bd last:border-0 flex gap-3 text-[13px]"><span class="text-[11px] ink-3 w-28 flex-none pt-0.5">${esc(fmtDT(e.at))}</span><span class="min-w-0 break-words ${/failed|suspended/.test(e.type) ? 'danger-ink' : 'ink-2'}">${esc(e.text)}</span></div>`).join('') || '<div class="empty">Belum ada aktivitas.</div>'}
+    </section></div>`;
+  }
+
+  function groupCreateModal() {
+    modal('Buat grup baru', `<form id="f-grc" class="space-y-3">
+      <div><label class="label" for="grc-s">Nama grup</label><input class="input" id="grc-s" name="subject" maxlength="128" required placeholder="Pelanggan Prioritas"></div>
+      <div><label class="label" for="grc-d">Deskripsi (opsional)</label><textarea class="textarea" id="grc-d" name="description" rows="3" maxlength="2048"></textarea></div>
+      <div><div class="label">Cara bergabung</div>
+        <label class="flex items-start gap-2 text-[13px] mb-1.5"><input type="radio" name="joinApprovalMode" value="auto_approve" checked class="check mt-0.5"><span>Langsung bergabung lewat tautan undangan</span></label>
+        <label class="flex items-start gap-2 text-[13px]"><input type="radio" name="joinApprovalMode" value="approval_required" class="check mt-0.5"><span>Perlu persetujuan admin <span class="block text-[11px] ink-3">Pemohon muncul di tab Peserta untuk disetujui/ditolak.</span></span></label></div>
+      <p class="hint">Grup hanya-undangan, maks. ${S.gr.maxParticipants} peserta. Grup aktif setelah Meta mengirim webhook konfirmasi beserta tautan undangan. Membutuhkan Official Business Account.</p>
+    </form>`, { footer: '<button class="btn" data-act="modal-close">Batal</button><button class="btn btn-primary" id="grc-go">Buat grup</button>' });
+    $('#grc-go').addEventListener('click', (e) => busy(e.currentTarget, async () => {
+      const f = $('#f-grc'); if (!f.reportValidity()) return;
+      const d = await api('POST', '/api/groups', formData(f));
+      closeModal(); grSyncRow(d); toast('Permintaan dikirim ke Meta. Menunggu konfirmasi.');
+      location.hash = '#/groups/' + d.id;
+    }));
+  }
+  // Pembaruan real-time dari webhook
+  function grOnUpdate(row) {
+    if (!S.gr?.groups) return;
+    grSyncRow(row);
+    if (S.view === 'groups' && S.gr.activeId === row.id) loadGroup(row.id);
+  }
+  function grOnMessage({ groupId, message, group }) {
+    if (!S.gr?.groups) return;
+    if (group) grSyncRow(group);
+    const d = S.gr.detail;
+    if (S.view !== 'groups' || d?.id !== groupId) return;
+    const i = d.messages.findIndex((m) => m.id === message.id);
+    if (i >= 0) d.messages[i] = message; else d.messages.push(message);
+    if (S.gr.tab === 'chat') grRenderMsgs();
+    if (message.direction === 'in') api('POST', `/api/groups/${encodeURIComponent(groupId)}/read`).catch(() => {});
+  }
+
   /* ───────────── Panggilan (Calling API) ───────────── */
   async function viewCalls() {
     const v = $('#view');
@@ -2561,6 +3205,8 @@
     }
   });
   socket.on('conversation:update', applyConv);
+  socket.on('group:update', grOnUpdate);
+  socket.on('group:message', grOnMessage);
   socket.on('typing', (t) => { if (t.userId !== S.user.id) setTyping(t.conversationId, t.userId, { name: t.name, seen: Date.now() }); });
   socket.on('conversation:removed', ({ id }) => {
     if (S.isAdmin) return;

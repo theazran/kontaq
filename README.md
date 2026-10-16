@@ -17,7 +17,8 @@ Buka aplikasi → buat akun admin pertama → **Pengaturan › Koneksi Meta**:
    `whatsapp_business_messaging` + `whatsapp_business_management`), App Secret, dan Verify Token.
 2. Klik **Uji koneksi**, lalu **Subscribe app ke WABA**.
 3. Di Meta App Dashboard › WhatsApp › Configuration, isi Callback URL `PUBLIC_URL/webhook` dan
-   Verify Token yang sama, lalu subscribe field `messages`, `message_template_status_update`, `calls`.
+   Verify Token yang sama, lalu subscribe field `messages`, `message_template_status_update`, `calls`
+   (dan untuk fitur Grup: `group_lifecycle_update`, `group_participants_update`, `group_settings_update`, `group_status_update`).
 
 Webhook wajib HTTPS publik. Untuk pengujian lokal gunakan tunnel (mis. `cloudflared`/`ngrok`).
 
@@ -73,6 +74,38 @@ Flow aktif dicek dari atas ke bawah. Flow pertama yang menjalankan aksi menghent
 untuk pesan itu (tidak ada balasan ganda). Pesan hanya dikirim selama jendela layanan 24 jam terbuka (dicek ulang setelah Tunggu),
 maksimal 10 pesan otomatis per jam per percakapan. Langkah Tunggu tersimpan di DB dan berlanjut setelah server restart; dibatalkan
 bila pelanggan mengirim pesan lagi atau CS membalas (bisa dimatikan). Riwayat jalan tampil di daftar flow dan di editor.
+
+## Grup WhatsApp (admin)
+
+Menu **Grup** memakai [Groups API](https://developers.facebook.com/documentation/business-messaging/whatsapp/groups/get-started) resmi.
+Syarat: nomor bisnis berstatus **Official Business Account (OBA)**; grup hanya-undangan, maks. 8 peserta.
+
+- **Kelola grup:** buat grup (nama, deskripsi, mode bergabung langsung / perlu persetujuan), ubah nama/deskripsi/foto,
+  hapus grup, sinkronkan grup aktif dari Meta, dan muat ulang info grup.
+- **Tautan undangan:** salin, buat tautan baru (tautan lama langsung tidak berlaku), dan kirim undangan ke kontak —
+  pesan teks bila jendela 24 jam terbuka, selain itu template APPROVED (variabel `{{link}}`; tombol URL undangan diisi otomatis).
+  Riwayat undangan menandai kontak yang sudah bergabung berdasarkan webhook.
+- **Pesan grup:** teks, media, dan template; balasan kutipan; status dari webhook (gabungan semua peserta). Pesan yang gagal tetap
+  tercatat beserta error-nya, dan masuk ke **Log pesan** dengan sumber "Grup". Pesan interaktif, lokasi, dan panggilan tidak didukung di grup.
+- **Peserta:** daftar peserta, keluarkan peserta, setujui/tolak permintaan bergabung. Bisnis tidak dapat menambahkan peserta langsung.
+
+Buat, hapus, ubah pengaturan, dan keluarkan peserta bersifat asinkron di Meta: Kontaq menampilkan "Menunggu konfirmasi Meta"
+dan baru mengubah data setelah webhook grup tiba. Pesan masuk dari grup (`group_id`) tidak dibuat sebagai percakapan pribadi.
+Grup yang dibuat di luar Kontaq dengan nomor yang sama tercatat otomatis saat event webhook-nya masuk.
+
+## Kepuasan pelanggan (CSAT)
+
+Menu **Kepuasan (CSAT)** mengirim survei singkat dan melaporkan hasilnya.
+
+- **Pengiriman:** otomatis saat agen menandai percakapan *Selesai* (opsional juga saat flow menutup percakapan), atau manual dari
+  panel info di Inbox. Hanya dikirim selama jendela layanan 24 jam terbuka; secara bawaan hanya bila agen sudah membalas sejak
+  survei terakhir, dengan jeda per kontak (24 jam) dan masa berlaku survei (24 jam).
+- **Bentuk:** skala 1–5 (pesan daftar) atau 3 tombol (Puas / Biasa saja / Tidak puas), lalu opsional meminta masukan tertulis
+  dan mengirim ucapan terima kasih. Jawaban dan masukan tidak membuka kembali percakapan yang sudah selesai dan tidak memicu
+  flow maupun auto reply.
+- **Laporan:** skor CSAT (% jawaban puas: nilai 4–5, atau "Puas" pada skala 3), rata-rata nilai (dinormalkan ke skala 5),
+  tingkat respons, distribusi nilai, tren harian (dengan tampilan tabel), per agen, masukan terbaru, dan riwayat survei.
+  Filter rentang tanggal dan agen; ekspor CSV (admin). Agen hanya melihat survei percakapan yang ia tangani.
 
 ## Pemakaian di HP
 
