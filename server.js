@@ -105,6 +105,7 @@ const csvCell = (v) => {
 const EMPTY_DB = {
   settings: {}, users: [], contacts: [], conversations: [], messages: [],
   templates: [], templatesSyncedAt: 0, campaigns: [], calls: [], audit: [], avatars: {}, autoReply: null, arMedia: {}, costs: null, sendLog: [],
+  flows: [], flowRuns: [],
 };
 let db;
 try { db = { ...EMPTY_DB, ...JSON.parse(fs.readFileSync(DB_FILE, 'utf8')) }; }
@@ -648,7 +649,12 @@ function handleMessages(value) {
     const prevInboundAt = conv.lastInboundAt || 0;
     const msg = addMessage(conv, { direction: 'in', type, content, wamid: m.id, timestamp: Number(m.timestamp) * 1000 || now(), contextId: m.context?.id || null });
     if (type !== 'call_permission') notifyInboundMessage(conv, msg);
-    if (type !== 'call_permission') runAutoReply(conv, contact, msg, prevInboundAt);
+    // Flow otomatis lebih dulu; auto reply hanya bila tidak ada flow yang menjalankan aksi (mencegah balasan ganda)
+    if (type !== 'call_permission') {
+      runFlows(conv, contact, msg, prevInboundAt)
+        .catch((e) => { console.warn('[flow]', e.message); return false; })
+        .then((handled) => { if (!handled) runAutoReply(conv, contact, msg, prevInboundAt); });
+    }
   }
 }
 
@@ -717,13 +723,31 @@ async function runAutoReply(conv, contact, msg, prevInboundAt) {
   const d = decideAutoReply(cfg, { text: inboundText(msg), log: conv.autoReplyLog, prevInboundAt, lastHumanReplyAt: lastHuman?.timestamp || 0 });
   if (!d.key) return;
   conv.autoReplyLog[d.key] = now(); // tandai sebelum mengirim agar pesan beruntun tidak memicu balasan ganda
-  const src = d.src || {}, buttons = (src.buttons || []).filter(Boolean);
-  const body = fillVars(d.reply || '', contact).slice(0, src.image || buttons.length ? 1024 : 4096);
+  const src = d.src || {};
+  try {
+    await sendAutoContent(conv, contact, { text: d.reply, image: src.image, buttons: src.buttons },
+      { auto: d.kind, userName: 'Auto reply', source: 'auto_reply', btnPrefix: `ar_${d.key}`, contextId: msg.wamid });
+    cfg.sent = (cfg.sent || 0) + 1;
+    if (d.rule) { d.rule.hits = (d.rule.hits || 0) + 1; d.rule.lastHitAt = now(); }
+    save();
+  } catch (e) {
+    delete conv.autoReplyLog[d.key];
+    cfg.lastError = { at: now(), message: e.message }; save();
+    console.warn('[auto-reply]', e.message);
+  }
+}
+/**
+ * Kirim balasan otomatis (teks / gambar / tombol balasan) — dipakai auto reply dan flow otomatis.
+ * src: { text, image (kunci db.arMedia), buttons[] }. o: { auto, userName, source, btnPrefix, contextId, flowId }
+ */
+async function sendAutoContent(conv, contact, src, o) {
+  const buttons = (src.buttons || []).filter(Boolean);
+  const body = fillVars(src.text || '', contact).slice(0, src.image || buttons.length ? 1024 : 4096);
   try {
     let payload, record;
     const mediaId = src.image ? await arMediaId(src.image) : null;
     if (buttons.length) {
-      const interactive = { type: 'button', body: { text: body }, action: { buttons: buttons.map((title, i) => ({ type: 'reply', reply: { id: `ar_${d.key}_${i + 1}`, title } })) } };
+      const interactive = { type: 'button', body: { text: body }, action: { buttons: buttons.map((title, i) => ({ type: 'reply', reply: { id: `${o.btnPrefix}_${i + 1}`, title } })) } };
       if (mediaId) interactive.header = { type: 'image', image: { id: mediaId } };
       payload = { type: 'interactive', interactive };
       record = { type: 'interactive', content: { kind: 'button', header: '', body, footer: '', buttons, arImage: src.image || null } };
@@ -734,17 +758,12 @@ async function runAutoReply(conv, contact, msg, prevInboundAt) {
       payload = { type: 'text', text: { body, preview_url: /https?:\/\//.test(body) } };
       record = { type: 'text', content: { body } };
     }
-    const r = await sendToMeta({ messaging_product: 'whatsapp', recipient_type: 'individual', to: contact.phone, ...payload, context: { message_id: msg.wamid } },
-      { source: 'auto_reply', contact, conversation: conv, userName: 'Auto reply' });
-    addMessage(conv, { direction: 'out', ...record, wamid: r.messages?.[0]?.id, status: 'accepted', userName: 'Auto reply', auto: d.kind, contextId: msg.wamid });
-    cfg.sent = (cfg.sent || 0) + 1;
-    if (d.rule) { d.rule.hits = (d.rule.hits || 0) + 1; d.rule.lastHitAt = now(); }
-    save();
+    const r = await sendToMeta({ messaging_product: 'whatsapp', recipient_type: 'individual', to: contact.phone, ...payload, ...(o.contextId ? { context: { message_id: o.contextId } } : {}) },
+      { source: o.source, contact, conversation: conv, userName: o.userName });
+    return addMessage(conv, { direction: 'out', ...record, wamid: r.messages?.[0]?.id, status: 'accepted', userName: o.userName, auto: o.auto, contextId: o.contextId || null, ...(o.flowId ? { flowId: o.flowId } : {}) });
   } catch (e) {
-    delete conv.autoReplyLog[d.key];
     if (src.image && db.arMedia[src.image]) db.arMedia[src.image].metaId = null; // unggah ulang pada percobaan berikutnya
-    cfg.lastError = { at: now(), message: e.message }; save();
-    console.warn('[auto-reply]', e.message);
+    throw e;
   }
 }
 async function arMediaId(key) {
@@ -792,6 +811,362 @@ function validateAutoReply(b) {
     return { id: old ? old.id : uid('r_'), name, match: ['exact', 'starts'].includes(x.match) ? x.match : 'contains', keywords, reply, image, buttons, enabled: x.enabled !== false, hits: old?.hits || 0, lastHitAt: old?.lastHitAt || 0 };
   });
   return out;
+}
+
+/* ── Flow otomatis (Automation Flow Builder) ──
+ * Alur tanpa coding berbentuk pohon: Pemicu (pesan masuk) → Kondisi (cabang Ya/Tidak) → Aksi → ...
+ * Setiap langkah hanya punya satu langkah sebelumnya, sehingga flow tidak mungkin berputar (loop).
+ * Urutan: flow aktif dicek sesuai urutan; flow pertama yang menjalankan aksi menghentikan pengecekan, dan auto reply
+ * lama tidak dijalankan untuk pesan tersebut.
+ * Langkah "Tunggu" disimpan di db.flowRuns lalu dilanjutkan worker. Pesan bebas hanya dikirim selama jendela 24 jam
+ * masih terbuka (dicek ulang tepat sebelum mengirim), dengan batas FLOW_MAX_AUTO_PER_HOUR pesan otomatis per percakapan.
+ */
+const FLOW_MAX_NODES = 60;
+const FLOW_MAX_AUTO_PER_HOUR = 10;
+const FLOW_RUNS_MAX = 3000;
+const FLOW_STEP_LABEL = { trigger: 'Pemicu', condition: 'Kondisi', send: 'Kirim pesan', assign: 'Teruskan ke agen', label: 'Label kontak', status: 'Ubah status', note: 'Catatan internal', delay: 'Tunggu' };
+const FLOW_COND_LABEL = { keyword: 'Kata kunci', schedule: 'Jadwal', business_hours: 'Jam kerja', label: 'Label kontak', new_contact: 'Kontak baru', message_type: 'Jenis pesan', assigned: 'Sudah ditugaskan' };
+const FLOW_MSG_TYPES = ['text', 'image', 'video', 'audio', 'document', 'sticker', 'location', 'reply', 'contacts'];
+const STATUS_LABEL = { open: 'Terbuka', pending: 'Menunggu', closed: 'Selesai' };
+
+const inTimeRange = (time, open, close) => (close > open ? time >= open && time < close : time >= open || time < close);
+const zonedDate = (tz, at = now()) => new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(at));
+const flowTz = () => arCfg().timezone;
+
+function cleanFlowNode(raw, isRoot) {
+  const type = String(raw?.type || '');
+  if (!FLOW_STEP_LABEL[type]) throw new HttpError(400, `Jenis langkah tidak dikenal: "${type}".`);
+  if (isRoot !== (type === 'trigger')) throw new HttpError(400, 'Pemicu hanya boleh ada satu, di awal flow.');
+  const c = raw.cfg || {}, name = `Langkah "${FLOW_STEP_LABEL[type]}"`;
+  const time = (v) => { if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(v || '')) throw new HttpError(400, `${name}: jam tidak valid (format HH:MM).`); return v; };
+  const num = (v, min, max, label) => { const n = Number(v); if (!Number.isInteger(n) || n < min || n > max) throw new HttpError(400, `${name}: ${label} harus bilangan bulat ${min}–${max}.`); return n; };
+  let cfg = {};
+  switch (type) {
+    case 'trigger': break;
+    case 'condition': {
+      const kind = String(c.kind || '');
+      if (!FLOW_COND_LABEL[kind]) throw new HttpError(400, `${name}: pilih jenis kondisi.`);
+      cfg = { kind };
+      if (kind === 'keyword') {
+        cfg.match = ['exact', 'starts'].includes(c.match) ? c.match : 'contains';
+        cfg.keywords = [...new Set((Array.isArray(c.keywords) ? c.keywords : String(c.keywords || '').split(',')).map((k) => String(k).trim().slice(0, 100)).filter(Boolean))].slice(0, 30);
+        if (!cfg.keywords.length) throw new HttpError(400, `${name}: isi minimal satu kata kunci.`);
+      } else if (kind === 'schedule') {
+        cfg.days = [...new Set((Array.isArray(c.days) ? c.days : []).map(Number).filter((d) => Number.isInteger(d) && d >= 0 && d <= 6))].sort();
+        if (!cfg.days.length) throw new HttpError(400, `${name}: pilih minimal satu hari.`);
+        cfg.start = time(c.start); cfg.end = time(c.end);
+        if (cfg.start === cfg.end) throw new HttpError(400, `${name}: jam mulai dan selesai tidak boleh sama.`);
+      } else if (kind === 'label') {
+        cfg.label = cleanLabels([c.label])[0] || '';
+        if (!cfg.label) throw new HttpError(400, `${name}: isi nama label.`);
+      } else if (kind === 'new_contact') {
+        cfg.days = num(c.days ?? 30, 1, 365, 'hari tidak aktif');
+      } else if (kind === 'message_type') {
+        cfg.types = [...new Set((Array.isArray(c.types) ? c.types : []).filter((t) => FLOW_MSG_TYPES.includes(t)))];
+        if (!cfg.types.length) throw new HttpError(400, `${name}: pilih minimal satu jenis pesan.`);
+      }
+      break;
+    }
+    case 'send': cfg = cleanReplyExtras(c, name, true); break;
+    case 'assign': {
+      cfg.mode = ['user', 'round_robin', 'least_busy'].includes(c.mode) ? c.mode : 'least_busy';
+      cfg.onlyIfUnassigned = c.onlyIfUnassigned !== false;
+      if (cfg.mode === 'user') {
+        const u = byId('users', String(c.userId || ''));
+        if (!u || !u.active) throw new HttpError(400, `${name}: pilih agen yang aktif.`);
+        cfg.userId = u.id;
+      }
+      break;
+    }
+    case 'label':
+      cfg = { label: cleanLabels([c.label])[0] || '', remove: !!c.remove };
+      if (!cfg.label) throw new HttpError(400, `${name}: isi nama label.`);
+      break;
+    case 'status':
+      if (!STATUS_LABEL[c.status]) throw new HttpError(400, `${name}: status tidak valid.`);
+      cfg = { status: c.status };
+      break;
+    case 'note':
+      cfg = { text: str(c.text, 2000) };
+      if (!cfg.text) throw new HttpError(400, `${name}: isi catatan.`);
+      break;
+    case 'delay':
+      // Maks. 23 jam: lewat dari itu jendela layanan 24 jam hampir pasti sudah tertutup
+      cfg = { minutes: num(c.minutes, 1, 1380, 'durasi (menit)'), cancelOnReply: c.cancelOnReply !== false };
+      break;
+  }
+  return { id: raw.id, type, cfg };
+}
+
+function validateFlow(b, prev) {
+  const name = str(b.name, 80);
+  if (!name) throw new HttpError(400, 'Nama flow wajib diisi.');
+  const src = b.nodes && typeof b.nodes === 'object' && !Array.isArray(b.nodes) ? b.nodes : {};
+  if (Object.keys(src).length > FLOW_MAX_NODES) throw new HttpError(400, `Flow maksimal ${FLOW_MAX_NODES} langkah.`);
+  const root = String(b.root || '');
+  if (!src[root]) throw new HttpError(400, 'Flow harus diawali pemicu.');
+  const nodes = {}, seen = new Set();
+  // Telusuri dari pemicu; langkah yang tidak terhubung dibuang
+  const visit = (id) => {
+    if (id == null || id === '') return null;
+    id = String(id);
+    if (!/^[\w-]{1,40}$/.test(id) || !src[id]) throw new HttpError(400, 'Flow merujuk langkah yang tidak ada.');
+    if (seen.has(id)) throw new HttpError(400, 'Setiap langkah hanya boleh memiliki satu langkah sebelumnya.');
+    seen.add(id);
+    const n = cleanFlowNode({ ...src[id], id }, id === root);
+    nodes[id] = n;
+    if (n.type === 'condition') { n.yes = visit(src[id].yes); n.no = visit(src[id].no); }
+    else n.next = visit(src[id].next);
+    return id;
+  };
+  visit(root);
+  const s = b.settings || {};
+  const num = (v, min, max, label) => { const n = Number(v); if (!Number.isInteger(n) || n < min || n > max) throw new HttpError(400, `${label} harus bilangan bulat ${min}–${max}.`); return n; };
+  const date = (v, label) => { const d = str(v, 10); if (d && !/^\d{4}-\d{2}-\d{2}$/.test(d)) throw new HttpError(400, `${label} tidak valid.`); return d; };
+  const settings = {
+    pauseIfHumanMin: num(s.pauseIfHumanMin ?? 30, 0, 1440, 'Jeda saat CS aktif'),
+    cooldownMin: num(s.cooldownMin ?? 0, 0, 10080, 'Jeda menjalankan ulang'),
+    activeFrom: date(s.activeFrom, 'Tanggal mulai'), activeUntil: date(s.activeUntil, 'Tanggal selesai'),
+  };
+  if (settings.activeFrom && settings.activeUntil && settings.activeFrom > settings.activeUntil) throw new HttpError(400, 'Tanggal mulai harus sebelum tanggal selesai.');
+  if (Object.values(nodes).every((n) => n.type === 'trigger' || n.type === 'condition')) throw new HttpError(400, 'Tambahkan minimal satu aksi (mis. Kirim pesan atau Teruskan ke agen).');
+  return {
+    id: prev?.id || uid('f_'), name, enabled: b.enabled === undefined ? !!prev?.enabled : !!b.enabled, root, nodes, settings,
+    order: prev?.order ?? Math.max(0, ...db.flows.map((f) => f.order || 0)) + 1, rr: prev?.rr || 0,
+    stats: prev?.stats || { runs: 0, actions: 0, lastRunAt: 0, lastError: null }, createdAt: prev?.createdAt || now(), updatedAt: now(),
+  };
+}
+
+function evalFlowCond(cfg, ctx) {
+  switch (cfg.kind) {
+    case 'keyword': return ruleMatches(cfg, ctx.text);
+    case 'schedule': return cfg.days.includes(ctx.clock.day) && inTimeRange(ctx.clock.time, cfg.start, cfg.end);
+    case 'business_hours': {
+      const h = arCfg().away.hours.find((x) => x.day === ctx.clock.day);
+      return !!h?.enabled && inTimeRange(ctx.clock.time, h.open, h.close);
+    }
+    case 'label': return (ctx.contact.labels || []).includes(cfg.label);
+    case 'new_contact': return !ctx.prevInboundAt || ctx.at - ctx.prevInboundAt > cfg.days * 86400000;
+    case 'message_type': return cfg.types.includes(['interactive_reply', 'button'].includes(ctx.msgType) ? 'reply' : ctx.msgType);
+    case 'assigned': return !!ctx.conv.assignedTo;
+    default: return false;
+  }
+}
+function flowAgents() {
+  const active = db.users.filter((u) => u.active);
+  const agents = active.filter((u) => u.role === 'agent');
+  return agents.length ? agents : active;
+}
+function pickAgent(flow, cfg) {
+  if (cfg.mode === 'user') { const u = byId('users', cfg.userId); return u?.active ? u : null; }
+  const list = flowAgents().sort((a, b) => a.id.localeCompare(b.id));
+  if (!list.length) return null;
+  if (cfg.mode === 'round_robin') return list[(flow.rr || 0) % list.length];
+  const open = (u) => db.conversations.filter((c) => c.assignedTo === u.id && c.status !== 'closed').length;
+  return list.map((u) => [u, open(u)]).sort((a, b) => a[1] - b[1])[0][0];
+}
+const recentAutoCount = (conv, since) => {
+  let n = 0;
+  for (let i = db.messages.length - 1; i >= 0; i--) {
+    const m = db.messages[i];
+    if (m.timestamp < since) break;
+    if (m.conversationId === conv.id && m.direction === 'out' && m.auto) n++;
+  }
+  return n;
+};
+
+// Satu langkah. dry = simulasi (tanpa efek samping). Mengembalikan { next, log, ok, action, wait, preview }
+async function execFlowNode(flow, n, ctx, dry) {
+  const c = n.cfg;
+  switch (n.type) {
+    case 'trigger': return { next: n.next, log: 'Pesan masuk dari pelanggan' };
+    case 'condition': {
+      const yes = evalFlowCond(c, ctx);
+      return { next: yes ? n.yes : n.no, log: `${FLOW_COND_LABEL[c.kind]}: ${yes ? 'Ya' : 'Tidak'}`, branch: yes ? 'yes' : 'no' };
+    }
+    case 'send': {
+      const preview = { text: fillVars(c.text, ctx.contact), image: c.image, buttons: c.buttons };
+      if (!windowOpen(ctx.conv)) return { next: n.next, ok: false, log: 'Tidak dikirim: di luar jendela layanan 24 jam.' };
+      if (dry) return { next: n.next, action: true, log: 'Mengirim pesan', preview };
+      if (recentAutoCount(ctx.conv, now() - 3600000) >= FLOW_MAX_AUTO_PER_HOUR) return { next: n.next, ok: false, log: `Tidak dikirim: batas ${FLOW_MAX_AUTO_PER_HOUR} pesan otomatis per jam untuk percakapan ini tercapai.` };
+      try {
+        await sendAutoContent(ctx.conv, ctx.contact, c, { auto: 'flow', userName: 'Flow: ' + flow.name, source: 'flow', btnPrefix: `fl_${n.id}`, contextId: ctx.contextId, flowId: flow.id });
+        ctx.contextId = null; // hanya pesan pertama yang mengutip pesan pelanggan
+        return { next: n.next, action: true, log: 'Pesan terkirim ke Meta' };
+      } catch (e) { return { next: n.next, ok: false, log: 'Gagal mengirim: ' + e.message }; }
+    }
+    case 'assign': {
+      const cur = ctx.conv.assignedTo ? byId('users', ctx.conv.assignedTo) : null;
+      if (c.onlyIfUnassigned && cur) return { next: n.next, log: `Dilewati: sudah ditugaskan ke ${cur.name}.` };
+      const target = pickAgent(flow, c);
+      if (!target) return { next: n.next, ok: false, log: 'Tidak ada agen aktif.' };
+      if (dry) { ctx.conv.assignedTo = target.id; return { next: n.next, action: true, log: `Diteruskan ke ${target.name}` }; }
+      const conv = ctx.conv, prevId = conv.assignedTo;
+      if (c.mode === 'round_robin') flow.rr = (flow.rr || 0) + 1;
+      conv.assignedTo = target.id;
+      if (conv.status === 'closed') conv.status = 'open';
+      conv.notes = conv.notes || [];
+      conv.notes.push({ id: uid('n_'), text: `Ditugaskan otomatis ke ${target.name} oleh flow "${flow.name}".`, userId: null, userName: 'Flow otomatis', at: now() });
+      // Hapus dari daftar pengguna yang kini tidak berhak melihat percakapan
+      if (prevId && prevId !== target.id) io?.to('user:' + prevId).emit('conversation:removed', { id: conv.id });
+      if (!prevId) io?.to('agents').except('user:' + target.id).emit('conversation:removed', { id: conv.id });
+      emitConv(conv, 'conversation:update', serializeConv(conv));
+      notifyAssigned(conv, target, { name: `Flow "${flow.name}"` });
+      audit(null, 'flow.assign', `${flow.name}: ${ctx.contact.phone} → ${target.name}`);
+      return { next: n.next, action: true, log: `Diteruskan ke ${target.name}` };
+    }
+    case 'label': {
+      const labels = ctx.contact.labels || [];
+      const has = labels.includes(c.label);
+      if (c.remove ? !has : has) return { next: n.next, log: `Label "${c.label}" ${c.remove ? 'tidak ada' : 'sudah ada'}.` };
+      ctx.contact.labels = c.remove ? labels.filter((l) => l !== c.label) : cleanLabels([...labels, c.label]);
+      if (!dry) { ctx.contact.updatedAt = now(); emitConv(ctx.conv, 'conversation:update', serializeConv(ctx.conv)); }
+      return { next: n.next, action: true, log: `${c.remove ? 'Hapus' : 'Tambah'} label "${c.label}"` };
+    }
+    case 'status': {
+      if (ctx.conv.status === c.status) return { next: n.next, log: `Status sudah ${STATUS_LABEL[c.status]}.` };
+      ctx.conv.status = c.status;
+      if (!dry) emitConv(ctx.conv, 'conversation:update', serializeConv(ctx.conv));
+      return { next: n.next, action: true, log: `Status → ${STATUS_LABEL[c.status]}` };
+    }
+    case 'note': {
+      const text = fillVars(c.text, ctx.contact);
+      if (!dry) {
+        ctx.conv.notes = ctx.conv.notes || [];
+        ctx.conv.notes.push({ id: uid('n_'), text, userId: null, userName: 'Flow: ' + flow.name, at: now() });
+        emitConv(ctx.conv, 'conversation:update', serializeConv(ctx.conv));
+      }
+      return { next: n.next, action: true, log: 'Catatan internal ditambahkan', preview: { note: text } };
+    }
+    case 'delay': return { next: n.next, wait: c.minutes * 60000, log: `Tunggu ${fmtMinutes(c.minutes)}` };
+    default: return { next: null, ok: false, log: 'Langkah tidak dikenal.' };
+  }
+}
+const fmtMinutes = (m) => (m % 60 ? (m > 60 ? `${Math.floor(m / 60)} jam ${m % 60} menit` : `${m} menit`) : `${m / 60} jam`);
+
+// Jalankan dari langkah startId sampai selesai atau bertemu "Tunggu" (dry: "Tunggu" dilewati dan hanya dicatat)
+async function execFlow(flow, run, ctx, startId, dry) {
+  run.status = 'running';
+  let id = startId, guard = 0;
+  while (id && guard++ <= FLOW_MAX_NODES) {
+    const n = flow.nodes[id];
+    if (!n) break;
+    const r = await execFlowNode(flow, n, ctx, dry);
+    run.steps.push({ nodeId: id, type: n.type, at: now(), ok: r.ok !== false, log: r.log, ...(r.preview ? { preview: r.preview } : {}), ...(r.branch ? { branch: r.branch } : {}) });
+    if (r.action) run.actions++;
+    if (r.ok === false) run.error = r.log;
+    if (r.wait && !dry) {
+      Object.assign(run, { status: 'waiting', resumeAt: now() + r.wait, resumeNode: r.next, waitSince: now(), cancelOnReply: n.cfg.cancelOnReply });
+      return run;
+    }
+    id = r.next;
+  }
+  run.status = run.error && !run.actions ? 'failed' : 'done';
+  run.finishedAt = now();
+  return run;
+}
+
+function pushFlowRun(run) {
+  db.flowRuns.push(run);
+  if (db.flowRuns.length > FLOW_RUNS_MAX) {
+    const drop = db.flowRuns.length - FLOW_RUNS_MAX;
+    let removed = 0;
+    db.flowRuns = db.flowRuns.filter((r) => (removed < drop && r.status !== 'waiting' ? (removed++, false) : true));
+  }
+}
+function finishFlowRun(flow, run) {
+  flow.stats.runs++; flow.stats.actions += run.actions; flow.stats.lastRunAt = now();
+  if (run.error) flow.stats.lastError = { at: now(), message: run.error };
+  save();
+  io?.to('admins').emit('flow:run', { flowId: flow.id, runId: run.id, status: run.status });
+}
+const lastHumanReplyAt = (conv) => {
+  for (let i = db.messages.length - 1; i >= 0; i--) {
+    const m = db.messages[i];
+    if (m.conversationId === conv.id && m.direction === 'out' && m.userId) return m.timestamp;
+  }
+  return 0;
+};
+// Alasan flow tidak dijalankan untuk percakapan ini (null = boleh jalan)
+function flowGate(flow, conv, at) {
+  const s = flow.settings, today = zonedDate(flowTz(), at);
+  if (s.activeFrom && today < s.activeFrom) return `Flow baru aktif mulai ${s.activeFrom}.`;
+  if (s.activeUntil && today > s.activeUntil) return `Masa aktif flow berakhir ${s.activeUntil}.`;
+  const human = lastHumanReplyAt(conv);
+  if (s.pauseIfHumanMin && human && at - human < s.pauseIfHumanMin * 60000) return `CS membalas dalam ${s.pauseIfHumanMin} menit terakhir.`;
+  if (s.cooldownMin && at - (conv.flowLog?.[flow.id] || 0) < s.cooldownMin * 60000) return `Flow sudah berjalan untuk percakapan ini dalam ${s.cooldownMin} menit terakhir.`;
+  if (db.flowRuns.some((r) => r.status === 'waiting' && r.flowId === flow.id && r.conversationId === conv.id)) return 'Flow masih menunggu (langkah Tunggu) di percakapan ini.';
+  return null;
+}
+function cancelFlowRuns(pred, reason) {
+  let n = 0;
+  for (const r of db.flowRuns) if (r.status === 'waiting' && pred(r)) { r.status = 'cancelled'; r.error = reason; r.finishedAt = now(); n++; }
+  if (n) save();
+  return n;
+}
+
+async function runFlows(conv, contact, msg, prevInboundAt) {
+  const flows = db.flows.filter((f) => f.enabled).sort((a, b) => a.order - b.order);
+  // Pesan baru dari pelanggan membatalkan langkah "Tunggu" yang diatur batal bila dibalas
+  cancelFlowRuns((r) => r.conversationId === conv.id && r.cancelOnReply, 'Pelanggan mengirim pesan baru.');
+  if (!flows.length) return false;
+  const at = now(), text = inboundText(msg);
+  for (const flow of flows) {
+    if (flowGate(flow, conv, at)) continue;
+    const ctx = { conv, contact, text, msgType: msg.type, prevInboundAt, at, clock: zonedNow(flowTz(), at), contextId: msg.wamid };
+    const run = { id: uid('fr_'), flowId: flow.id, flowName: flow.name, conversationId: conv.id, contactId: contact.id, phone: contact.phone,
+      text: text.slice(0, 300), msgType: msg.type, prevInboundAt, startedAt: at, status: 'running', steps: [], actions: 0, error: null };
+    // Tandai sebelum aksi asinkron agar pesan beruntun tidak menjalankan flow (ber-jeda) dua kali
+    const prevLog = conv.flowLog?.[flow.id];
+    conv.flowLog = { ...conv.flowLog, [flow.id]: at };
+    await execFlow(flow, run, ctx, flow.root, false);
+    if (!run.actions && run.status !== 'waiting') {
+      if (prevLog) conv.flowLog[flow.id] = prevLog; else delete conv.flowLog[flow.id];
+      if (!run.error) continue; // tidak ada cabang yang cocok: coba flow berikutnya tanpa mencatat
+    }
+    pushFlowRun(run); finishFlowRun(flow, run);
+    if (run.actions || run.status === 'waiting') return true;
+  }
+  return false;
+}
+
+// Worker: lanjutkan langkah "Tunggu" yang sudah jatuh tempo
+let flowWorkerBusy = false;
+setInterval(async () => {
+  if (flowWorkerBusy) return;
+  const due = db.flowRuns.filter((r) => r.status === 'waiting' && r.resumeAt <= now());
+  if (!due.length) return;
+  flowWorkerBusy = true;
+  try {
+    for (const run of due) {
+      const flow = byId('flows', run.flowId), conv = byId('conversations', run.conversationId), contact = byId('contacts', run.contactId);
+      const stop = (reason) => { run.status = 'cancelled'; run.error = reason; run.finishedAt = now(); save(); };
+      if (!flow || !flow.enabled) { stop('Flow dinonaktifkan atau dihapus.'); continue; }
+      if (!conv || !contact) { stop('Percakapan atau kontak sudah dihapus.'); continue; }
+      if (run.cancelOnReply && lastHumanReplyAt(conv) > run.waitSince) { stop('CS sudah membalas.'); continue; }
+      const ctx = { conv, contact, text: run.text, msgType: run.msgType, prevInboundAt: run.prevInboundAt, at: run.startedAt, clock: zonedNow(flowTz()), contextId: null };
+      await execFlow(flow, run, ctx, run.resumeNode, false);
+      finishFlowRun(flow, run);
+    }
+  } catch (e) { console.warn('[flow-worker]', e.message); }
+  finally { flowWorkerBusy = false; }
+}, 15000);
+
+// Simulasi tanpa mengirim apa pun: kontak & percakapan tiruan
+async function testFlow(flow, b) {
+  const at = now(), z = zonedNow(flowTz(), at);
+  const day = Number.isInteger(Number(b.day)) && b.day !== '' && b.day != null ? Number(b.day) : z.day;
+  const time = /^([01]\d|2[0-3]):[0-5]\d$/.test(b.time || '') ? b.time : z.time;
+  const contact = { name: 'Budi', waName: 'Budi', phone: '6281234567890', labels: cleanLabels(b.labels) };
+  const conv = { id: 'test', status: 'open', assignedTo: b.assigned ? flowAgents()[0]?.id || 'x' : null, lastInboundAt: at, notes: [] };
+  const msgType = FLOW_MSG_TYPES.includes(b.msgType) ? (b.msgType === 'reply' ? 'interactive_reply' : b.msgType) : 'text';
+  const ctx = { conv, contact, text: str(b.text, 1000), msgType, prevInboundAt: b.newContact ? 0 : at - 3600000, at, clock: { day, time }, contextId: null };
+  const run = { steps: [], actions: 0, error: null };
+  await execFlow({ ...flow, rr: flow.rr || 0 }, run, ctx, flow.root, true);
+  return { steps: run.steps, actions: run.actions, clock: { day, time } };
+}
+function flowUsesImage(key) {
+  return db.flows.some((f) => Object.values(f.nodes).some((n) => n.type === 'send' && n.cfg.image === key));
 }
 
 function handleStatuses(value) {
@@ -1235,7 +1610,7 @@ app.get('/api/autoreply', requireAdmin, (req, res) => {
 app.put('/api/autoreply', requireAdmin, wrap(async (req, res) => {
   db.autoReply = validateAutoReply(req.body || {});
   const used = new Set([db.autoReply.welcome.image, db.autoReply.away.image, ...db.autoReply.rules.map((x) => x.image)].filter(Boolean));
-  for (const k of Object.keys(db.arMedia)) if (!used.has(k) && now() - (db.arMedia[k].createdAt || 0) > 3600000) delete db.arMedia[k];
+  for (const k of Object.keys(db.arMedia)) if (!used.has(k) && !flowUsesImage(k) && now() - (db.arMedia[k].createdAt || 0) > 3600000) delete db.arMedia[k];
   audit(req, 'autoreply.update', `${db.autoReply.enabled ? 'aktif' : 'nonaktif'}, ${db.autoReply.rules.length} aturan kata kunci`); save();
   const z = zonedNow(db.autoReply.timezone);
   res.json({ ...db.autoReply, now: { day: z.day, time: z.time, open: isOpenNow(db.autoReply) } });
@@ -1260,6 +1635,76 @@ app.get('/api/autoreply/media/:key', (req, res) => {
   if (!m) return res.sendStatus(404);
   res.set('Cache-Control', 'private, max-age=86400').type(m.mime).send(Buffer.from(m.data, 'base64'));
 });
+
+/* Flow otomatis (admin) */
+const flowSummary = (f) => ({
+  id: f.id, name: f.name, enabled: f.enabled, order: f.order, settings: f.settings, stats: f.stats, updatedAt: f.updatedAt,
+  steps: Object.keys(f.nodes).length - 1, conditions: Object.values(f.nodes).filter((n) => n.type === 'condition').length,
+  waiting: db.flowRuns.filter((r) => r.flowId === f.id && r.status === 'waiting').length,
+});
+const flowOr404 = (id) => { const f = byId('flows', id); if (!f) throw new HttpError(404, 'Flow tidak ditemukan.'); return f; };
+const recentRuns = (pred, n) => db.flowRuns.filter(pred).slice(-n).reverse();
+app.get('/api/flows', requireAdmin, (req, res) => {
+  const z = zonedNow(flowTz());
+  res.json({
+    flows: db.flows.slice().sort((a, b) => a.order - b.order).map(flowSummary),
+    runs: recentRuns(() => true, 30), timezone: flowTz(), now: z, labels: contactLabels(),
+    autoReplyEnabled: !!arCfg().enabled, hours: arCfg().away.hours,
+  });
+});
+app.put('/api/flows/order', requireAdmin, wrap(async (req, res) => {
+  const ids = Array.isArray(req.body.ids) ? req.body.ids.map(String) : [];
+  ids.forEach((id, i) => { const f = byId('flows', id); if (f) f.order = i + 1; });
+  audit(req, 'flow.order', ids.length + ' flow'); save();
+  res.json({ ok: true });
+}));
+app.post('/api/flows/test', requireAdmin, wrap(async (req, res) => {
+  const flow = validateFlow(req.body.flow || {}, req.body.flow?.id ? byId('flows', req.body.flow.id) : null);
+  res.json(await testFlow(flow, req.body));
+}));
+app.get('/api/flows/runs', requireAdmin, (req, res) => {
+  const flowId = str(req.query.flowId, 40);
+  res.json(recentRuns((r) => !flowId || r.flowId === flowId, 100));
+});
+app.post('/api/flows/runs/:id/cancel', requireAdmin, wrap(async (req, res) => {
+  const n = cancelFlowRuns((r) => r.id === req.params.id, `Dibatalkan oleh ${req.user.name}.`);
+  if (!n) throw new HttpError(400, 'Run tidak sedang menunggu.');
+  audit(req, 'flow.run.cancel', req.params.id);
+  res.json({ ok: true });
+}));
+app.get('/api/flows/:id', requireAdmin, (req, res) => {
+  const f = flowOr404(req.params.id);
+  res.json({ ...f, runs: recentRuns((r) => r.flowId === f.id, 30) });
+});
+app.post('/api/flows', requireAdmin, wrap(async (req, res) => {
+  const f = validateFlow(req.body || {}, null);
+  db.flows.push(f); audit(req, 'flow.create', `${f.name} (${f.enabled ? 'aktif' : 'nonaktif'})`); save();
+  res.json({ ...f, runs: [] });
+}));
+app.put('/api/flows/:id', requireAdmin, wrap(async (req, res) => {
+  const prev = flowOr404(req.params.id);
+  const f = validateFlow(req.body || {}, prev);
+  db.flows[db.flows.indexOf(prev)] = f;
+  // Run yang menunggu di langkah yang sudah dihapus tidak dapat dilanjutkan
+  cancelFlowRuns((r) => r.flowId === f.id && r.resumeNode && !f.nodes[r.resumeNode], 'Langkah dihapus saat flow diubah.');
+  audit(req, 'flow.update', `${f.name} (${f.enabled ? 'aktif' : 'nonaktif'}, ${Object.keys(f.nodes).length - 1} langkah)`); save();
+  res.json({ ...f, runs: recentRuns((r) => r.flowId === f.id, 30) });
+}));
+app.patch('/api/flows/:id', requireAdmin, wrap(async (req, res) => {
+  const f = flowOr404(req.params.id);
+  if (typeof req.body.enabled !== 'boolean') throw new HttpError(400, 'Nilai enabled tidak valid.');
+  f.enabled = req.body.enabled; f.updatedAt = now();
+  if (!f.enabled) cancelFlowRuns((r) => r.flowId === f.id, 'Flow dinonaktifkan.');
+  audit(req, 'flow.toggle', `${f.name}: ${f.enabled ? 'aktif' : 'nonaktif'}`); save();
+  res.json(flowSummary(f));
+}));
+app.delete('/api/flows/:id', requireAdmin, wrap(async (req, res) => {
+  const f = flowOr404(req.params.id);
+  cancelFlowRuns((r) => r.flowId === f.id, 'Flow dihapus.');
+  db.flows.splice(db.flows.indexOf(f), 1);
+  audit(req, 'flow.delete', f.name); save();
+  res.json({ ok: true });
+}));
 app.get('/api/audit', requireAdmin, (req, res) => {
   const q = str(req.query.q, 100).toLowerCase();
   let rows = db.audit.slice().reverse();
@@ -1348,7 +1793,7 @@ app.put('/api/costs/settings', requireAdmin, wrap(async (req, res) => {
   res.json(cfg.settings);
 }));
 /* Log pesan API (admin): semua pesan keluar via Cloud API + status pengiriman dari webhook */
-const LOG_SOURCES = { inbox: 'Dashboard', campaign: 'Campaign', auto_reply: 'Auto reply', external: 'Di luar Kontaq' };
+const LOG_SOURCES = { inbox: 'Dashboard', campaign: 'Campaign', auto_reply: 'Auto reply', flow: 'Flow otomatis', external: 'Di luar Kontaq' };
 function logRow(e) {
   const msg = e.wamid ? idx.wamid.get(e.wamid) : null;
   const contact = e.contactId ? byId('contacts', e.contactId) : idx.contactByPhone.get(e.to);

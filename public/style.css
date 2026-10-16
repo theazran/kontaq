@@ -264,3 +264,32 @@ body { font-family: Inter, ui-sans-serif, system-ui, sans-serif; font-feature-se
 :root { color-scheme: light; }
 .dark { color-scheme: dark; }
 .btn-icon:disabled { opacity: .3; }
+
+/* Flow builder: pohon langkah dengan cabang Ya/Tidak */
+.fl-canvas { background-color: var(--surface-2); background-image: radial-gradient(var(--border) 1px, transparent 1px); background-size: 16px 16px; min-height: 22rem; }
+.fl-tree { display: flex; flex-direction: column; align-items: center; min-width: max-content; margin: 0 auto; }
+.fl-card { width: 15.5rem; background: var(--surface); border: 1px solid var(--border-strong); border-radius: .5rem; padding: .5rem .75rem .625rem; text-align: left; cursor: pointer; }
+.fl-card:hover { border-color: var(--ink-3); }
+.fl-card:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--ring); }
+.fl-card.fl-trigger { cursor: default; border-color: var(--ink); }
+.fl-card.fl-condition { border-style: dashed; }
+.fl-card.fl-hit { border-color: var(--accent); box-shadow: 0 0 0 2px var(--ring); }
+.fl-ic { display: inline-flex; align-items: center; justify-content: center; width: 1.5rem; height: 1.5rem; border-radius: .375rem; background: var(--surface-2); color: var(--ink-2); flex: none; }
+.fl-ic svg { width: 13px; height: 13px; }
+.fl-trigger .fl-ic { background: var(--accent-soft); color: var(--accent-ink); }
+.fl-line { width: 1px; height: .75rem; background: var(--border-strong); }
+.fl-add { display: inline-flex; align-items: center; justify-content: center; width: 1.375rem; height: 1.375rem; border-radius: 999px; border: 1px dashed var(--border-strong); background: var(--surface); color: var(--ink-3); }
+.fl-add:hover, .fl-add:focus-visible { border-style: solid; border-color: var(--accent); color: var(--accent-ink); outline: none; }
+.fl-add svg { width: 12px; height: 12px; }
+.fl-branches { display: flex; align-items: flex-start; }
+.fl-branch { position: relative; display: flex; flex-direction: column; align-items: center; padding: 1rem .75rem 0; }
+.fl-branch::before { content: ""; position: absolute; top: 0; left: 0; right: 0; height: 1px; background: var(--border-strong); }
+.fl-branch:first-child::before { left: 50%; }
+.fl-branch:last-child::before { right: 50%; }
+.fl-branch::after { content: ""; position: absolute; top: 0; left: 50%; width: 1px; height: 1rem; background: var(--border-strong); }
+.fl-tag { position: relative; z-index: 1; font-size: .6875rem; font-weight: 600; padding: 0 .4375rem; height: 1.125rem; line-height: 1.125rem; border-radius: 999px; }
+.fl-tag-yes { color: var(--accent-ink); background: var(--accent-soft); }
+.fl-tag-no { color: var(--ink-2); background: var(--surface); border: 1px solid var(--border-strong); line-height: 1rem; }
+.fl-end { font-size: .6875rem; color: var(--ink-3); padding: .125rem .5rem; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); }
+.fl-pick { display: flex; align-items: flex-start; gap: .625rem; text-align: left; padding: .625rem .75rem; border: 1px solid var(--border); border-radius: .5rem; background: var(--surface); }
+.fl-pick:hover, .fl-pick:focus-visible { border-color: var(--accent); outline: none; }

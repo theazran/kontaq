@@ -58,6 +58,22 @@ hanya dari webhook. HTTP 200 tidak dianggap terkirim. Request yang gagal juga di
 `pricing` dari webhook × tarif per kategori di kartu Biaya Meta. Log menyimpan 20.000 entri terakhir;
 pesan lama diisi otomatis sekali saat server pertama kali berjalan dengan fitur ini.
 
+## Flow otomatis (admin)
+
+Menu **Flow otomatis** menyusun alur tanpa coding, mis. *pesan masuk → cek kata kunci → kirim balasan → teruskan ke agen*.
+Flow berbentuk pohon: langkah **Kondisi** membuat cabang **Ya**/**Tidak**, sehingga flow tidak bisa berputar (loop).
+
+- **Kondisi:** kata kunci, jadwal (hari + jam), jam kerja (dari Auto reply), label kontak, kontak baru, jenis pesan, sudah ditugaskan.
+- **Aksi:** kirim pesan (teks/gambar/tombol), teruskan ke agen (agen tertentu, bergiliran, atau yang paling sedikit menangani),
+  tambah/hapus label, ubah status, catatan internal, **Tunggu** (1 menit–23 jam).
+- **Jadwal flow:** tanggal aktif mulai/sampai, jeda saat CS aktif, jeda menjalankan ulang per percakapan.
+- **Uji flow:** simulasi dengan contoh pesan, hari/jam, label — tidak mengirim apa pun; jalur yang dilewati disorot.
+
+Flow aktif dicek dari atas ke bawah. Flow pertama yang menjalankan aksi menghentikan pengecekan, dan Auto reply tidak dijalankan
+untuk pesan itu (tidak ada balasan ganda). Pesan hanya dikirim selama jendela layanan 24 jam terbuka (dicek ulang setelah Tunggu),
+maksimal 10 pesan otomatis per jam per percakapan. Langkah Tunggu tersimpan di DB dan berlanjut setelah server restart; dibatalkan
+bila pelanggan mengirim pesan lagi atau CS membalas (bisa dimatikan). Riwayat jalan tampil di daftar flow dan di editor.
+
 ## Pemakaian di HP
 
 Buka Kontaq di browser HP (Chrome/Safari) lewat **HTTPS**. Mikrofon untuk panggilan hanya diizinkan lewat HTTPS.

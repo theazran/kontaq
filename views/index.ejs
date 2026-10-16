@@ -210,6 +210,12 @@
     bolt: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2 3 14h9l-1 8 10-12h-9z"/></svg>',
     log: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>',
     campaign: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m3 11 18-8-8 18-2-8z"/></svg>',
+    flow: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/><path d="M6.5 10v4a3 3 0 0 0 3 3H14"/></svg>',
+    branch: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="5" r="2.5"/><circle cx="6" cy="19" r="2.5"/><circle cx="18" cy="19" r="2.5"/><path d="M12 7.5v3M6 16.5V15a3 3 0 0 1 3-3h6a3 3 0 0 1 3 3v1.5"/></svg>',
+    clock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>',
+    tag: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.6 13.4 13.4 20.6a2 2 0 0 1-2.8 0L2 12V2h10l8.6 8.6a2 2 0 0 1 0 2.8z"/><circle cx="7" cy="7" r="1.5"/></svg>',
+    check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6 9 17l-5-5"/></svg>',
+    copy: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
   };
   const tick = (s) => ({
     pending: '<span title="Menunggu">🕓</span>', accepted: '<span class="ink-3" title="Diterima Meta, menunggu konfirmasi webhook">✓</span>', sent: '<span title="Terkirim">✓</span>', delivered: '<span title="Diterima">✓✓</span>',
@@ -240,6 +246,7 @@
     { id: 'campaigns', label: 'Campaign', icon: 'campaign', admin: true },
     { id: 'messagelog', label: 'Log pesan', icon: 'log', admin: true },
     { id: 'autoreply', label: 'Auto reply', icon: 'bolt', admin: true },
+    { id: 'flows', label: 'Flow otomatis', icon: 'flow', admin: true },
     { id: 'calls', label: 'Panggilan', icon: 'phone' },
     { id: 'settings', label: 'Pengaturan', icon: 'gear' },
   ];
@@ -263,7 +270,7 @@
     $('#sidebar').classList.toggle('md:flex', true);
     renderNav();
     const v = $('#view'); v.className = 'flex-1 min-h-0 overflow-y-auto scroll-thin';
-    ({ dashboard: viewDashboard, inbox: () => viewInbox(arg), contacts: viewContacts, templates: viewTemplates, campaigns: viewCampaigns, messagelog: viewMessageLog, autoreply: viewAutoReply, calls: viewCalls, settings: () => viewSettings(arg) })[S.view]();
+    ({ dashboard: viewDashboard, inbox: () => viewInbox(arg), contacts: viewContacts, templates: viewTemplates, campaigns: viewCampaigns, messagelog: viewMessageLog, autoreply: viewAutoReply, flows: () => viewFlows(arg), calls: viewCalls, settings: () => viewSettings(arg) })[S.view]();
   }
   window.addEventListener('hashchange', route);
 
@@ -1580,6 +1587,472 @@
       const rule = { ...x, name: d.name.trim() || 'Aturan', match: d.match, keywords: d.keywords.split(',').map((k) => k.trim()).filter(Boolean), reply, image, buttons };
       if (i === undefined) S.ar.rules.push(rule); else S.ar.rules[i] = rule;
       S.arDirty = true; closeModal(); renderAutoReply(); toast('Aturan diterapkan — klik Simpan.');
+    });
+  }
+
+  /* ───────────── Flow otomatis (Automation Flow Builder) ─────────────
+   * Flow berbentuk pohon: setiap langkah punya satu langkah sebelumnya (next, atau yes/no untuk kondisi).
+   * Validasi akhir & eksekusi ada di server; di sini hanya penyusunan dan pratinjau.
+   */
+  const FL_STEP = {
+    condition: { label: 'Kondisi', icon: 'branch', desc: 'Cabang Ya / Tidak: kata kunci, jadwal, label…' },
+    send: { label: 'Kirim pesan', icon: 'send', desc: 'Teks, gambar, dan tombol balasan' },
+    assign: { label: 'Teruskan ke agen', icon: 'users', desc: 'Tugaskan ke agen tertentu atau otomatis' },
+    label: { label: 'Label kontak', icon: 'tag', desc: 'Tambah atau hapus label kontak' },
+    status: { label: 'Ubah status', icon: 'check', desc: 'Terbuka, menunggu, atau selesai' },
+    note: { label: 'Catatan internal', icon: 'edit', desc: 'Hanya terlihat oleh tim' },
+    delay: { label: 'Tunggu', icon: 'clock', desc: 'Jeda sebelum langkah berikutnya' },
+  };
+  const FL_COND = { keyword: 'Kata kunci', schedule: 'Jadwal', business_hours: 'Jam kerja', label: 'Label kontak', new_contact: 'Kontak baru', message_type: 'Jenis pesan', assigned: 'Sudah ditugaskan' };
+  const FL_MSG = { text: 'Teks', image: 'Gambar', video: 'Video', audio: 'Audio', document: 'Dokumen', sticker: 'Stiker', location: 'Lokasi', reply: 'Balasan tombol/daftar', contacts: 'Kontak' };
+  const FL_STATUS = { open: 'Terbuka', pending: 'Menunggu', closed: 'Selesai' };
+  const FL_ASSIGN = { least_busy: 'Agen dengan percakapan paling sedikit', round_robin: 'Bergiliran (round-robin)', user: 'Agen tertentu' };
+  const FL_RUN = { done: ['green', 'Selesai'], waiting: ['amber', 'Menunggu'], running: ['amber', 'Berjalan'], failed: ['red', 'Gagal'], cancelled: ['', 'Dibatalkan'] };
+  const FL_STARTERS = {
+    blank: ['Flow kosong', 'Mulai dari pemicu saja.'],
+    keyword_agent: ['Kata kunci → balas → teruskan ke agen', 'Pesan berisi "harga"/"promo" dibalas otomatis lalu diteruskan ke agen.'],
+    after_hours: ['Jam kerja', 'Di jam kerja diteruskan ke agen; di luar jam kerja dibalas pesan otomatis.'],
+    welcome: ['Sambutan kontak baru', 'Kontak baru menerima sambutan dengan tombol pilihan.'],
+  };
+  const flId = () => 'n' + Math.random().toString(36).slice(2, 10);
+  const flMinutes = (m) => (m % 60 ? (m > 60 ? `${Math.floor(m / 60)} jam ${m % 60} menit` : `${m} menit`) : `${m / 60} jam`);
+  const flMask = (p) => (p && p.length > 6 ? '+' + p.slice(0, 4) + '•••' + p.slice(-2) : p || '');
+  const flCondDefaults = (kind) => ({ keyword: { match: 'contains', keywords: [] }, schedule: { days: [1, 2, 3, 4, 5], start: '08:00', end: '17:00' }, label: { label: '' }, new_contact: { days: 30 }, message_type: { types: ['text'] } }[kind] || {});
+  const flDefaultCfg = (type) => ({
+    condition: { kind: 'keyword', ...flCondDefaults('keyword') }, send: { text: '', image: null, buttons: [] }, assign: { mode: 'least_busy', onlyIfUnassigned: true },
+    label: { label: '', remove: false }, status: { status: 'closed' }, note: { text: '' }, delay: { minutes: 30, cancelOnReply: true },
+  }[type] || {});
+
+  function flStarter(kind) {
+    const root = flId(), nodes = { [root]: { id: root, type: 'trigger', cfg: {}, next: null } };
+    const add = (type, cfg, links = {}) => { const id = flId(); nodes[id] = { id, type, cfg, ...(type === 'condition' ? { yes: null, no: null } : { next: null }), ...links }; return id; };
+    let name = 'Flow baru';
+    if (kind === 'keyword_agent') {
+      name = 'Info harga → teruskan ke agen';
+      const assign = add('assign', { mode: 'least_busy', onlyIfUnassigned: true });
+      const send = add('send', { text: 'Halo {{name}}, terima kasih sudah bertanya. Agen kami akan segera membantu Anda.', image: null, buttons: [] }, { next: assign });
+      nodes[root].next = add('condition', { kind: 'keyword', match: 'contains', keywords: ['harga', 'promo', 'paket'] }, { yes: send });
+    } else if (kind === 'after_hours') {
+      name = 'Jam kerja';
+      const assign = add('assign', { mode: 'round_robin', onlyIfUnassigned: true });
+      const lbl = add('label', { label: 'Di luar jam kerja', remove: false });
+      const away = add('send', { text: 'Halo {{name}}, kami sedang di luar jam operasional. Pesan Anda akan kami balas pada jam kerja berikutnya.', image: null, buttons: [] }, { next: lbl });
+      nodes[root].next = add('condition', { kind: 'business_hours' }, { yes: assign, no: away });
+    } else if (kind === 'welcome') {
+      name = 'Sambutan kontak baru';
+      const send = add('send', { text: 'Halo {{name}}, selamat datang! Silakan pilih topik yang Anda butuhkan:', image: null, buttons: ['Info produk', 'Bantuan'] });
+      nodes[root].next = add('condition', { kind: 'new_contact', days: 30 }, { yes: send });
+    }
+    return { id: null, name, enabled: false, root, nodes, settings: { pauseIfHumanMin: 30, cooldownMin: 0, activeFrom: '', activeUntil: '' } };
+  }
+
+  function flSummary(n) {
+    const c = n.cfg || {};
+    switch (n.type) {
+      case 'trigger': return 'Setiap pesan masuk dari pelanggan';
+      case 'condition': return ({
+        keyword: () => `${AR_MATCH[c.match]}: ${c.keywords.join(', ')}`,
+        schedule: () => `${c.days.map((d) => AR_DAYS[d].slice(0, 3)).join(', ')} · ${c.start}–${c.end}`,
+        business_hours: () => 'Sesuai jam kerja di Auto reply',
+        label: () => `Kontak berlabel "${c.label}"`,
+        new_contact: () => `Kontak baru, atau tidak aktif > ${c.days} hari`,
+        message_type: () => c.types.map((t) => FL_MSG[t]).join(', '),
+        assigned: () => 'Percakapan sudah punya agen',
+      }[c.kind] || (() => ''))();
+      case 'send': return c.text || (c.image ? '(gambar tanpa teks)' : '');
+      case 'assign': return (c.mode === 'user' ? S.users.find((u) => u.id === c.userId)?.name || 'Agen' : FL_ASSIGN[c.mode]) + (c.onlyIfUnassigned ? ' · bila belum ditugaskan' : '');
+      case 'label': return `${c.remove ? 'Hapus' : 'Tambah'} "${c.label}"`;
+      case 'status': return 'Jadikan ' + FL_STATUS[c.status];
+      case 'note': return c.text;
+      case 'delay': return flMinutes(c.minutes) + (c.cancelOnReply ? ' · batal bila dibalas' : '');
+      default: return '';
+    }
+  }
+  const flStepLine = (s) => `<li class="flex gap-2 text-xs"><span class="${s.ok ? 'accent-ink' : 'danger-ink'} flex-none w-3">${s.ok ? '✓' : '✕'}</span>
+    <span class="ink-3 flex-none">${esc(s.type === 'trigger' ? 'Pemicu' : FL_STEP[s.type]?.label || s.type)}</span><span class="ink-2 min-w-0 break-words">${esc(s.log)}</span></li>`;
+  function flRunsHtml(runs, showFlow) {
+    if (!runs.length) return '<div class="empty">Belum ada riwayat.<br><span class="text-xs">Riwayat dicatat saat flow menjalankan aksi, menunggu, atau gagal.</span></div>';
+    return runs.map((r) => {
+      const [cls, label] = FL_RUN[r.status] || ['', r.status];
+      return `<details class="border-b bd last:border-0"><summary class="px-4 py-2.5 flex items-center gap-2 cursor-pointer list-none [&::-webkit-details-marker]:hidden text-[13px]">
+          <span class="min-w-0 flex-1 truncate">${showFlow ? `<b class="font-medium">${esc(r.flowName)}</b> · ` : ''}${esc(flMask(r.phone))}${r.text ? ` · <span class="ink-3">"${esc(r.text.slice(0, 40))}"</span>` : ''}</span>
+          <span class="text-[11px] ink-3 flex-none">${esc(fmtDT(r.startedAt))}</span><span class="badge ${cls ? 'badge-' + cls : ''} flex-none">${label}</span></summary>
+        <div class="px-4 pb-3"><ol class="space-y-1">${r.steps.map(flStepLine).join('')}</ol>
+          ${r.status === 'waiting' ? `<div class="flex items-center justify-between gap-2 mt-2 text-xs ink-3"><span>Lanjut ${esc(fmtDT(r.resumeAt))}</span><button class="btn btn-sm" data-fl-cancel="${esc(r.id)}">Batalkan</button></div>` : ''}
+          ${r.error ? `<div class="text-xs danger-ink mt-2">${esc(r.error)}</div>` : ''}</div></details>`;
+    }).join('');
+  }
+  async function flCancelRun(id, after) {
+    if (!await confirmBox('Batalkan run yang sedang menunggu? Langkah berikutnya tidak akan dijalankan.', 'Batalkan run', true)) return;
+    await busy(null, async () => { await api('POST', `/api/flows/runs/${encodeURIComponent(id)}/cancel`); toast('Run dibatalkan.'); await after(); });
+  }
+
+  /* Daftar flow */
+  async function viewFlows(arg) {
+    if (arg) return viewFlowEditor(arg);
+    const v = $('#view'), tok = location.hash;
+    v.innerHTML = '<div class="p-4 md:p-6 max-w-5xl mx-auto"><div class="card p-4 text-xs ink-3">Memuat flow…</div></div>';
+    try {
+      S.fl = await api('GET', '/api/flows');
+      if (!S.users.length) S.users = await api('GET', '/api/users').catch(() => []);
+    } catch (e) { v.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+    if (location.hash !== tok) return;
+    renderFlowList();
+  }
+  function renderFlowList() {
+    const a = S.fl, v = $('#view');
+    const iconBtn = (attr, icon, label, extra = '') => `<button type="button" class="btn btn-ghost btn-icon btn-sm ${extra}" ${attr} title="${label}" aria-label="${label}">${icon}</button>`;
+    v.innerHTML = `<div class="p-4 md:p-6 max-w-5xl mx-auto space-y-4" id="fl-root">
+      <section class="card p-4 flex flex-col sm:flex-row sm:items-center gap-3">
+        <span class="hidden sm:inline-flex w-9 h-9 rounded-lg items-center justify-center flex-none surface-2">${ICON.flow.replace('<svg', '<svg width="18" height="18"')}</span>
+        <div class="flex-1 min-w-0"><div class="font-semibold">Flow otomatis</div>
+          <div class="text-xs ink-3 mt-0.5">Susun alur tanpa coding, mis. pesan masuk → cek kata kunci → kirim balasan → teruskan ke agen. Flow dicek dari atas ke bawah; flow pertama yang menjalankan aksi menghentikan pengecekan.</div></div>
+        <button class="btn btn-primary flex-none" id="fl-new">${ICON.plus} Flow baru</button>
+      </section>
+      ${a.autoReplyEnabled ? `<div class="rounded-md px-3 py-2 text-xs" style="background:var(--warn-soft);color:var(--warn)">Auto reply juga aktif. Bila sebuah flow menjalankan aksi untuk suatu pesan, Auto reply tidak dijalankan untuk pesan itu sehingga pelanggan tidak menerima balasan ganda.</div>` : ''}
+      <section class="card">
+        <div class="card-h"><div class="card-t">Flow (${a.flows.length})</div><span class="text-[11px] ink-3">Zona waktu ${esc(a.timezone)} · ${esc(AR_DAYS[a.now.day])} ${esc(a.now.time)}</span></div>
+        <div>${a.flows.map((f, i) => `<div class="px-4 py-3 border-b bd last:border-0 flex gap-3 ${f.enabled ? '' : 'opacity-70'}">
+            <div class="pt-0.5">${sw('fl-on-' + f.id, f.enabled, 'Aktifkan ' + f.name)}</div>
+            <div class="min-w-0 flex-1">
+              <div class="flex items-start gap-2">
+                <a href="#/flows/${esc(f.id)}" class="min-w-0 flex-1"><div class="font-medium truncate hover:underline">${esc(f.name)}</div>
+                  <div class="text-[11px] ink-3 mt-0.5">${f.steps} langkah · ${f.conditions} kondisi · ${fmtNum(f.stats.runs)}× berjalan${f.stats.lastRunAt ? ' · terakhir ' + esc(fmtDT(f.stats.lastRunAt)) : ''}</div></a>
+                <div class="flex items-center -mr-1.5 -mt-1 flex-none">
+                  ${iconBtn(`data-fl-up="${i}" ${i === 0 ? 'disabled' : ''}`, ICON.up, 'Naikkan')}
+                  ${iconBtn(`data-fl-down="${i}" ${i === a.flows.length - 1 ? 'disabled' : ''}`, ICON.down, 'Turunkan')}
+                  ${iconBtn(`data-fl-dup="${esc(f.id)}"`, ICON.copy, 'Duplikat')}
+                  <a href="#/flows/${esc(f.id)}" class="btn btn-ghost btn-icon btn-sm" title="Ubah" aria-label="Ubah">${ICON.edit}</a>
+                  ${iconBtn(`data-fl-del="${esc(f.id)}"`, ICON.trash, 'Hapus', 'btn-danger')}
+                </div>
+              </div>
+              <div class="flex flex-wrap gap-1 mt-1.5">
+                ${f.waiting ? `<span class="badge badge-amber">${f.waiting} menunggu</span>` : ''}
+                ${f.settings.activeFrom || f.settings.activeUntil ? `<span class="badge">${ICON.clock.replace('<svg', '<svg width="11" height="11"')} ${esc(f.settings.activeFrom || '…')} – ${esc(f.settings.activeUntil || '…')}</span>` : ''}
+                ${f.stats.lastError ? `<span class="badge badge-red" title="${esc(f.stats.lastError.message)}">Gagal terakhir ${esc(fmtDT(f.stats.lastError.at))}</span>` : ''}
+              </div>
+            </div>
+          </div>`).join('') || '<div class="empty">Belum ada flow.<br><span class="text-xs">Klik <b>Flow baru</b> dan pilih contoh untuk memulai.</span></div>'}</div>
+      </section>
+      <section class="card"><div class="card-h"><div class="card-t">Riwayat terbaru</div><button class="btn btn-ghost btn-sm" id="fl-refresh">${ICON.refresh} Muat ulang</button></div>
+        <div>${flRunsHtml(a.runs, true)}</div></section>
+    </div>`;
+    const root = $('#fl-root');
+    $('#fl-new').addEventListener('click', () => {
+      modal('Flow baru', `<div class="grid sm:grid-cols-2 gap-2">${Object.entries(FL_STARTERS).map(([k, [t, d]]) => `<button class="fl-pick" data-starter="${k}"><span class="min-w-0"><span class="block text-[13px] font-medium">${esc(t)}</span><span class="block text-[11px] ink-3 mt-0.5">${esc(d)}</span></span></button>`).join('')}</div>
+        <p class="hint mt-3">Flow baru tersimpan dalam keadaan nonaktif. Uji dulu, lalu aktifkan.</p>`, { wide: true });
+      $$('#modal-root [data-starter]').forEach((b) => b.addEventListener('click', () => { closeModal(); location.hash = '#/flows/new-' + b.dataset.starter; }));
+    });
+    $('#fl-refresh').addEventListener('click', () => viewFlows());
+    root.addEventListener('change', (e) => {
+      if (!e.target.id?.startsWith('fl-on-')) return;
+      const id = e.target.id.slice(6), on = e.target.checked;
+      e.target.closest('.switch').classList.toggle('on', on);
+      busy(null, async () => {
+        try { await api('PATCH', '/api/flows/' + encodeURIComponent(id), { enabled: on }); toast(on ? 'Flow diaktifkan.' : 'Flow dinonaktifkan.'); }
+        finally { await viewFlows(); }
+      });
+    });
+    root.addEventListener('click', async (e) => {
+      const b = e.target.closest('button'); if (!b) return;
+      const d = b.dataset, ids = a.flows.map((f) => f.id);
+      if (d.flCancel) return flCancelRun(d.flCancel, viewFlows);
+      if (d.flUp !== undefined || d.flDown !== undefined) {
+        const i = Number(d.flUp ?? d.flDown), j = d.flUp !== undefined ? i - 1 : i + 1;
+        [ids[i], ids[j]] = [ids[j], ids[i]];
+        return busy(b, async () => { await api('PUT', '/api/flows/order', { ids }); await viewFlows(); });
+      }
+      if (d.flDup) return busy(b, async () => {
+        const f = await api('GET', '/api/flows/' + encodeURIComponent(d.flDup));
+        const copy = await api('POST', '/api/flows', { name: (f.name + ' (salinan)').slice(0, 80), enabled: false, root: f.root, nodes: f.nodes, settings: f.settings });
+        toast('Flow diduplikat (nonaktif).'); location.hash = '#/flows/' + copy.id;
+      });
+      if (d.flDel) {
+        const f = a.flows.find((x) => x.id === d.flDel);
+        if (!await confirmBox(`Hapus flow "${f.name}"?${f.waiting ? ` ${f.waiting} run yang sedang menunggu akan dibatalkan.` : ''}`, 'Hapus', true)) return;
+        return busy(null, async () => { await api('DELETE', '/api/flows/' + encodeURIComponent(f.id)); toast('Flow dihapus.'); await viewFlows(); });
+      }
+    });
+  }
+
+  /* Editor flow */
+  async function viewFlowEditor(arg) {
+    const v = $('#view'), tok = location.hash, isNew = arg.startsWith('new');
+    v.innerHTML = '<div class="p-4 md:p-6 max-w-7xl mx-auto"><div class="card p-4 text-xs ink-3">Memuat flow…</div></div>';
+    let f;
+    try {
+      if (!S.fl) S.fl = await api('GET', '/api/flows');
+      if (!S.users.length) S.users = await api('GET', '/api/users').catch(() => []);
+      f = isNew ? flStarter(arg.slice(4)) : await api('GET', '/api/flows/' + encodeURIComponent(arg));
+    } catch (e) { v.innerHTML = `<div class="empty">${esc(e.message)}<br><a href="#/flows" class="underline text-xs">Kembali ke daftar flow</a></div>`; return; }
+    if (location.hash !== tok) return;
+    S.fe = { flow: { id: f.id, name: f.name, enabled: !!f.enabled, root: f.root, nodes: structuredClone(f.nodes), settings: { ...f.settings } }, runs: f.runs || [], dirty: isNew, hit: null };
+    renderFlowEditor();
+  }
+  const flParent = (id) => {
+    for (const n of Object.values(S.fe.flow.nodes)) for (const p of ['next', 'yes', 'no']) if (n[p] === id) return [n.id, p];
+    return [null, null];
+  };
+  const flCount = (id) => { if (!id) return 0; const n = S.fe.flow.nodes[id]; return 1 + (n.type === 'condition' ? flCount(n.yes) + flCount(n.no) : flCount(n.next)); };
+  const flDrop = (id) => { if (!id) return; const n = S.fe.flow.nodes[id]; if (n.type === 'condition') { flDrop(n.yes); flDrop(n.no); } else flDrop(n.next); delete S.fe.flow.nodes[id]; };
+  const flAddHtml = (id, port) => `<div class="fl-line"></div><button type="button" class="fl-add" data-fl-add="${id}:${port}" title="Tambah langkah di sini" aria-label="Tambah langkah">${ICON.plus}</button><div class="fl-line"></div>`;
+  function flNodeHtml(id) {
+    const n = S.fe.flow.nodes[id];
+    const meta = n.type === 'trigger' ? { label: 'Pesan masuk', icon: 'inbox' } : FL_STEP[n.type];
+    const title = n.type === 'condition' ? 'Kondisi · ' + FL_COND[n.cfg.kind] : meta.label;
+    const buttons = n.type === 'send' ? n.cfg.buttons || [] : [];
+    const card = `<div class="fl-card fl-${n.type} ${S.fe.hit?.has(id) ? 'fl-hit' : ''}" ${n.type === 'trigger' ? '' : `data-fl-edit="${id}" role="button" tabindex="0" aria-label="Ubah langkah ${esc(title)}"`}>
+        <div class="flex items-center gap-2"><span class="fl-ic">${ICON[meta.icon]}</span><span class="text-[13px] font-medium flex-1 min-w-0 truncate">${esc(title)}</span>
+          ${n.type === 'trigger' ? '<span class="badge">Pemicu</span>' : `<button type="button" class="btn btn-ghost btn-icon btn-sm -mr-1.5 -my-1" data-fl-del="${id}" title="Hapus langkah" aria-label="Hapus langkah">${ICON.trash}</button>`}</div>
+        <div class="text-xs ink-3 mt-1 line-clamp-3 break-words whitespace-pre-line">${n.type === 'send' && n.cfg.image ? '🖼 ' : ''}${esc(flSummary(n))}</div>
+        ${buttons.length ? `<div class="flex flex-wrap gap-1 mt-1.5">${buttons.map((t) => `<span class="badge" style="color:var(--info)">${esc(t)}</span>`).join('')}</div>` : ''}
+      </div>`;
+    const tail = (child) => (child ? flNodeHtml(child) : '<div class="fl-end">Selesai</div>');
+    if (n.type === 'condition') {
+      return `${card}<div class="fl-line"></div><div class="fl-branches">${['yes', 'no'].map((p) => `<div class="fl-branch">
+          <span class="fl-tag fl-tag-${p}">${p === 'yes' ? 'Ya' : 'Tidak'}</span>${flAddHtml(id, p)}${tail(n[p])}</div>`).join('')}</div>`;
+    }
+    return card + flAddHtml(id, 'next') + tail(n.next);
+  }
+  function renderFlowCanvas() {
+    const c = $('#fe-canvas'), keep = c.firstElementChild ? c.scrollLeft : null;
+    c.innerHTML = `<div class="fl-tree">${flNodeHtml(S.fe.flow.root)}</div>`;
+    // Pohon lebih lebar dari layar (HP): mulai dari tengah agar pemicu terlihat; setelah diubah, posisi gulir dipertahankan
+    c.scrollLeft = keep ?? (c.scrollWidth - c.clientWidth) / 2;
+  }
+  function flChanged() {
+    S.fe.dirty = true; S.fe.hit = null;
+    $('#fe-savebar').classList.remove('hidden');
+    renderFlowCanvas();
+  }
+  function renderFlowEditor() {
+    const f = S.fe.flow, s = f.settings, v = $('#view');
+    v.innerHTML = `<div id="fe-root">
+      <div id="fe-savebar" class="${S.fe.dirty ? '' : 'hidden'} sticky top-0 z-20 px-4 md:px-6 pt-3">
+        <div class="max-w-7xl mx-auto surface border bd rounded-lg shadow-lg px-4 py-2.5 flex items-center gap-3">
+          <span class="w-2 h-2 rounded-full flex-none" style="background:var(--warn)"></span>
+          <span class="text-[13px] font-medium flex-1 min-w-0 truncate">${f.id ? 'Perubahan belum disimpan' : 'Flow baru belum disimpan'}</span>
+          <button class="btn btn-ghost btn-sm" id="fe-reset">Batalkan</button><button class="btn btn-primary btn-sm" id="fe-save">Simpan</button>
+        </div>
+      </div>
+      <div class="p-4 md:p-6 max-w-7xl mx-auto space-y-4">
+        <a href="#/flows" class="btn btn-ghost btn-sm -ml-2">${ICON.back} Semua flow</a>
+        <div class="grid lg:grid-cols-[minmax(0,1fr)_21rem] gap-4 items-start">
+          <section class="card min-w-0">
+            <div class="card-h">
+              <input class="input font-semibold flex-1 min-w-0" id="fe-name" maxlength="80" value="${esc(f.name)}" aria-label="Nama flow" placeholder="Nama flow">
+              <label class="flex items-center gap-2 text-xs ink-2 flex-none">Aktif ${sw('fe-on', f.enabled, 'Aktifkan flow')}</label>
+            </div>
+            <div class="px-4 py-2 border-b bd text-[11px] ink-3">Klik langkah untuk mengubah, <span class="kbd">+</span> untuk menambah langkah. Kondisi membuat dua cabang: <b class="ink-2">Ya</b> dan <b class="ink-2">Tidak</b>.</div>
+            <div id="fe-canvas" class="fl-canvas overflow-auto scroll-thin p-4 md:p-6"></div>
+          </section>
+          <aside class="space-y-4 min-w-0">
+            <section class="card"><div class="card-h"><div class="card-t">Pengaturan & jadwal</div></div>
+              <div class="p-4 space-y-3" id="fe-settings">
+                <div><label class="label" for="fe-pause">Jeda saat CS aktif (menit)</label><input class="input" type="number" min="0" max="1440" id="fe-pause" value="${s.pauseIfHumanMin}">
+                  <p class="hint">Flow tidak berjalan bila CS membalas manual dalam waktu ini. 0 = selalu berjalan.</p></div>
+                <div><label class="label" for="fe-cd">Jalankan ulang di percakapan yang sama setelah (menit)</label><input class="input" type="number" min="0" max="10080" id="fe-cd" value="${s.cooldownMin}">
+                  <p class="hint">0 = dijalankan untuk setiap pesan masuk.</p></div>
+                <div class="grid grid-cols-2 gap-2">
+                  <div><label class="label" for="fe-from">Aktif mulai</label><input class="input" type="date" id="fe-from" value="${esc(s.activeFrom)}"></div>
+                  <div><label class="label" for="fe-until">Sampai</label><input class="input" type="date" id="fe-until" value="${esc(s.activeUntil)}"></div>
+                </div>
+                <p class="hint -mt-1">Kosongkan untuk aktif terus. Zona waktu ${esc(S.fl.timezone)} (mengikuti Auto reply). Untuk jam tertentu, pakai kondisi <b>Jadwal</b>.</p>
+              </div></section>
+            <section class="card"><div class="card-h"><div class="min-w-0"><div class="card-t">Uji flow</div><div class="text-[11px] ink-3">Memakai isian saat ini, termasuk yang belum disimpan. Tidak ada pesan yang dikirim.</div></div></div>
+              <div class="p-4 space-y-2.5">
+                <input class="input" id="fe-t-text" placeholder="Contoh pesan, mis. berapa harga paket pro?" aria-label="Contoh pesan pelanggan">
+                <div class="grid grid-cols-2 gap-2">
+                  <select class="select" id="fe-t-type" aria-label="Jenis pesan">${Object.entries(FL_MSG).map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select>
+                  <input class="input" id="fe-t-labels" placeholder="Label kontak" aria-label="Label kontak, pisahkan dengan koma">
+                </div>
+                <div class="grid grid-cols-2 gap-2">
+                  <select class="select" id="fe-t-day" aria-label="Hari simulasi"><option value="">Hari ini</option>${AR_DAYS.map((d, i) => `<option value="${i}">${d}</option>`).join('')}</select>
+                  <input class="input" type="time" id="fe-t-time" aria-label="Jam simulasi (kosong = sekarang)">
+                </div>
+                <div class="flex flex-wrap gap-x-4 gap-y-1">
+                  <label class="flex items-center gap-2 text-xs ink-2"><input type="checkbox" class="check" id="fe-t-new"> Kontak baru</label>
+                  <label class="flex items-center gap-2 text-xs ink-2"><input type="checkbox" class="check" id="fe-t-assigned"> Sudah ditugaskan</label>
+                </div>
+                <button class="btn w-full" id="fe-t-go">Jalankan uji</button>
+                <div id="fe-t-out"></div>
+              </div></section>
+            ${f.id ? `<section class="card"><div class="card-h"><div class="card-t">Riwayat jalan</div><button class="btn btn-ghost btn-sm" id="fe-runs-refresh">${ICON.refresh}</button></div>
+              <div id="fe-runs" class="max-h-[28rem] overflow-y-auto scroll-thin">${flRunsHtml(S.fe.runs, false)}</div></section>` : ''}
+          </aside>
+        </div>
+      </div>
+    </div>`;
+    renderFlowCanvas();
+    bindFlowEditor();
+  }
+  function bindFlowEditor() {
+    const root = $('#fe-root'), f = S.fe.flow;
+    const markDirty = () => { S.fe.dirty = true; $('#fe-savebar').classList.remove('hidden'); };
+    $('#fe-name').addEventListener('input', (e) => { f.name = e.target.value; markDirty(); });
+    $('#fe-on').addEventListener('change', (e) => { e.target.closest('.switch').classList.toggle('on', e.target.checked); f.enabled = e.target.checked; markDirty(); });
+    $('#fe-settings').addEventListener('input', () => {
+      Object.assign(f.settings, { pauseIfHumanMin: Number($('#fe-pause').value), cooldownMin: Number($('#fe-cd').value), activeFrom: $('#fe-from').value, activeUntil: $('#fe-until').value });
+      markDirty();
+    });
+    $('#fe-canvas').addEventListener('click', async (e) => {
+      const del = e.target.closest('[data-fl-del]');
+      if (del) return flDelete(del.dataset.flDel);
+      const add = e.target.closest('[data-fl-add]');
+      if (add) { const [pid, port] = add.dataset.flAdd.split(':'); return flPickStep(pid, port); }
+      const ed = e.target.closest('[data-fl-edit]');
+      if (ed) { const n = f.nodes[ed.dataset.flEdit]; flStepModal(n, (cfg) => { n.cfg = cfg; }); }
+    });
+    $('#fe-canvas').addEventListener('keydown', (e) => { if ((e.key === 'Enter' || e.key === ' ') && e.target.dataset.flEdit) { e.preventDefault(); e.target.click(); } });
+    $('#fe-reset').addEventListener('click', () => { if (f.id) viewFlowEditor(f.id); else location.hash = '#/flows'; });
+    $('#fe-save').addEventListener('click', (e) => busy(e.currentTarget, async () => {
+      const body = { ...f, name: $('#fe-name').value };
+      const saved = f.id ? await api('PUT', '/api/flows/' + encodeURIComponent(f.id), body) : await api('POST', '/api/flows', body);
+      S.fe = { flow: { id: saved.id, name: saved.name, enabled: saved.enabled, root: saved.root, nodes: saved.nodes, settings: saved.settings }, runs: saved.runs || [], dirty: false, hit: null };
+      if (!f.id) history.replaceState(null, '', '#/flows/' + saved.id);
+      renderFlowEditor(); toast(saved.enabled ? 'Flow disimpan dan aktif.' : 'Flow disimpan (nonaktif).');
+    }));
+    $('#fe-t-go').addEventListener('click', (e) => busy(e.currentTarget, async () => {
+      const t = await api('POST', '/api/flows/test', {
+        flow: { ...f, name: $('#fe-name').value || 'Uji' }, text: $('#fe-t-text').value, msgType: $('#fe-t-type').value, labels: $('#fe-t-labels').value,
+        day: $('#fe-t-day').value, time: $('#fe-t-time').value, newContact: $('#fe-t-new').checked, assigned: $('#fe-t-assigned').checked,
+      });
+      S.fe.hit = new Set(t.steps.map((s) => s.nodeId)); renderFlowCanvas();
+      const preview = (p) => (p?.text !== undefined
+        ? `<div class="basis-full pl-5 mt-1"><div class="chat-bg rounded-md p-2"><div class="bubble out">${p.image ? `<img src="/api/autoreply/media/${esc(p.image)}" alt="" class="mb-1">` : ''}${waFormat(p.text)}${(p.buttons || []).map((b) => `<span class="ib-btn">${esc(b)}</span>`).join('')}<div class="meta"><span>⚡ Flow</span></div></div></div></div>`
+        : p?.note ? `<div class="basis-full pl-5 mt-1 text-[11px] ink-3 italic whitespace-pre-line">${esc(p.note)}</div>` : '');
+      $('#fe-t-out').innerHTML = `<div class="text-[11px] ink-3 mb-1.5">Simulasi ${esc(AR_DAYS[t.clock.day])} ${esc(t.clock.time)} · ${t.actions ? `${t.actions} aksi` : 'tidak ada aksi — flow berikutnya / Auto reply akan dicek'}</div>
+        <ol class="space-y-1.5">${t.steps.map((s) => flStepLine(s).replace('</li>', preview(s.preview) + '</li>').replace('<li class="flex gap-2', '<li class="flex flex-wrap gap-x-2')).join('')}</ol>`;
+    }));
+    $('#fe-t-text').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#fe-t-go').click(); });
+    const reloadRuns = async () => { S.fe.runs = await api('GET', '/api/flows/runs?flowId=' + encodeURIComponent(f.id)); $('#fe-runs').innerHTML = flRunsHtml(S.fe.runs, false); };
+    $('#fe-runs-refresh')?.addEventListener('click', (e) => busy(e.currentTarget, reloadRuns));
+    root.addEventListener('click', (e) => { const c = e.target.closest('[data-fl-cancel]'); if (c) flCancelRun(c.dataset.flCancel, reloadRuns); });
+  }
+  async function flDelete(id) {
+    const f = S.fe.flow, n = f.nodes[id], [pid, port] = flParent(id);
+    let keep = n.next;
+    if (n.type === 'condition') {
+      const lost = flCount(n.no);
+      if (!await confirmBox(lost ? `Hapus kondisi ini? Langkah di cabang "Ya" dipertahankan; ${lost} langkah di cabang "Tidak" ikut terhapus.` : 'Hapus kondisi ini? Langkah di cabang "Ya" dipertahankan.', 'Hapus', true)) return;
+      flDrop(n.no); keep = n.yes;
+    }
+    f.nodes[pid][port] = keep || null;
+    delete f.nodes[id];
+    flChanged();
+  }
+  function flPickStep(parentId, port) {
+    modal('Tambah langkah', `<div class="grid sm:grid-cols-2 gap-2">${Object.entries(FL_STEP).map(([k, s]) => `<button type="button" class="fl-pick" data-pick="${k}">
+        <span class="fl-ic">${ICON[s.icon]}</span><span class="min-w-0"><span class="block text-[13px] font-medium">${s.label}</span><span class="block text-[11px] ink-3 mt-0.5">${s.desc}</span></span></button>`).join('')}</div>`, { wide: true });
+    $$('#modal-root [data-pick]').forEach((b) => b.addEventListener('click', () => {
+      const type = b.dataset.pick;
+      flStepModal({ type, cfg: flDefaultCfg(type) }, (cfg) => {
+        const nodes = S.fe.flow.nodes, p = nodes[parentId], id = flId(), child = p[port] || null;
+        // Langkah lama di posisi ini menjadi lanjutan langkah baru (cabang "Ya" bila langkah baru berupa kondisi)
+        nodes[id] = type === 'condition' ? { id, type, cfg, yes: child, no: null } : { id, type, cfg, next: child };
+        p[port] = id;
+      });
+    }));
+  }
+
+  /* Form konfigurasi per jenis langkah */
+  function flCondFields(c) {
+    switch (c.kind) {
+      case 'keyword': return `<div class="grid sm:grid-cols-[11rem_1fr] gap-3">
+          <div><label class="label">Cocok bila pesan</label><select class="select" name="match">${Object.entries(AR_MATCH).map(([k, l]) => `<option value="${k}" ${c.match === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+          <div><label class="label">Kata kunci (pisahkan dengan koma)</label><input class="input" name="keywords" value="${esc((c.keywords || []).join(', '))}" placeholder="harga, promo, paket"></div></div>
+        <p class="hint">"Mengandung kata" mencocokkan kata utuh tanpa membedakan huruf besar/kecil. Tombol yang ditekan pelanggan masuk sebagai teks judul tombol, jadi bisa dicek dengan <i>Sama persis</i>.</p>`;
+      case 'schedule': return `<div><div class="label">Hari</div><div class="flex flex-wrap gap-x-3 gap-y-1.5">${AR_DAYS.map((d, i) => `<label class="flex items-center gap-1.5 text-[13px]"><input type="checkbox" class="check" name="days" value="${i}" ${c.days.includes(i) ? 'checked' : ''}>${d}</label>`).join('')}</div></div>
+        <div class="grid grid-cols-2 gap-3 max-w-xs"><div><label class="label">Dari jam</label><input class="input" type="time" name="start" value="${esc(c.start)}"></div><div><label class="label">Sampai jam</label><input class="input" type="time" name="end" value="${esc(c.end)}"></div></div>
+        <p class="hint">Zona waktu ${esc(S.fl.timezone)}. Rentang melewati tengah malam (mis. 22:00–06:00) didukung.</p>`;
+      case 'business_hours': {
+        const open = S.fl.hours.filter((h) => h.enabled);
+        return `<div class="surface-2 rounded-md px-3 py-2 text-xs ink-2">${open.length ? open.map((h) => `${AR_DAYS[h.day]} ${h.open}–${h.close}`).join(' · ') : 'Belum ada hari kerja yang diatur.'}</div>
+          <p class="hint">Memakai jadwal jam kerja di menu <a href="#/autoreply" class="underline">Auto reply</a> (berlaku walau Auto reply nonaktif).</p>`;
+      }
+      case 'label': return `<div><label class="label">Kontak memiliki label</label><input class="input" name="label" list="fl-labels" maxlength="32" value="${esc(c.label)}" placeholder="VIP">
+        <datalist id="fl-labels">${(S.fl.labels || []).map((l) => `<option value="${esc(l)}">`).join('')}</datalist></div>`;
+      case 'new_contact': return `<div class="max-w-xs"><label class="label">Dianggap baru bila tidak mengirim pesan selama (hari)</label><input class="input" type="number" min="1" max="365" name="days" value="${c.days}"></div>`;
+      case 'message_type': return `<div><div class="label">Jenis pesan masuk</div><div class="grid grid-cols-2 sm:grid-cols-3 gap-1.5">${Object.entries(FL_MSG).map(([k, l]) => `<label class="flex items-center gap-1.5 text-[13px]"><input type="checkbox" class="check" name="types" value="${k}" ${c.types.includes(k) ? 'checked' : ''}>${l}</label>`).join('')}</div></div>`;
+      case 'assigned': return '<p class="text-xs ink-2">Ya bila percakapan sudah ditugaskan ke agen; Tidak bila masih di antrean.</p>';
+      default: return '';
+    }
+  }
+  function flFormHtml(type, c) {
+    switch (type) {
+      case 'condition': return `<div class="max-w-xs"><label class="label">Jenis kondisi</label><select class="select" name="kind">${Object.entries(FL_COND).map(([k, l]) => `<option value="${k}" ${c.kind === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+        <div id="cond-fields" class="space-y-3">${flCondFields(c)}</div>
+        <p class="hint">Bila kondisi terpenuhi flow lanjut ke cabang <b>Ya</b>, bila tidak ke cabang <b>Tidak</b>.</p>`;
+      case 'send': return `<div><label class="label">Teks pesan</label><textarea class="textarea" name="text" rows="4" maxlength="4096" placeholder="Halo {{name}}, …">${esc(c.text)}</textarea>
+          <p class="hint">Variabel: <span class="kbd">{{name}}</span> <span class="kbd">{{phone}}</span>. Format WhatsApp: *tebal* _miring_. Pesan hanya dikirim selama jendela layanan 24 jam masih terbuka.</p></div>
+        ${replyExtrasHtml('fl', c)}`;
+      case 'assign': return `<div><label class="label">Teruskan ke</label><select class="select" name="mode">${Object.entries(FL_ASSIGN).map(([k, l]) => `<option value="${k}" ${c.mode === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+        <div id="assign-user" class="${c.mode === 'user' ? '' : 'hidden'}"><label class="label">Agen</label><select class="select" name="userId"><option value="">Pilih agen…</option>${S.users.filter((u) => u.active).map((u) => `<option value="${esc(u.id)}" ${c.userId === u.id ? 'selected' : ''}>${esc(u.name)}${u.role === 'admin' ? ' (admin)' : ''}</option>`).join('')}</select></div>
+        <label class="flex items-center gap-2 text-[13px]"><input type="checkbox" class="check" name="onlyIfUnassigned" ${c.onlyIfUnassigned ? 'checked' : ''}> Hanya bila percakapan belum ditugaskan</label>
+        <p class="hint">Mode otomatis memilih dari pengguna aktif berperan agen (atau semua pengguna aktif bila belum ada agen). Agen menerima notifikasi penugasan seperti biasa.</p>`;
+      case 'label': return `<div class="grid sm:grid-cols-[10rem_1fr] gap-3"><div><label class="label">Aksi</label><select class="select" name="remove"><option value="0">Tambah label</option><option value="1" ${c.remove ? 'selected' : ''}>Hapus label</option></select></div>
+        <div><label class="label">Label</label><input class="input" name="label" list="fl-labels" maxlength="32" value="${esc(c.label)}" placeholder="Prospek"><datalist id="fl-labels">${(S.fl.labels || []).map((l) => `<option value="${esc(l)}">`).join('')}</datalist></div></div>`;
+      case 'status': return `<div class="max-w-xs"><label class="label">Jadikan status percakapan</label><select class="select" name="status">${Object.entries(FL_STATUS).map(([k, l]) => `<option value="${k}" ${c.status === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div>`;
+      case 'note': return `<div><label class="label">Catatan</label><textarea class="textarea" name="text" rows="3" maxlength="2000" placeholder="Pelanggan menanyakan harga, mohon follow-up.">${esc(c.text)}</textarea>
+        <p class="hint">Tidak dikirim ke pelanggan. Variabel <span class="kbd">{{name}}</span> <span class="kbd">{{phone}}</span> didukung.</p></div>`;
+      case 'delay': {
+        const hours = c.minutes % 60 === 0;
+        return `<div class="grid grid-cols-[1fr_8rem] gap-2 max-w-xs"><div><label class="label">Tunggu selama</label><input class="input" type="number" min="1" name="amount" value="${hours ? c.minutes / 60 : c.minutes}"></div>
+          <div><label class="label">Satuan</label><select class="select" name="unit"><option value="m">Menit</option><option value="h" ${hours ? 'selected' : ''}>Jam</option></select></div></div>
+        <label class="flex items-center gap-2 text-[13px]"><input type="checkbox" class="check" name="cancelOnReply" ${c.cancelOnReply ? 'checked' : ''}> Batalkan bila pelanggan mengirim pesan lagi atau CS membalas</label>
+        <p class="hint">Maksimal 23 jam. Setelah menunggu, pesan hanya dikirim bila jendela layanan 24 jam masih terbuka.</p>`;
+      }
+      default: return '';
+    }
+  }
+  function flReadForm(type, form) {
+    const fd = new FormData(form), d = Object.fromEntries(fd), err = (m) => { throw new Error(m); };
+    switch (type) {
+      case 'condition': {
+        const c = { kind: d.kind };
+        if (d.kind === 'keyword') { c.match = d.match; c.keywords = d.keywords.split(',').map((k) => k.trim()).filter(Boolean); if (!c.keywords.length) err('Isi minimal satu kata kunci.'); }
+        if (d.kind === 'schedule') { c.days = fd.getAll('days').map(Number); c.start = d.start; c.end = d.end; if (!c.days.length) err('Pilih minimal satu hari.'); if (!c.start || !c.end || c.start === c.end) err('Isi jam mulai dan selesai yang berbeda.'); }
+        if (d.kind === 'label') { c.label = d.label.trim(); if (!c.label) err('Isi nama label.'); }
+        if (d.kind === 'new_contact') c.days = Number(d.days);
+        if (d.kind === 'message_type') { c.types = fd.getAll('types'); if (!c.types.length) err('Pilih minimal satu jenis pesan.'); }
+        return c;
+      }
+      case 'send': {
+        const text = d.text.trim(), buttons = readButtons('fl', form), image = S.flDraftImage || null;
+        if (!text && !image) err('Isi teks pesan atau pilih gambar.');
+        if (buttons.length && !text) err('Teks pesan wajib diisi bila memakai tombol.');
+        if ((image || buttons.length) && text.length > 1024) err(`Teks maksimal 1024 karakter bila memakai gambar atau tombol (sekarang ${text.length}).`);
+        if (new Set(buttons.map((t) => t.toLowerCase())).size !== buttons.length) err('Teks tombol harus berbeda satu sama lain.');
+        return { text, image, buttons };
+      }
+      case 'assign': if (d.mode === 'user' && !d.userId) err('Pilih agen.'); return { mode: d.mode, userId: d.mode === 'user' ? d.userId : undefined, onlyIfUnassigned: fd.has('onlyIfUnassigned') };
+      case 'label': if (!d.label.trim()) err('Isi nama label.'); return { label: d.label.trim(), remove: d.remove === '1' };
+      case 'status': return { status: d.status };
+      case 'note': if (!d.text.trim()) err('Isi catatan.'); return { text: d.text.trim() };
+      case 'delay': {
+        const minutes = Math.round(Number(d.amount) * (d.unit === 'h' ? 60 : 1));
+        if (!(minutes >= 1 && minutes <= 1380)) err('Durasi tunggu harus antara 1 menit dan 23 jam.');
+        return { minutes, cancelOnReply: fd.has('cancelOnReply') };
+      }
+      default: return {};
+    }
+  }
+  function flStepModal(node, apply) {
+    let cfg = structuredClone(node.cfg);
+    S.flDraftImage = node.type === 'send' ? cfg.image || null : null;
+    modal(`${node.id ? 'Ubah' : 'Tambah'}: ${FL_STEP[node.type].label}`, `<form id="f-step" class="space-y-3" novalidate>${flFormHtml(node.type, cfg)}</form>`,
+      { wide: ['send', 'condition', 'label'].includes(node.type), footer: '<button class="btn" data-act="modal-close">Batal</button><button class="btn btn-primary" id="step-ok">Terapkan</button>' });
+    const form = $('#f-step');
+    form.addEventListener('submit', (e) => e.preventDefault());
+    form.addEventListener('change', (e) => {
+      const t = e.target;
+      if (t.name === 'kind') { cfg = { kind: t.value, ...flCondDefaults(t.value) }; $('#cond-fields').innerHTML = flCondFields(cfg); }
+      if (t.name === 'mode') $('#assign-user').classList.toggle('hidden', t.value !== 'user');
+      if (t.dataset.arImg === 'fl') busy(null, async () => { const key = await uploadArImage(t.files[0]); if (key) { S.flDraftImage = key; $('#fl-img').innerHTML = imgPickerHtml('fl', key); } });
+    });
+    form.addEventListener('click', (e) => { if (e.target.closest('[data-ar-img-del="fl"]')) { S.flDraftImage = null; $('#fl-img').innerHTML = imgPickerHtml('fl', null); } });
+    $('#step-ok').addEventListener('click', () => {
+      try { apply(flReadForm(node.type, form)); closeModal(); flChanged(); toast('Langkah diterapkan — klik Simpan.'); } catch (e) { fail(e); }
     });
   }
 
