@@ -18,6 +18,9 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const http = require('http');
+const https = require('https');
+const dns = require('dns');
+const net = require('net');
 const crypto = require('crypto');
 const express = require('express');
 const axios = require('axios');
@@ -105,7 +108,7 @@ const csvCell = (v) => {
 const EMPTY_DB = {
   settings: {}, users: [], contacts: [], conversations: [], messages: [],
   templates: [], templatesSyncedAt: 0, campaigns: [], calls: [], audit: [], avatars: {}, autoReply: null, arMedia: {}, costs: null, sendLog: [],
-  flows: [], flowRuns: [], groups: [], csat: null,
+  flows: [], flowRuns: [], groups: [], csat: null, waFlows: [], flowSubmissions: [], stickers: [],
 };
 let db;
 try { db = { ...EMPTY_DB, ...JSON.parse(fs.readFileSync(DB_FILE, 'utf8')) }; }
@@ -280,12 +283,13 @@ function previewOf(m) {
     case 'text': return c.body;
     case 'image': return '📷 ' + (c.caption || 'Gambar');
     case 'video': return '🎬 ' + (c.caption || 'Video');
-    case 'audio': return '🎵 Audio';
+    case 'audio': return c.voice ? '🎤 Pesan suara' : '🎵 Audio';
     case 'document': return '📄 ' + (c.filename || 'Dokumen');
-    case 'sticker': return 'Stiker';
+    case 'sticker': return '🏷️ Stiker';
     case 'location': return '📍 ' + (c.name || 'Lokasi');
-    case 'interactive': return '☰ ' + (c.body || 'Pesan interaktif');
+    case 'interactive': return (c.kind === 'flow' ? '📋 ' : '☰ ') + (c.body || 'Pesan interaktif');
     case 'interactive_reply': return '↩ ' + c.title;
+    case 'flow_reply': return '📋 Formulir dikirim';
     case 'call_permission': return c.response === 'accept' ? '📞 Bersedia ditelepon balik' : '📞 Menolak ditelepon';
     case 'button': return '↩ ' + c.text;
     case 'template': return '▤ Template: ' + c.name;
@@ -323,6 +327,8 @@ function addMessage(conv, data) {
   db.messages.push(msg);
   if (msg.wamid) idx.wamid.set(msg.wamid, msg);
   touchConv(conv, msg);
+  // Pesan WhatsApp Flow (interaktif atau template bertombol FLOW): catat pengiriman agar jawabannya dapat dicocokkan lewat flow_token
+  if (msg.direction === 'out' && msg.content?.flowToken) recordFlowSend(conv, msg);
   save();
   emitConv(conv, 'message:new', { message: msg, conversation: serializeConv(conv) });
   return msg;
@@ -345,8 +351,35 @@ function buildOutbound(type, b) {
       const obj = { id: String(b.mediaId) };
       if (type !== 'audio' && b.caption) obj.caption = str(b.caption, 1024);
       if (type === 'document' && b.filename) obj.filename = str(b.filename, 240);
+      // Pesan suara: hanya untuk OGG/Opus (hasil konversi /api/media kind=voice)
+      if (type === 'audio' && b.voice && /^audio\/ogg/.test(str(b.mime, 100))) obj.voice = true;
       p[type] = obj;
-      return { payload: p, content: { mediaId: obj.id, caption: obj.caption || '', filename: obj.filename || '', mime: str(b.mime, 100) } };
+      const num = (v, max) => { const n = Number(v); return Number.isFinite(n) && n > 0 && n <= max ? Math.round(n * 10) / 10 : 0; };
+      return { payload: p, content: { mediaId: obj.id, caption: obj.caption || '', filename: obj.filename || '', mime: str(b.mime, 100),
+        voice: !!obj.voice, size: num(b.size, 200 * 1024 * 1024), duration: num(b.duration, 86400), width: num(b.width, 20000), height: num(b.height, 20000) } };
+    }
+    case 'sticker': {
+      if (!b.mediaId) throw new HttpError(400, 'Stiker belum dipilih.');
+      p.sticker = { id: String(b.mediaId) };
+      return { payload: p, content: { mediaId: p.sticker.id, stickerId: str(b.stickerId, 40), animated: !!b.animated, mime: 'image/webp' } };
+    }
+    case 'contacts': {
+      // Kartu kontak (vCard). formatted_name wajib; wa_id diisi untuk kontak WhatsApp agar penerima bisa langsung "Kirim pesan".
+      const list = (Array.isArray(b.contacts) ? b.contacts : []).slice(0, 10).map((k) => {
+        const name = str(k?.name, 200);
+        if (!name) throw new HttpError(400, 'Nama kontak wajib diisi.');
+        const [first, ...rest] = name.split(/\s+/);
+        // Nomor lokal (0812…) diubah ke format internasional Indonesia (62812…)
+        const phones = (Array.isArray(k.phones) ? k.phones : []).map((x) => normPhone(typeof x === 'object' ? x.phone : x)).map((d) => (d.startsWith('0') ? '62' + d.slice(1) : d)).filter(validPhone).slice(0, 5)
+          .map((d) => ({ phone: '+' + d, type: 'CELL', ...(k.whatsapp ? { wa_id: d } : {}) }));
+        const emails = (Array.isArray(k.emails) ? k.emails : []).map((x) => str(typeof x === 'object' ? x.email : x, 200)).filter((e) => /^\S+@\S+\.\S+$/.test(e)).slice(0, 3).map((email) => ({ email, type: 'WORK' }));
+        if (!phones.length && !emails.length) throw new HttpError(400, `Kontak "${name}" belum punya nomor telepon atau email yang valid.`);
+        const company = str(k.company, 200);
+        return { name: { formatted_name: name, first_name: first, ...(rest.length ? { last_name: rest.join(' ') } : {}) }, phones, emails, ...(company ? { org: { company } } : {}) };
+      });
+      if (!list.length) throw new HttpError(400, 'Pilih minimal satu kontak.');
+      p.contacts = list;
+      return { payload: p, content: { contacts: list.map((k) => ({ name: k.name.formatted_name, phones: k.phones.map((x) => x.phone), emails: k.emails.map((x) => x.email), company: k.org?.company || '' })) } };
     }
     case 'location': {
       const latitude = Number(b.latitude), longitude = Number(b.longitude);
@@ -382,6 +415,10 @@ function buildOutbound(type, b) {
       if (b.footer) interactive.footer = { text: str(b.footer, 60) };
       p.interactive = interactive;
       return { payload: p, content: { kind: 'list', header: str(b.header, 60), body, footer: str(b.footer, 60), button, rows }, type: 'interactive' };
+    }
+    case 'flow': {
+      const m = buildWaFlowMessage(b);
+      return { payload: { interactive: m.interactive }, content: m.content, type: 'interactive' };
     }
     case 'call_permission_request': {
       const body = str(b.body, 1024) || 'Boleh kami menelepon Anda melalui WhatsApp untuk membantu lebih lanjut?';
@@ -429,12 +466,25 @@ function buildTemplateComponents(tpl, values = {}, contact = {}) {
   // Tombol URL dinamis (mis. template undangan grup https://chat.whatsapp.com/{{1}}): values.buttonUrl[index] = akhiran URL
   const buttons = (tpl.components || []).find((c) => c.type === 'BUTTONS');
   (buttons?.buttons || []).forEach((btn, i) => {
+    // Tombol FLOW: setiap pengiriman mendapat flow_token sendiri agar jawaban formulir dapat dicocokkan
+    if (btn.type === 'FLOW') {
+      comps.push({ type: 'button', sub_type: 'flow', index: String(i), parameters: [{ type: 'action', action: { flow_token: newFlowToken() } }] });
+      return;
+    }
     if (btn.type !== 'URL' || !/\{\{/.test(btn.url || '')) return;
     const text = fill((values.buttonUrl || [])[i]);
     if (!text) throw new HttpError(400, `Tombol URL "${btn.text}" memerlukan nilai variabel.`);
     comps.push({ type: 'button', sub_type: 'url', index: String(i), parameters: [{ type: 'text', text }] });
   });
   return comps;
+}
+// Info WhatsApp Flow dari komponen template yang sudah dibangun (tombol FLOW)
+function templateFlowInfo(tpl, comps) {
+  const c = comps.find((x) => x.type === 'button' && x.sub_type === 'flow');
+  if (!c) return null;
+  const btn = (tpl.components || []).find((x) => x.type === 'BUTTONS')?.buttons?.[Number(c.index)] || {};
+  const f = wafById(btn.flow_id);
+  return { flowToken: c.parameters[0].action.flow_token, flowId: btn.flow_id ? String(btn.flow_id) : null, flowName: f?.name || btn.text || 'Flow' };
 }
 function renderTemplateText(tpl, comps) {
   const body = (tpl.components || []).find((c) => c.type === 'BODY');
@@ -452,7 +502,7 @@ async function sendTemplateTo(contact, tpl, values, extra = {}, ctx = {}) {
   // 'accepted' = Meta menerima request; sent/delivered/read hanya dari webhook status
   const msg = addMessage(conv, {
     direction: 'out', type: 'template', wamid: r.messages?.[0]?.id, status: 'accepted',
-    content: { name: tpl.name, language: tpl.language, body: renderTemplateText(tpl, components) }, ...extra,
+    content: { name: tpl.name, language: tpl.language, body: renderTemplateText(tpl, components), ...templateFlowInfo(tpl, components) }, ...extra,
   });
   return msg;
 }
@@ -495,7 +545,7 @@ function payloadSummary(p) {
 }
 function payloadKind(p) {
   if (p.type !== 'interactive') return p.type || 'unknown';
-  return { button: 'buttons', list: 'list', call_permission_request: 'call_permission' }[p.interactive?.type] || 'interactive';
+  return { button: 'buttons', list: 'list', flow: 'flow', call_permission_request: 'call_permission' }[p.interactive?.type] || 'interactive';
 }
 const maskPhone = (p) => (p && p.length > 6 ? p.slice(0, 4) + '•'.repeat(p.length - 6) + p.slice(-2) : p || '');
 function redactPayload(p) {
@@ -616,7 +666,7 @@ function parseInbound(m) {
   const t = m.type;
   if (['image', 'video', 'audio', 'document', 'sticker'].includes(t)) {
     const o = m[t] || {};
-    return { type: t, content: { mediaId: o.id, mime: o.mime_type, caption: o.caption || '', filename: o.filename || '', voice: !!o.voice } };
+    return { type: t, content: { mediaId: o.id, mime: o.mime_type, caption: o.caption || '', filename: o.filename || '', voice: !!o.voice, ...(t === 'sticker' ? { animated: !!o.animated } : {}) } };
   }
   switch (t) {
     case 'text': return { type: 'text', content: { body: m.text?.body || '' } };
@@ -626,11 +676,20 @@ function parseInbound(m) {
         const p = m.interactive.call_permission_reply || {};
         return { type: 'call_permission', content: { response: p.response === 'accept' ? 'accept' : 'reject', permanent: !!p.is_permanent, expiresAt: p.expiration_timestamp ? Number(p.expiration_timestamp) * 1000 : 0, source: p.response_source || '' } };
       }
-      const r = m.interactive?.button_reply || m.interactive?.list_reply || m.interactive?.nfm_reply || {};
+      if (m.interactive?.type === 'nfm_reply') {
+        // Jawaban WhatsApp Flow: response_json berisi flow_token + isian formulir
+        const r = m.interactive.nfm_reply || {};
+        let data = {};
+        try { data = JSON.parse(r.response_json || '{}'); } catch { data = {}; }
+        const { flow_token: token, ...response } = data && typeof data === 'object' ? data : {};
+        return { type: 'flow_reply', content: { name: r.name || 'flow', body: r.body || 'Sent', token: String(token || ''), response } };
+      }
+      const r = m.interactive?.button_reply || m.interactive?.list_reply || {};
       return { type: 'interactive_reply', content: { id: r.id || '', title: r.title || r.name || 'Balasan', description: r.description || '' } };
     }
     case 'button': return { type: 'button', content: { text: m.button?.text || '', payload: m.button?.payload || '' } };
-    case 'contacts': return { type: 'contacts', content: { contacts: (m.contacts || []).map((c) => ({ name: c.name?.formatted_name, phones: (c.phones || []).map((p) => p.phone) })) } };
+    case 'contacts': return { type: 'contacts', content: { contacts: (m.contacts || []).map((c) => ({ name: c.name?.formatted_name || [c.name?.first_name, c.name?.last_name].filter(Boolean).join(' ') || 'Kontak',
+      phones: (c.phones || []).map((p) => p.phone), waIds: (c.phones || []).map((p) => p.wa_id || ''), emails: (c.emails || []).map((e) => e.email), company: c.org?.company || '' })) } };
     default: return { type: 'unsupported', content: { body: `[Pesan tipe "${t}" tidak didukung]` } };
   }
 }
@@ -658,6 +717,7 @@ function handleMessages(value) {
     }
     const prevInboundAt = conv.lastInboundAt || 0, prevStatus = conv.status, prevUnread = conv.unread || 0;
     const msg = addMessage(conv, { direction: 'in', type, content, wamid: m.id, timestamp: Number(m.timestamp) * 1000 || now(), contextId: m.context?.id || null });
+    if (type === 'flow_reply') recordFlowSubmission(conv, contact, msg);
     // Jawaban survei CSAT: jangan buka ulang percakapan yang sudah selesai, jangan beri notifikasi, jangan jalankan flow
     if (handleCsatReply(conv, contact, msg)) {
       Object.assign(conv, { status: prevStatus, unread: prevStatus === 'closed' ? prevUnread : conv.unread });
@@ -838,16 +898,110 @@ function validateAutoReply(b) {
  * masih terbuka (dicek ulang tepat sebelum mengirim), dengan batas FLOW_MAX_AUTO_PER_HOUR pesan otomatis per percakapan.
  */
 const FLOW_MAX_NODES = 60;
-const FLOW_MAX_AUTO_PER_HOUR = 10;
+// Flow interaktif (tanya-jawab, hasil API berlembar) mengirim beberapa pesan per percakapan; batas ini tetap mencegah loop
+const FLOW_MAX_AUTO_PER_HOUR = 30;
 const FLOW_RUNS_MAX = 3000;
-const FLOW_STEP_LABEL = { trigger: 'Pemicu', condition: 'Kondisi', send: 'Kirim pesan', assign: 'Teruskan ke agen', label: 'Label kontak', status: 'Ubah status', note: 'Catatan internal', delay: 'Tunggu' };
-const FLOW_COND_LABEL = { keyword: 'Kata kunci', schedule: 'Jadwal', business_hours: 'Jam kerja', label: 'Label kontak', new_contact: 'Kontak baru', message_type: 'Jenis pesan', assigned: 'Sudah ditugaskan' };
-const FLOW_MSG_TYPES = ['text', 'image', 'video', 'audio', 'document', 'sticker', 'location', 'reply', 'contacts'];
+const FLOW_STEP_LABEL = { trigger: 'Pemicu', condition: 'Kondisi', send: 'Kirim pesan', ask: 'Tanya pelanggan', waflow: 'Kirim WhatsApp Flow', api: 'API Request', assign: 'Teruskan ke agen', label: 'Label kontak', status: 'Ubah status', note: 'Catatan internal', delay: 'Tunggu' };
+const FLOW_COND_LABEL = { keyword: 'Kata kunci', variable: 'Variabel', schedule: 'Jadwal', business_hours: 'Jam kerja', label: 'Label kontak', new_contact: 'Kontak baru', message_type: 'Jenis pesan', assigned: 'Sudah ditugaskan' };
+const FLOW_MSG_TYPES = ['text', 'image', 'video', 'audio', 'document', 'sticker', 'location', 'reply', 'flow_reply', 'contacts'];
 const STATUS_LABEL = { open: 'Terbuka', pending: 'Menunggu', closed: 'Selesai' };
+// Langkah bercabang: port pertama menerima lanjutan lama saat langkah disisipkan
+const FLOW_PORTS = { condition: ['yes', 'no'], ask: ['next', 'fail'], waflow: ['next', 'fail'], api: ['next', 'fail'] };
+const flowPorts = (type) => FLOW_PORTS[type] || ['next'];
+const FLOW_VAR_OPS = ['eq', 'neq', 'contains', 'gt', 'gte', 'lt', 'lte', 'empty', 'not_empty'];
+// Nama yang disediakan sistem untuk template, tidak boleh dipakai sebagai nama variabel
+const FLOW_RESERVED_VARS = ['name', 'phone', 'today', 'pesan', 'item', 'no', 'page', 'pages', 'count', 'rest', 'secret'];
+const FLOW_ACTIVE_RUN = ['waiting', 'input'];
 
 const inTimeRange = (time, open, close) => (close > open ? time >= open && time < close : time >= open || time < close);
 const zonedDate = (tz, at = now()) => new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(at));
 const flowTz = () => arCfg().timezone;
+
+/* Variabel & template flow: {{nama.path|filter:arg}}. Nilai HTML (mis. "<br />" dari API) diubah menjadi teks biasa. */
+function getPath(obj, path) {
+  let v = obj;
+  for (const k of String(path).split('.')) {
+    if (v == null) return undefined;
+    if (k === 'length' && (Array.isArray(v) || typeof v === 'string')) { v = v.length; continue; }
+    if (typeof v !== 'object' || !Object.prototype.hasOwnProperty.call(v, k)) return undefined; // aman dari __proto__
+    v = v[k];
+  }
+  return v;
+}
+const htmlToText = (s) => String(s).replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]+>/g, '')
+  .replace(/&nbsp;/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#0?39;/g, "'").replace(/&amp;/g, '&');
+const ID_DAYS = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
+const ID_MONTHS = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
+const ymdDate = (ymd) => { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(ymd || ''); return m ? new Date(Date.UTC(+m[1], +m[2] - 1, +m[3])) : null; };
+const ymdOf = (d) => d.toISOString().slice(0, 10);
+const addDays = (ymd, n) => ymdOf(new Date(ymdDate(ymd).getTime() + n * 86400000));
+const longDate = (ymd) => { const d = ymdDate(ymd); return d ? `${ID_DAYS[d.getUTCDay()]}, ${d.getUTCDate()} ${ID_MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}` : ymd; };
+const shortDate = (ymd) => { const d = ymdDate(ymd); return `${ID_DAYS[d.getUTCDay()].slice(0, 3)}, ${d.getUTCDate()} ${ID_MONTHS[d.getUTCMonth()].slice(0, 3)}`; };
+const TPL_FILTERS = {
+  tanggal: (v) => (ymdDate(v) ? longDate(v) : v),
+  jam: (v) => v.replace(/^(\d{1,2}[:.]\d{2})[:.]\d{2}/, '$1'),
+  rupiah: (v) => (v !== '' && Number.isFinite(Number(v)) ? 'Rp' + Number(v).toLocaleString('id-ID') : v),
+  angka: (v) => (v !== '' && Number.isFinite(Number(v)) ? Number(v).toLocaleString('id-ID') : v),
+  upper: (v) => v.toUpperCase(), lower: (v) => v.toLowerCase(),
+  default: (v, arg) => (v.trim() === '' ? arg : v),
+};
+// encode: 'url' (nilai di URL), 'json' (nilai di dalam string JSON), atau kosong (teks pesan)
+function renderTpl(tpl, scope, encode) {
+  return String(tpl ?? '').replace(/\{\{\s*([^{}]+?)\s*\}\}/g, (_, expr) => {
+    const [path, ...filters] = expr.split('|').map((x) => x.trim());
+    let v = getPath(scope, path);
+    v = v == null || typeof v === 'object' ? '' : htmlToText(v).trim(); // objek/daftar tidak dicetak mentah
+    for (const f of filters) { const [fn, ...arg] = f.split(':'); if (TPL_FILTERS[fn]) v = String(TPL_FILTERS[fn](v, arg.join(':'))); }
+    return encode === 'url' ? encodeURIComponent(v) : encode === 'json' ? JSON.stringify(v).slice(1, -1) : v;
+  });
+}
+const flowScope = (ctx, extra) => ({
+  ...ctx.vars, name: ctx.contact.name || ctx.contact.waName || 'Kak', phone: ctx.contact.phone,
+  today: zonedDate(flowTz(), ctx.at), pesan: ctx.text, ...extra,
+});
+
+/* HTTP keluar untuk langkah API Request: hanya HTTPS, tanpa redirect, dan tidak boleh ke alamat jaringan lokal/privat (SSRF) */
+function isPrivateIp(ip) {
+  if (net.isIPv4(ip)) {
+    const [a, b] = ip.split('.').map(Number);
+    return a === 10 || a === 127 || a === 0 || a >= 224 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
+  }
+  const x = ip.toLowerCase();
+  if (x.startsWith('::ffff:')) return isPrivateIp(x.slice(7));
+  return x === '::1' || x === '::' || /^f[cd]/.test(x) || /^fe[89ab]/.test(x);
+}
+function safeLookup(host, opts, cb) {
+  if (typeof opts === 'function') { cb = opts; opts = {}; }
+  dns.lookup(host, { ...opts, all: true }, (err, addrs) => {
+    if (err) return cb(err);
+    // Tolak bila ADA alamat privat (mencegah DNS rebinding dengan campuran alamat publik & privat)
+    if (!addrs.length || addrs.some((a) => isPrivateIp(a.address))) return cb(Object.assign(new Error('Alamat tujuan tidak diizinkan (jaringan lokal/privat).'), { code: 'EBLOCKED' }));
+    return opts.all ? cb(null, addrs) : cb(null, addrs[0].address, addrs[0].family);
+  });
+}
+const FLOW_HTTPS_AGENT = new https.Agent({ lookup: safeLookup, keepAlive: false });
+const FLOW_API_MAX_BYTES = 512 * 1024;
+// Kredensial API (mis. API key) disimpan terenkripsi; dipakai di langkah API sebagai {{secret.NAMA}}, tidak pernah dikirim ke browser
+const flowSecretNames = () => Object.keys(db.settings.flowSecrets || {}).sort();
+const flowSecrets = (masked) => Object.fromEntries(flowSecretNames().map((k) => [k, masked ? '••••' : decrypt(db.settings.flowSecrets[k])]));
+
+/* Input tanggal untuk langkah "Tanya pelanggan": hasil selalu YYYY-MM-DD */
+const MONTH_ALIAS = { jan: 1, feb: 2, peb: 2, mar: 3, apr: 4, mei: 5, may: 5, jun: 6, jul: 7, agu: 8, ags: 8, aug: 8, sep: 9, okt: 10, oct: 10, nov: 11, nop: 11, des: 12, dec: 12 };
+function parseDateInput(text, today) {
+  const t = String(text || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  const rel = { 'hari ini': 0, besok: 1, lusa: 2, kemarin: -1 }[t];
+  if (rel !== undefined) return addDays(today, rel);
+  let y, m, d, x;
+  if ((x = /^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/.exec(t))) [, y, m, d] = x;
+  else if ((x = /^(\d{1,2})[-/. ](\d{1,2})[-/. ](\d{4})$/.exec(t))) [, d, m, y] = x;
+  else if ((x = /^(\d{1,2})[-/.](\d{1,2})$/.exec(t))) { [, d, m] = x; y = today.slice(0, 4); }
+  else if ((x = /^(\d{1,2}) ([a-z]+)\.?(?: (\d{4}))?$/.exec(t)) && MONTH_ALIAS[x[2].slice(0, 3)]) { d = x[1]; m = MONTH_ALIAS[x[2].slice(0, 3)]; y = x[3] || today.slice(0, 4); }
+  else return null;
+  const date = new Date(Date.UTC(+y, +m - 1, +d));
+  if (date.getUTCFullYear() !== +y || date.getUTCMonth() !== +m - 1 || date.getUTCDate() !== +d) return null; // mis. 31-02-2026
+  const ymd = ymdOf(date);
+  return Math.abs(ymdDate(ymd) - ymdDate(today)) <= 400 * 86400000 ? ymd : null; // tahun salah ketik
+}
 
 function cleanFlowNode(raw, isRoot) {
   const type = String(raw?.type || '');
@@ -856,6 +1010,14 @@ function cleanFlowNode(raw, isRoot) {
   const c = raw.cfg || {}, name = `Langkah "${FLOW_STEP_LABEL[type]}"`;
   const time = (v) => { if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(v || '')) throw new HttpError(400, `${name}: jam tidak valid (format HH:MM).`); return v; };
   const num = (v, min, max, label) => { const n = Number(v); if (!Number.isInteger(n) || n < min || n > max) throw new HttpError(400, `${name}: ${label} harus bilangan bulat ${min}–${max}.`); return n; };
+  const varName = (v, label) => {
+    const s = String(v || '').trim();
+    if (!/^[a-z_][a-z0-9_]{0,39}$/i.test(s)) throw new HttpError(400, `${name}: ${label} hanya huruf, angka, garis bawah (mis. kata_kunci).`);
+    if (FLOW_RESERVED_VARS.includes(s.toLowerCase())) throw new HttpError(400, `${name}: "${s}" dipakai sistem, pilih nama lain.`);
+    return s;
+  };
+  const varPath = (v, label) => { const s = String(v || '').trim(); if (!/^[a-z_][a-z0-9_]*(\.[a-z0-9_]+){0,8}$/i.test(s)) throw new HttpError(400, `${name}: ${label} tidak valid (mis. hasil.data.length).`); return s; };
+  const text = (v, max, label, fallback) => { const t = str(v, max) || fallback || ''; if (!t) throw new HttpError(400, `${name}: ${label} wajib diisi.`); return t; };
   let cfg = {};
   switch (type) {
     case 'trigger': break;
@@ -880,10 +1042,79 @@ function cleanFlowNode(raw, isRoot) {
       } else if (kind === 'message_type') {
         cfg.types = [...new Set((Array.isArray(c.types) ? c.types : []).filter((t) => FLOW_MSG_TYPES.includes(t)))];
         if (!cfg.types.length) throw new HttpError(400, `${name}: pilih minimal satu jenis pesan.`);
+      } else if (kind === 'variable') {
+        cfg.path = varPath(c.path, 'variabel');
+        cfg.op = FLOW_VAR_OPS.includes(c.op) ? c.op : 'eq';
+        cfg.value = ['empty', 'not_empty'].includes(cfg.op) ? '' : str(String(c.value ?? ''), 200);
       }
       break;
     }
-    case 'send': cfg = cleanReplyExtras(c, name, true); break;
+    case 'send': {
+      cfg = cleanReplyExtras(c, name, true);
+      // Ulangi daftar dari variabel (mis. hasil API): teks pesan menjadi judul tiap lembar, item dirender per elemen
+      if (c.repeat?.path) {
+        const r = c.repeat;
+        cfg.repeat = { path: varPath(r.path, 'daftar'), item: text(r.item, 1500, 'Format tiap item'), perMessage: num(r.perMessage ?? 5, 1, 20, 'item per pesan'),
+          max: num(r.max ?? 30, 1, 100, 'jumlah item maksimal'), more: str(r.more, 500) };
+        if (Math.ceil(cfg.repeat.max / cfg.repeat.perMessage) > 10) throw new HttpError(400, `${name}: maksimal 10 pesan per daftar (naikkan item per pesan atau turunkan jumlah maksimal).`);
+        if (cfg.image || cfg.buttons.length) throw new HttpError(400, `${name}: daftar berulang hanya untuk pesan teks (tanpa gambar/tombol).`);
+      }
+      break;
+    }
+    case 'ask': {
+      cfg = {
+        text: text(c.text, 1024, 'Pertanyaan'), var: varName(c.var, 'Nama variabel'),
+        input: ['text', 'choice', 'date'].includes(c.input) ? c.input : 'text',
+        invalidText: text(c.invalidText, 1024, 'Pesan bila jawaban tidak valid', 'Jawaban belum sesuai. Silakan coba lagi, atau ketik *batal*.'),
+        retries: num(c.retries ?? 2, 0, 3, 'kesempatan ulang'), timeoutMinutes: num(c.timeoutMinutes ?? 30, 1, 1380, 'batas waktu (menit)'),
+      };
+      if (cfg.input === 'text') {
+        cfg.minLength = num(c.minLength ?? 1, 1, 200, 'panjang minimal');
+        cfg.maxLength = num(c.maxLength ?? 100, cfg.minLength, 500, 'panjang maksimal');
+        cfg.format = ['any', 'search', 'digits', 'alnum'].includes(c.format) ? c.format : 'any';
+      } else if (cfg.input === 'choice') {
+        cfg.choices = (Array.isArray(c.choices) ? c.choices : []).map((x) => ({ title: str(x?.title, 24), value: str(String(x?.value ?? ''), 200) || str(x?.title, 24) })).filter((x) => x.title).slice(0, 10);
+        if (!cfg.choices.length) throw new HttpError(400, `${name}: isi minimal satu pilihan.`);
+        if (new Set(cfg.choices.map((x) => x.title.toLowerCase())).size !== cfg.choices.length) throw new HttpError(400, `${name}: judul pilihan harus berbeda.`);
+        if (cfg.choices.length <= 3 && cfg.choices.some((x) => x.title.length > 20)) throw new HttpError(400, `${name}: judul tombol maks. 20 karakter (bila ≤ 3 pilihan).`);
+        cfg.button = text(c.button, 20, 'Teks tombol daftar', 'Pilih');
+      } else {
+        cfg.days = num(c.days ?? 2, 1, 9, 'jumlah tanggal');
+        cfg.skipWeekends = c.skipWeekends !== false; cfg.includeToday = c.includeToday !== false;
+        cfg.otherLabel = text(c.otherLabel, 20, 'Teks tombol tanggal lain', 'Tanggal lain');
+        cfg.otherPrompt = text(c.otherPrompt, 1024, 'Pesan meminta tanggal', 'Ketik tanggal dengan format DD-MM-YYYY, contoh: 21-10-2026.');
+        cfg.button = text(c.button, 20, 'Teks tombol daftar', 'Pilih tanggal');
+      }
+      break;
+    }
+    case 'waflow': {
+      const f = wafById(c.flowId);
+      if (!f) throw new HttpError(400, `${name}: pilih WhatsApp Flow (sinkronkan di menu WhatsApp Flows).`);
+      cfg = { flowId: f.id, text: text(c.text, 1024, 'Teks pesan'), cta: text(c.cta, 30, 'Teks tombol'), header: str(c.header, 60), footer: str(c.footer, 60),
+        screen: str(c.screen, 80), var: varName(c.var, 'Simpan jawaban ke variabel'), timeoutMinutes: num(c.timeoutMinutes ?? 60, 1, 1380, 'batas waktu (menit)') };
+      break;
+    }
+    case 'api': {
+      cfg.method = c.method === 'POST' ? 'POST' : 'GET';
+      cfg.url = text(c.url, 1000, 'URL');
+      // Host harus statis: variabel hanya boleh di path/query, agar tujuan tidak bisa dibelokkan oleh input pelanggan
+      const m = /^https:\/\/([^/?#]+)/i.exec(cfg.url);
+      if (!m) throw new HttpError(400, `${name}: URL harus diawali https://`);
+      if (/[{}]/.test(m[1])) throw new HttpError(400, `${name}: nama host tidak boleh berisi variabel.`);
+      try { new URL(renderTpl(cfg.url, {}, 'url')); } catch { throw new HttpError(400, `${name}: URL tidak valid.`); }
+      cfg.headers = (Array.isArray(c.headers) ? c.headers : []).slice(0, 10).map((h) => ({ name: str(h?.name, 60), value: str(h?.value, 1000) })).filter((h) => h.name);
+      for (const h of cfg.headers) {
+        if (!/^[A-Za-z0-9-]+$/.test(h.name) || ['host', 'content-length', 'connection', 'transfer-encoding'].includes(h.name.toLowerCase())) throw new HttpError(400, `${name}: header "${h.name}" tidak diizinkan.`);
+        for (const [, s] of h.value.matchAll(/\{\{\s*secret\.([A-Z0-9_]+)\s*\}\}/g)) if (!db.settings.flowSecrets?.[s]) throw new HttpError(400, `${name}: kredensial "${s}" belum dibuat.`);
+      }
+      cfg.body = cfg.method === 'POST' ? str(c.body, 4000) : '';
+      if (cfg.body) { try { JSON.parse(renderTpl(cfg.body, {}, 'json')); } catch { throw new HttpError(400, `${name}: body harus JSON valid.`); } }
+      cfg.timeoutSec = num(c.timeoutSec ?? 10, 1, 20, 'timeout (detik)');
+      cfg.saveAs = varName(c.saveAs, 'Simpan respons sebagai');
+      cfg.okPath = c.okPath ? varPath(c.okPath, 'field penanda berhasil') : '';
+      cfg.okValue = cfg.okPath ? str(String(c.okValue ?? ''), 100) : '';
+      break;
+    }
     case 'assign': {
       cfg.mode = ['user', 'round_robin', 'least_busy'].includes(c.mode) ? c.mode : 'least_busy';
       cfg.onlyIfUnassigned = c.onlyIfUnassigned !== false;
@@ -931,8 +1162,7 @@ function validateFlow(b, prev) {
     seen.add(id);
     const n = cleanFlowNode({ ...src[id], id }, id === root);
     nodes[id] = n;
-    if (n.type === 'condition') { n.yes = visit(src[id].yes); n.no = visit(src[id].no); }
-    else n.next = visit(src[id].next);
+    for (const p of flowPorts(n.type)) n[p] = visit(src[id][p]);
     return id;
   };
   visit(root);
@@ -943,6 +1173,9 @@ function validateFlow(b, prev) {
     pauseIfHumanMin: num(s.pauseIfHumanMin ?? 30, 0, 1440, 'Jeda saat CS aktif'),
     cooldownMin: num(s.cooldownMin ?? 0, 0, 10080, 'Jeda menjalankan ulang'),
     activeFrom: date(s.activeFrom, 'Tanggal mulai'), activeUntil: date(s.activeUntil, 'Tanggal selesai'),
+    // Saat flow menunggu jawaban (langkah Tanya pelanggan), pelanggan dapat membatalkan dengan kata ini
+    cancelWords: [...new Set((Array.isArray(s.cancelWords) ? s.cancelWords : String(s.cancelWords ?? 'batal').split(',')).map((w) => String(w).trim().toLowerCase().slice(0, 30)).filter(Boolean))].slice(0, 10),
+    cancelText: str(s.cancelText, 500) || 'Baik, permintaan dibatalkan.',
   };
   if (settings.activeFrom && settings.activeUntil && settings.activeFrom > settings.activeUntil) throw new HttpError(400, 'Tanggal mulai harus sebelum tanggal selesai.');
   if (Object.values(nodes).every((n) => n.type === 'trigger' || n.type === 'condition')) throw new HttpError(400, 'Tambahkan minimal satu aksi (mis. Kirim pesan atau Teruskan ke agen).');
@@ -965,6 +1198,24 @@ function evalFlowCond(cfg, ctx) {
     case 'new_contact': return !ctx.prevInboundAt || ctx.at - ctx.prevInboundAt > cfg.days * 86400000;
     case 'message_type': return cfg.types.includes(['interactive_reply', 'button'].includes(ctx.msgType) ? 'reply' : ctx.msgType);
     case 'assigned': return !!ctx.conv.assignedTo;
+    case 'variable': {
+      const v = getPath(flowScope(ctx), cfg.path);
+      const empty = v == null || v === '' || (Array.isArray(v) && !v.length) || (typeof v === 'object' && !Array.isArray(v) && !Object.keys(v).length);
+      if (cfg.op === 'empty') return empty;
+      if (cfg.op === 'not_empty') return !empty;
+      const a = Array.isArray(v) ? v.length : v, s = a == null ? '' : String(a), w = cfg.value;
+      const bothNum = s !== '' && w !== '' && Number.isFinite(Number(s)) && Number.isFinite(Number(w));
+      switch (cfg.op) {
+        case 'eq': return bothNum ? Number(s) === Number(w) : s.toLowerCase() === w.toLowerCase();
+        case 'neq': return bothNum ? Number(s) !== Number(w) : s.toLowerCase() !== w.toLowerCase();
+        case 'contains': return s.toLowerCase().includes(w.toLowerCase());
+        case 'gt': return bothNum && Number(s) > Number(w);
+        case 'gte': return bothNum && Number(s) >= Number(w);
+        case 'lt': return bothNum && Number(s) < Number(w);
+        case 'lte': return bothNum && Number(s) <= Number(w);
+        default: return false;
+      }
+    }
     default: return false;
   }
 }
@@ -991,6 +1242,226 @@ const recentAutoCount = (conv, since) => {
   return n;
 };
 
+// Pesan dari daftar (mis. hasil API): dipecah per perMessage item & ≤ 3500 karakter. null = daftar kosong / bukan daftar.
+function buildRepeat(c, scope) {
+  const list = getPath(scope, c.repeat.path);
+  if (!Array.isArray(list) || !list.length) return null;
+  const shown = list.slice(0, c.repeat.max);
+  const items = shown.map((item, i) => renderTpl(c.repeat.item, { ...scope, item, no: i + 1 }).slice(0, 3500));
+  const chunks = []; let cur = [], len = 0;
+  for (const t of items) {
+    if (cur.length && (cur.length >= c.repeat.perMessage || len + t.length > 3500)) { chunks.push(cur); cur = []; len = 0; }
+    cur.push(t); len += t.length + 2;
+  }
+  if (cur.length) chunks.push(cur);
+  const kept = chunks.slice(0, 10), rest = list.length - kept.reduce((t, x) => t + x.length, 0);
+  return kept.map((part, i) => {
+    const sc = { ...scope, count: list.length, page: i + 1, pages: kept.length, rest };
+    let text = [renderTpl(c.text, sc), part.join('\n\n')].filter(Boolean).join('\n\n');
+    if (i === kept.length - 1 && rest > 0 && c.repeat.more) text += '\n\n' + renderTpl(c.repeat.more, sc);
+    return { text: text.slice(0, 4096), image: null, buttons: [] };
+  });
+}
+// Kirim satu pesan otomatis dari flow dengan pengaman (jendela 24 jam, batas per jam). Mengembalikan pesan error atau null.
+async function flowDeliver(flow, n, ctx, payloadFn) {
+  if (!windowOpen(ctx.conv)) return 'di luar jendela layanan 24 jam';
+  if (recentAutoCount(ctx.conv, now() - 3600000) >= FLOW_MAX_AUTO_PER_HOUR) return `batas ${FLOW_MAX_AUTO_PER_HOUR} pesan otomatis per jam untuk percakapan ini tercapai`;
+  try { await payloadFn(); ctx.contextId = null; return null; } // hanya pesan pertama yang mengutip pesan pelanggan
+  catch (e) { return e.message; }
+}
+const flowSendText = (flow, n, ctx, m) => flowDeliver(flow, n, ctx, () => sendAutoContent(ctx.conv, ctx.contact, m,
+  { auto: 'flow', userName: 'Flow: ' + flow.name, source: 'flow', btnPrefix: `fl_${n.id}`, contextId: ctx.contextId, flowId: flow.id }));
+
+/* Langkah "Tanya pelanggan" */
+function askOptions(c, ctx) {
+  if (c.input === 'choice') return c.choices.map((x) => ({ title: x.title, value: x.value }));
+  if (c.input !== 'date') return [];
+  const today = zonedDate(flowTz(), ctx.at), out = [];
+  for (let i = c.includeToday ? 0 : 1; out.length < c.days && i < 60; i++) {
+    const ymd = addDays(today, i), wd = ymdDate(ymd).getUTCDay();
+    if (c.skipWeekends && (wd === 0 || wd === 6)) continue;
+    const d = ymdDate(ymd), dm = `${d.getUTCDate()} ${ID_MONTHS[d.getUTCMonth()].slice(0, 3)}`;
+    out.push({ title: i === 0 ? `Hari ini, ${dm}` : i === 1 ? `Besok, ${dm}` : shortDate(ymd), value: ymd, desc: longDate(ymd) });
+  }
+  out.push({ title: c.otherLabel, other: true, desc: 'Ketik tanggal sendiri' });
+  return out;
+}
+// Pertanyaan dengan pilihan: ≤ 3 → tombol balasan, selebihnya → pesan daftar. ID balasan: fq_<langkah>_<indeks>
+function askInteractive(n, body, options) {
+  const c = n.cfg;
+  if (options.length <= 3) {
+    return { type: 'interactive', interactive: { type: 'button', body: { text: body }, action: { buttons: options.map((o, i) => ({ type: 'reply', reply: { id: `fq_${n.id}_${i}`, title: o.title.slice(0, 20) } })) } },
+      record: { type: 'interactive', content: { kind: 'button', header: '', body, footer: '', buttons: options.map((o) => o.title.slice(0, 20)) } } };
+  }
+  const rows = options.map((o, i) => ({ id: `fq_${n.id}_${i}`, title: o.title.slice(0, 24), ...(o.desc ? { description: o.desc.slice(0, 72) } : {}) }));
+  return { type: 'interactive', interactive: { type: 'list', body: { text: body }, action: { button: c.button, sections: [{ title: 'Pilihan', rows }] } },
+    record: { type: 'interactive', content: { kind: 'list', header: '', body, footer: '', button: c.button, rows: rows.map((r) => ({ id: r.id, title: r.title, description: r.description || '' })) } } };
+}
+async function askSend(flow, n, ctx, body, options, dry) {
+  const preview = { text: body, buttons: options.map((o) => o.title) };
+  if (dry) return { preview };
+  if (!options.length) return { preview, error: await flowSendText(flow, n, ctx, { text: body, image: null, buttons: [] }) };
+  const m = askInteractive(n, body, options);
+  const error = await flowDeliver(flow, n, ctx, async () => {
+    const r = await sendToMeta({ messaging_product: 'whatsapp', recipient_type: 'individual', to: ctx.contact.phone, type: m.type, interactive: m.interactive, ...(ctx.contextId ? { context: { message_id: ctx.contextId } } : {}) },
+      { source: 'flow', contact: ctx.contact, conversation: ctx.conv, userName: 'Flow: ' + flow.name });
+    addMessage(ctx.conv, { direction: 'out', ...m.record, wamid: r.messages?.[0]?.id, status: 'accepted', userName: 'Flow: ' + flow.name, auto: 'flow', flowId: flow.id, contextId: ctx.contextId || null });
+  });
+  return { preview, error };
+}
+const ASK_FORMATS = { search: /^[\p{L}\p{N}][\p{L}\p{N} .,'/-]*$/u, digits: /^\d+$/, alnum: /^[\p{L}\p{N} ]+$/u };
+// Nilai jawaban: { value, label } | { other } | { cancel } | { invalid }
+function evalAnswer(flow, c, st, msg, ctx) {
+  const id = msg.type === 'interactive_reply' ? String(msg.content?.id || '') : '';
+  const text = String(inboundText(msg) || '').replace(/[\u0000-\u001f]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (flow.settings.cancelWords?.includes(text.toLowerCase())) return { cancel: true };
+  const pick = (o) => (o ? (o.other ? { other: true } : { value: o.value, label: o.title }) : null);
+  if (id.startsWith(`fq_${st.nodeId}_`)) { const o = pick(st.options[Number(id.slice(id.lastIndexOf('_') + 1))]); if (o) return o; }
+  if (st.options.length && !st.typed) {
+    // Pelanggan boleh mengetik nomor urut atau judul pilihan
+    const o = pick(/^\d{1,2}$/.test(text) ? st.options[Number(text) - 1] : st.options.find((x) => x.title.toLowerCase() === text.toLowerCase()));
+    if (o) return o;
+  }
+  if (c.input === 'date') { const ymd = parseDateInput(text, zonedDate(flowTz(), ctx.at)); return ymd ? { value: ymd, label: longDate(ymd) } : { invalid: true }; }
+  if (c.input === 'choice') return { invalid: true };
+  const len = [...text].length;
+  if (msg.type !== 'text' && !id && !text) return { invalid: true };
+  if (len < c.minLength || len > c.maxLength || (ASK_FORMATS[c.format] && !ASK_FORMATS[c.format].test(text))) return { invalid: true };
+  return { value: text, label: text };
+}
+// Live: pertanyaan dikirim lalu run menunggu (status "input"); jawaban berikutnya masuk lewat ctx.answer.
+// Simulasi: jawaban diambil dari ctx.dryAnswers secara berurutan.
+async function execAsk(flow, n, ctx, dry) {
+  const c = n.cfg, logs = [], previews = [];
+  let st = ctx.answer?.state?.nodeId === n.id ? ctx.answer.state : null;
+  const say = async (body, options) => {
+    const r = await askSend(flow, n, ctx, renderTpl(body, flowScope(ctx)), options, dry);
+    previews.push(r.preview);
+    return r.error;
+  };
+  const wait = (log) => ({ waitInput: st, log: [...logs, log].join(' → '), action: true, previews });
+  if (!st) {
+    st = { nodeId: n.id, options: askOptions(c, ctx), tries: 0, typed: c.input === 'text', since: now(), expiresAt: now() + c.timeoutMinutes * 60000 };
+    const err = await say(c.text, st.options);
+    if (err) return { next: null, ok: false, log: 'Pertanyaan tidak terkirim: ' + err };
+    logs.push('Pertanyaan dikirim');
+    if (!dry) return wait('menunggu jawaban');
+  }
+  for (;;) {
+    const msg = dry ? (ctx.dryAnswers.length ? { type: 'text', content: { body: ctx.dryAnswers.shift() } } : null) : ctx.answer?.msg;
+    if (ctx.answer) ctx.answer = null; // jawaban hanya untuk langkah ini
+    if (!msg) return { stop: true, action: true, log: [...logs, 'menunggu jawaban pelanggan (isi "Jawaban uji" untuk melanjutkan simulasi)'].join(' → '), previews };
+    if (dry) logs.push(`Pelanggan: "${inboundText(msg)}"`);
+    const a = evalAnswer(flow, c, st, msg, ctx);
+    if (a.cancel) {
+      if (!dry) await flowSendText(flow, n, ctx, { text: renderTpl(flow.settings.cancelText, flowScope(ctx)), image: null, buttons: [] });
+      else previews.push({ text: flow.settings.cancelText });
+      return { next: null, cancelled: true, log: [...logs, 'dibatalkan pelanggan'].join(' → '), previews };
+    }
+    if (a.other) {
+      st.typed = true;
+      const err = await say(c.otherPrompt, []);
+      if (err) return { next: null, ok: false, log: [...logs, 'Gagal meminta tanggal: ' + err].join(' → '), previews };
+      logs.push('Minta ketik tanggal');
+      if (!dry) return wait('menunggu tanggal');
+      continue;
+    }
+    if (!a.invalid) {
+      ctx.vars[c.var] = a.value; ctx.vars[c.var + '_label'] = a.label;
+      return { next: n.next, branch: 'next', log: [...logs, `${c.var} = ${a.value}`].join(' → '), previews };
+    }
+    st.tries++;
+    if (st.tries > c.retries) {
+      ctx.vars[c.var] = '';
+      return { next: n.fail, branch: 'fail', log: [...logs, `Jawaban tidak valid ${st.tries}×, lanjut cabang Tidak valid`].join(' → '), previews };
+    }
+    // Ulangi pertanyaan dengan pilihan yang sama agar tombol tetap bisa ditekan
+    const err = await say(c.invalidText, st.typed ? [] : st.options);
+    if (err) return { next: null, ok: false, log: [...logs, 'Gagal mengirim ulang: ' + err].join(' → '), previews };
+    logs.push(`Tidak valid (${st.tries}/${c.retries})`);
+    if (!dry) return wait('menunggu jawaban ulang');
+  }
+}
+
+/* Langkah "API Request" */
+async function execApi(flow, n, ctx, dry) {
+  const c = n.cfg, scope = flowScope(ctx);
+  const real = (tpl, enc) => renderTpl(tpl, { ...scope, secret: flowSecrets(false) }, enc);
+  const shownUrl = renderTpl(c.url, { ...scope, secret: flowSecrets(true) }, 'url'); // kredensial disamarkan di log
+  const fail = (msg, extra = {}) => {
+    ctx.vars[c.saveAs] = extra.json ?? null; ctx.vars[c.saveAs + '_status'] = extra.status || 0; ctx.vars[c.saveAs + '_error'] = msg;
+    return { next: n.fail, branch: 'fail', ok: false, log: `${c.method} ${shownUrl} → ${msg}`, ...(extra.preview ? { preview: extra.preview } : {}) };
+  };
+  if (dry && (!ctx.liveApi || c.method !== 'GET')) {
+    ctx.vars[c.saveAs] = null; ctx.vars[c.saveAs + '_status'] = 0; ctx.vars[c.saveAs + '_error'] = '';
+    return { next: n.next, branch: 'next', log: `${c.method} ${shownUrl} → tidak dipanggil saat uji${c.method !== 'GET' ? ' (hanya GET yang dipanggil)' : ''}; lanjut cabang Berhasil tanpa data` };
+  }
+  const url = real(c.url, 'url');
+  if (!/^https:\/\//i.test(url)) return fail('URL harus HTTPS');
+  // Alamat IP literal tidak melewati DNS lookup, jadi diperiksa di sini
+  let host;
+  try { host = new URL(url).hostname.replace(/^\[|\]$/g, '').toLowerCase(); } catch { return fail('URL tidak valid'); }
+  if (host === 'localhost' || host.endsWith('.localhost') || (net.isIP(host) && isPrivateIp(host))) return fail('Alamat tujuan tidak diizinkan (jaringan lokal/privat).');
+  const headers = { Accept: 'application/json', 'User-Agent': 'Kontaq-Flow/1.0' };
+  for (const h of c.headers) headers[h.name] = real(h.value).replace(/[\r\n]/g, '');
+  const body = c.method === 'POST' && c.body ? real(c.body, 'json') : undefined;
+  if (body) headers['Content-Type'] = 'application/json';
+  const started = Date.now();
+  let res;
+  try {
+    res = await axios({ method: c.method, url, headers, data: body, timeout: c.timeoutSec * 1000, maxRedirects: 0, proxy: false,
+      maxContentLength: FLOW_API_MAX_BYTES, maxBodyLength: 64 * 1024, responseType: 'text', transformResponse: [(d) => d],
+      validateStatus: () => true, httpsAgent: FLOW_HTTPS_AGENT });
+  } catch (e) {
+    const msg = e.code === 'ECONNABORTED' || e.code === 'ETIMEDOUT' || /timeout/i.test(e.message) ? `waktu habis (${c.timeoutSec} dtk)`
+      : e.code === 'EBLOCKED' ? e.message : /maxContentLength/i.test(e.message) ? 'respons terlalu besar' : 'gagal terhubung: ' + (e.code || e.message);
+    return fail(msg);
+  }
+  const ms = ((Date.now() - started) / 1000).toFixed(1).replace('.', ',');
+  let json = null;
+  try { json = JSON.parse(res.data); } catch { /* bukan JSON */ }
+  const preview = dry ? { json: String(res.data || '').slice(0, 800) } : null;
+  if (json === null) return fail(`HTTP ${res.status} (${ms} dtk), respons bukan JSON`, { status: res.status, preview });
+  if (res.status < 200 || res.status >= 300) return fail(`HTTP ${res.status} (${ms} dtk)`, { status: res.status, json, preview });
+  if (c.okPath && String(getPath(json, c.okPath)) !== c.okValue) return fail(`HTTP ${res.status} (${ms} dtk), ${c.okPath} = ${JSON.stringify(getPath(json, c.okPath))}`, { status: res.status, json, preview });
+  ctx.vars[c.saveAs] = json; ctx.vars[c.saveAs + '_status'] = res.status; ctx.vars[c.saveAs + '_error'] = '';
+  return { next: n.next, branch: 'next', action: true, log: `${c.method} ${shownUrl} → HTTP ${res.status} (${ms} dtk)`, ...(preview ? { preview } : {}) };
+}
+
+/* Langkah "Kirim WhatsApp Flow": kirim formulir lalu tunggu jawaban (nfm_reply dengan flow_token yang sama).
+ * Cabang Diisi: isian disimpan ke variabel. Cabang Tidak diisi: dijalankan worker bila batas waktu habis. */
+async function execWaFlow(flow, n, ctx, dry) {
+  const c = n.cfg, st = ctx.answer?.state?.nodeId === n.id ? ctx.answer.state : null;
+  if (st) {
+    const msg = ctx.answer.msg; ctx.answer = null;
+    if (ctx.timedOut) return { next: n.fail, branch: 'fail', log: `Formulir tidak diisi dalam ${fmtMinutes(c.timeoutMinutes)}` };
+    ctx.vars[c.var] = msg.content.response || {};
+    return { next: n.next, branch: 'next', log: `Formulir diisi → ${c.var} (${Object.keys(msg.content.response || {}).join(', ') || 'kosong'})` };
+  }
+  const scope = flowScope(ctx);
+  let m;
+  try { m = buildWaFlowMessage({ flowId: c.flowId, body: renderTpl(c.text, scope), cta: c.cta, header: renderTpl(c.header, scope), footer: renderTpl(c.footer, scope), screen: c.screen }); }
+  catch (e) { return { next: n.fail, branch: 'fail', ok: false, log: 'Formulir tidak dapat dikirim: ' + e.message }; }
+  const preview = { text: m.content.body, buttons: ['📋 ' + m.content.button] };
+  if (dry) {
+    // Simulasi: jawaban uji berupa JSON objek, mis. {"nama":"Budi"}
+    const raw = ctx.dryAnswers.shift();
+    if (!raw) return { stop: true, action: true, log: `Formulir "${m.content.flowName}" dikirim → menunggu jawaban (isi "Jawaban uji" dengan JSON, mis. {"nama":"Budi"})`, previews: [preview] };
+    let data;
+    try { data = JSON.parse(raw); } catch { data = null; }
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return { next: n.fail, branch: 'fail', log: `Jawaban uji bukan objek JSON: ${raw}`, previews: [preview] };
+    ctx.vars[c.var] = data;
+    return { next: n.next, branch: 'next', action: true, log: `Formulir dikirim → diisi (${Object.keys(data).join(', ')})`, previews: [preview] };
+  }
+  const err = await flowDeliver(flow, n, ctx, async () => {
+    const r = await sendToMeta({ messaging_product: 'whatsapp', recipient_type: 'individual', to: ctx.contact.phone, type: 'interactive', interactive: m.interactive },
+      { source: 'flow', contact: ctx.contact, conversation: ctx.conv, userName: 'Flow: ' + flow.name });
+    addMessage(ctx.conv, { direction: 'out', type: 'interactive', content: m.content, wamid: r.messages?.[0]?.id, status: 'accepted', userName: 'Flow: ' + flow.name, auto: 'flow', flowId: flow.id });
+  });
+  if (err) return { next: n.fail, branch: 'fail', ok: false, log: 'Formulir tidak terkirim: ' + err };
+  return { waitInput: { kind: 'flow', nodeId: n.id, token: m.token, since: now(), expiresAt: now() + c.timeoutMinutes * 60000 }, action: true, log: `Formulir "${m.content.flowName}" dikirim → menunggu jawaban`, previews: [preview] };
+}
+
 // Satu langkah. dry = simulasi (tanpa efek samping). Mengembalikan { next, log, ok, action, wait, preview }
 async function execFlowNode(flow, n, ctx, dry) {
   const c = n.cfg;
@@ -998,18 +1469,23 @@ async function execFlowNode(flow, n, ctx, dry) {
     case 'trigger': return { next: n.next, log: 'Pesan masuk dari pelanggan' };
     case 'condition': {
       const yes = evalFlowCond(c, ctx);
-      return { next: yes ? n.yes : n.no, log: `${FLOW_COND_LABEL[c.kind]}: ${yes ? 'Ya' : 'Tidak'}`, branch: yes ? 'yes' : 'no' };
+      return { next: yes ? n.yes : n.no, log: `${FLOW_COND_LABEL[c.kind]}${c.kind === 'variable' ? ` (${c.path})` : ''}: ${yes ? 'Ya' : 'Tidak'}`, branch: yes ? 'yes' : 'no' };
     }
+    case 'ask': return execAsk(flow, n, ctx, dry);
+    case 'waflow': return execWaFlow(flow, n, ctx, dry);
+    case 'api': return execApi(flow, n, ctx, dry);
     case 'send': {
-      const preview = { text: fillVars(c.text, ctx.contact), image: c.image, buttons: c.buttons };
+      const scope = flowScope(ctx);
+      const msgs = c.repeat ? buildRepeat(c, scope) : [{ text: renderTpl(c.text, scope), image: c.image, buttons: c.buttons }];
+      if (!msgs) return { next: n.next, log: `Daftar "${c.repeat.path}" kosong, pesan dilewati.` };
       if (!windowOpen(ctx.conv)) return { next: n.next, ok: false, log: 'Tidak dikirim: di luar jendela layanan 24 jam.' };
-      if (dry) return { next: n.next, action: true, log: 'Mengirim pesan', preview };
-      if (recentAutoCount(ctx.conv, now() - 3600000) >= FLOW_MAX_AUTO_PER_HOUR) return { next: n.next, ok: false, log: `Tidak dikirim: batas ${FLOW_MAX_AUTO_PER_HOUR} pesan otomatis per jam untuk percakapan ini tercapai.` };
-      try {
-        await sendAutoContent(ctx.conv, ctx.contact, c, { auto: 'flow', userName: 'Flow: ' + flow.name, source: 'flow', btnPrefix: `fl_${n.id}`, contextId: ctx.contextId, flowId: flow.id });
-        ctx.contextId = null; // hanya pesan pertama yang mengutip pesan pelanggan
-        return { next: n.next, action: true, log: 'Pesan terkirim ke Meta' };
-      } catch (e) { return { next: n.next, ok: false, log: 'Gagal mengirim: ' + e.message }; }
+      const label = msgs.length > 1 ? `${msgs.length} pesan` : 'pesan';
+      if (dry) return { next: n.next, action: true, log: 'Mengirim ' + label, previews: msgs };
+      for (let i = 0; i < msgs.length; i++) {
+        const err = await flowSendText(flow, n, ctx, msgs[i]);
+        if (err) return { next: n.next, ok: false, action: i > 0, log: `Gagal mengirim${msgs.length > 1 ? ` pesan ${i + 1}/${msgs.length}` : ''}: ${err}` };
+      }
+      return { next: n.next, action: true, log: `${label[0].toUpperCase() + label.slice(1)} terkirim ke Meta` };
     }
     case 'assign': {
       const cur = ctx.conv.assignedTo ? byId('users', ctx.conv.assignedTo) : null;
@@ -1049,7 +1525,7 @@ async function execFlowNode(flow, n, ctx, dry) {
       return { next: n.next, action: true, log: `Status → ${STATUS_LABEL[c.status]}` };
     }
     case 'note': {
-      const text = fillVars(c.text, ctx.contact);
+      const text = renderTpl(c.text, flowScope(ctx));
       if (!dry) {
         ctx.conv.notes = ctx.conv.notes || [];
         ctx.conv.notes.push({ id: uid('n_'), text, userId: null, userName: 'Flow: ' + flow.name, at: now() });
@@ -1063,25 +1539,34 @@ async function execFlowNode(flow, n, ctx, dry) {
 }
 const fmtMinutes = (m) => (m % 60 ? (m > 60 ? `${Math.floor(m / 60)} jam ${m % 60} menit` : `${m} menit`) : `${m / 60} jam`);
 
-// Jalankan dari langkah startId sampai selesai atau bertemu "Tunggu" (dry: "Tunggu" dilewati dan hanya dicatat)
+// Jalankan dari langkah startId sampai selesai, bertemu "Tunggu", atau menunggu jawaban pelanggan.
+// dry: "Tunggu" dilewati dan hanya dicatat; "Tanya pelanggan" memakai jawaban uji.
 async function execFlow(flow, run, ctx, startId, dry) {
-  run.status = 'running';
+  run.status = 'running'; run.runningSince = now();
   let id = startId, guard = 0;
   while (id && guard++ <= FLOW_MAX_NODES) {
     const n = flow.nodes[id];
     if (!n) break;
     const r = await execFlowNode(flow, n, ctx, dry);
-    run.steps.push({ nodeId: id, type: n.type, at: now(), ok: r.ok !== false, log: r.log, ...(r.preview ? { preview: r.preview } : {}), ...(r.branch ? { branch: r.branch } : {}) });
+    run.steps.push({ nodeId: id, type: n.type, at: now(), ok: r.ok !== false, log: r.log, ...(r.preview ? { preview: r.preview } : {}), ...(r.previews ? { previews: r.previews } : {}), ...(r.branch ? { branch: r.branch } : {}) });
+    if (run.steps.length > 80) run.steps.splice(1, run.steps.length - 80); // run tanya-jawab yang panjang
     if (r.action) run.actions++;
     if (r.ok === false) run.error = r.log;
     if (r.wait && !dry) {
-      Object.assign(run, { status: 'waiting', resumeAt: now() + r.wait, resumeNode: r.next, waitSince: now(), cancelOnReply: n.cfg.cancelOnReply });
+      Object.assign(run, { status: 'waiting', resumeAt: now() + r.wait, resumeNode: r.next, waitSince: now(), cancelOnReply: n.cfg.cancelOnReply, vars: ctx.vars });
       return run;
     }
+    if (r.waitInput && !dry) {
+      Object.assign(run, { status: 'input', input: r.waitInput, vars: ctx.vars });
+      return run;
+    }
+    if (r.stop) { run.status = 'input'; return run; } // simulasi: tidak ada jawaban uji lagi
+    if (r.cancelled) { run.status = 'cancelled'; break; }
     id = r.next;
   }
-  run.status = run.error && !run.actions ? 'failed' : 'done';
+  if (run.status === 'running') run.status = run.error && !run.actions ? 'failed' : 'done';
   run.finishedAt = now();
+  delete run.vars; delete run.input; // variabel (mis. respons API) tidak disimpan setelah run selesai
   return run;
 }
 
@@ -1090,7 +1575,7 @@ function pushFlowRun(run) {
   if (db.flowRuns.length > FLOW_RUNS_MAX) {
     const drop = db.flowRuns.length - FLOW_RUNS_MAX;
     let removed = 0;
-    db.flowRuns = db.flowRuns.filter((r) => (removed < drop && r.status !== 'waiting' ? (removed++, false) : true));
+    db.flowRuns = db.flowRuns.filter((r) => (removed < drop && !FLOW_ACTIVE_RUN.includes(r.status) ? (removed++, false) : true));
   }
 }
 function finishFlowRun(flow, run) {
@@ -1114,37 +1599,68 @@ function flowGate(flow, conv, at) {
   const human = lastHumanReplyAt(conv);
   if (s.pauseIfHumanMin && human && at - human < s.pauseIfHumanMin * 60000) return `CS membalas dalam ${s.pauseIfHumanMin} menit terakhir.`;
   if (s.cooldownMin && at - (conv.flowLog?.[flow.id] || 0) < s.cooldownMin * 60000) return `Flow sudah berjalan untuk percakapan ini dalam ${s.cooldownMin} menit terakhir.`;
-  if (db.flowRuns.some((r) => r.status === 'waiting' && r.flowId === flow.id && r.conversationId === conv.id)) return 'Flow masih menunggu (langkah Tunggu) di percakapan ini.';
+  if (db.flowRuns.some((r) => FLOW_ACTIVE_RUN.includes(r.status) && r.flowId === flow.id && r.conversationId === conv.id)) return 'Flow masih menunggu (Tunggu / Tanya pelanggan) di percakapan ini.';
   return null;
 }
 function cancelFlowRuns(pred, reason) {
   let n = 0;
-  for (const r of db.flowRuns) if (r.status === 'waiting' && pred(r)) { r.status = 'cancelled'; r.error = reason; r.finishedAt = now(); n++; }
+  for (const r of db.flowRuns) if (FLOW_ACTIVE_RUN.includes(r.status) && pred(r)) { r.status = 'cancelled'; r.error = reason; r.finishedAt = now(); delete r.vars; delete r.input; n++; }
   if (n) save();
   return n;
 }
 
 async function runFlows(conv, contact, msg, prevInboundAt) {
+  const at = now(), text = inboundText(msg);
+  // Run percakapan ini sedang diproses (mis. menunggu respons API): pesan beruntun tidak memulai flow lain
+  if (db.flowRuns.some((r) => r.status === 'running' && r.conversationId === conv.id && at - (r.runningSince || 0) < 60000)) return true;
+  // 1. Flow yang sedang menunggu jawaban di percakapan ini mendapat pesan ini lebih dulu
+  const pending = db.flowRuns.filter((r) => r.status === 'input' && r.conversationId === conv.id).pop();
+  if (pending) {
+    const flow = byId('flows', pending.flowId), state = pending.input, node = flow?.nodes[state.nodeId];
+    const end = (status, error) => { Object.assign(pending, { status, error, finishedAt: now() }); delete pending.vars; delete pending.input; save(); };
+    const resume = async () => {
+      const ctx = { conv, contact, text, msgType: msg.type, prevInboundAt: pending.prevInboundAt, at, clock: zonedNow(flowTz(), at),
+        contextId: msg.wamid, vars: pending.vars || {}, answer: { msg, state } };
+      delete pending.input;
+      await execFlow(flow, pending, ctx, node.id, false);
+      finishFlowRun(flow, pending);
+    };
+    if (!flow?.enabled) end('cancelled', 'Flow dinonaktifkan atau dihapus.');
+    else if (!node || node.type !== (state.kind === 'flow' ? 'waflow' : 'ask')) end('cancelled', 'Langkah yang ditunggu sudah dihapus.');
+    else if (state.kind === 'flow') {
+      // Menunggu formulir: hanya jawaban dengan flow_token yang sama yang melanjutkan flow; pesan lain diproses seperti biasa
+      if (msg.type === 'flow_reply' && msg.content.token === state.token && state.expiresAt >= at) { await resume(); return true; }
+      if (flow.settings.cancelWords?.includes(text.trim().toLowerCase())) {
+        end('cancelled', 'Dibatalkan pelanggan.');
+        await sendAutoContent(conv, contact, { text: renderTpl(flow.settings.cancelText, { name: contact.name || contact.waName || 'Kak' }), image: null, buttons: [] },
+          { auto: 'flow', userName: 'Flow: ' + flow.name, source: 'flow', btnPrefix: 'fl', flowId: flow.id }).catch((e) => console.warn('[flow]', e.message));
+        return true;
+      }
+    }
+    else if (lastHumanReplyAt(conv) > state.since) end('cancelled', 'CS mengambil alih percakapan.');
+    else if (state.expiresAt < at) end('expired', `Pelanggan tidak menjawab dalam ${fmtMinutes(node.cfg.timeoutMinutes)}.`); // pesan ini diproses sebagai pesan baru
+    else { await resume(); return true; }
+  }
+  // 2. Flow aktif dicek berurutan
   const flows = db.flows.filter((f) => f.enabled).sort((a, b) => a.order - b.order);
   // Pesan baru dari pelanggan membatalkan langkah "Tunggu" yang diatur batal bila dibalas
-  cancelFlowRuns((r) => r.conversationId === conv.id && r.cancelOnReply, 'Pelanggan mengirim pesan baru.');
+  cancelFlowRuns((r) => r.status === 'waiting' && r.conversationId === conv.id && r.cancelOnReply, 'Pelanggan mengirim pesan baru.');
   if (!flows.length) return false;
-  const at = now(), text = inboundText(msg);
   for (const flow of flows) {
     if (flowGate(flow, conv, at)) continue;
-    const ctx = { conv, contact, text, msgType: msg.type, prevInboundAt, at, clock: zonedNow(flowTz(), at), contextId: msg.wamid };
+    const ctx = { conv, contact, text, msgType: msg.type, prevInboundAt, at, clock: zonedNow(flowTz(), at), contextId: msg.wamid, vars: {} };
     const run = { id: uid('fr_'), flowId: flow.id, flowName: flow.name, conversationId: conv.id, contactId: contact.id, phone: contact.phone,
       text: text.slice(0, 300), msgType: msg.type, prevInboundAt, startedAt: at, status: 'running', steps: [], actions: 0, error: null };
     // Tandai sebelum aksi asinkron agar pesan beruntun tidak menjalankan flow (ber-jeda) dua kali
     const prevLog = conv.flowLog?.[flow.id];
     conv.flowLog = { ...conv.flowLog, [flow.id]: at };
     await execFlow(flow, run, ctx, flow.root, false);
-    if (!run.actions && run.status !== 'waiting') {
+    if (!run.actions && !FLOW_ACTIVE_RUN.includes(run.status)) {
       if (prevLog) conv.flowLog[flow.id] = prevLog; else delete conv.flowLog[flow.id];
       if (!run.error) continue; // tidak ada cabang yang cocok: coba flow berikutnya tanpa mencatat
     }
     pushFlowRun(run); finishFlowRun(flow, run);
-    if (run.actions || run.status === 'waiting') return true;
+    if (run.actions || FLOW_ACTIVE_RUN.includes(run.status)) return true;
   }
   return false;
 }
@@ -1153,17 +1669,38 @@ async function runFlows(conv, contact, msg, prevInboundAt) {
 let flowWorkerBusy = false;
 setInterval(async () => {
   if (flowWorkerBusy) return;
+  // Pertanyaan yang tidak dijawab sampai batas waktu, dan run yang macet (mis. server restart saat memanggil API)
+  let changed = false;
+  const formTimeouts = [];
+  for (const r of db.flowRuns) {
+    if (r.status === 'input' && r.input?.expiresAt < now()) {
+      if (r.input.kind === 'flow') { formTimeouts.push(r); continue; } // formulir: jalankan cabang "Tidak diisi"
+      Object.assign(r, { status: 'expired', error: 'Pelanggan tidak menjawab sampai batas waktu.', finishedAt: now() }); delete r.vars; delete r.input; changed = true;
+    }
+    else if (r.status === 'running' && now() - (r.runningSince || 0) > 5 * 60000) { Object.assign(r, { status: 'failed', error: 'Run terhenti (server dimulai ulang saat berjalan).', finishedAt: now() }); delete r.vars; changed = true; }
+  }
+  if (changed) save();
   const due = db.flowRuns.filter((r) => r.status === 'waiting' && r.resumeAt <= now());
-  if (!due.length) return;
+  if (!due.length && !formTimeouts.length) return;
   flowWorkerBusy = true;
   try {
+    for (const run of formTimeouts) {
+      const flow = byId('flows', run.flowId), conv = byId('conversations', run.conversationId), contact = byId('contacts', run.contactId);
+      const state = run.input, node = flow?.nodes[state.nodeId];
+      if (!flow?.enabled || !conv || !contact || node?.type !== 'waflow') { Object.assign(run, { status: 'expired', error: 'Formulir tidak diisi sampai batas waktu.', finishedAt: now() }); delete run.vars; delete run.input; save(); continue; }
+      const ctx = { conv, contact, text: run.text, msgType: run.msgType, prevInboundAt: run.prevInboundAt, at: now(), clock: zonedNow(flowTz()), contextId: null,
+        vars: run.vars || {}, answer: { msg: null, state }, timedOut: true };
+      delete run.input;
+      await execFlow(flow, run, ctx, node.id, false);
+      finishFlowRun(flow, run);
+    }
     for (const run of due) {
       const flow = byId('flows', run.flowId), conv = byId('conversations', run.conversationId), contact = byId('contacts', run.contactId);
-      const stop = (reason) => { run.status = 'cancelled'; run.error = reason; run.finishedAt = now(); save(); };
+      const stop = (reason) => { run.status = 'cancelled'; run.error = reason; run.finishedAt = now(); delete run.vars; save(); };
       if (!flow || !flow.enabled) { stop('Flow dinonaktifkan atau dihapus.'); continue; }
       if (!conv || !contact) { stop('Percakapan atau kontak sudah dihapus.'); continue; }
       if (run.cancelOnReply && lastHumanReplyAt(conv) > run.waitSince) { stop('CS sudah membalas.'); continue; }
-      const ctx = { conv, contact, text: run.text, msgType: run.msgType, prevInboundAt: run.prevInboundAt, at: run.startedAt, clock: zonedNow(flowTz()), contextId: null };
+      const ctx = { conv, contact, text: run.text, msgType: run.msgType, prevInboundAt: run.prevInboundAt, at: now(), clock: zonedNow(flowTz()), contextId: null, vars: run.vars || {} };
       await execFlow(flow, run, ctx, run.resumeNode, false);
       finishFlowRun(flow, run);
     }
@@ -1179,10 +1716,14 @@ async function testFlow(flow, b) {
   const contact = { name: 'Budi', waName: 'Budi', phone: '6281234567890', labels: cleanLabels(b.labels) };
   const conv = { id: 'test', status: 'open', assignedTo: b.assigned ? flowAgents()[0]?.id || 'x' : null, lastInboundAt: at, notes: [] };
   const msgType = FLOW_MSG_TYPES.includes(b.msgType) ? (b.msgType === 'reply' ? 'interactive_reply' : b.msgType) : 'text';
-  const ctx = { conv, contact, text: str(b.text, 1000), msgType, prevInboundAt: b.newContact ? 0 : at - 3600000, at, clock: { day, time }, contextId: null };
+  const ctx = { conv, contact, text: str(b.text, 1000), msgType, prevInboundAt: b.newContact ? 0 : at - 3600000, at, clock: { day, time }, contextId: null, vars: {},
+    dryAnswers: (Array.isArray(b.answers) ? b.answers : String(b.answers || '').split('\n')).map((x) => str(String(x), 500)).filter(Boolean).slice(0, 10),
+    liveApi: b.liveApi !== false };
   const run = { steps: [], actions: 0, error: null };
   await execFlow({ ...flow, rr: flow.rr || 0 }, run, ctx, flow.root, true);
-  return { steps: run.steps, actions: run.actions, clock: { day, time } };
+  // Variabel akhir untuk membantu penyusunan template (objek besar dipotong)
+  const vars = Object.fromEntries(Object.entries(ctx.vars).map(([k, v]) => [k, v && typeof v === 'object' ? JSON.stringify(v).slice(0, 400) : v]));
+  return { steps: run.steps, actions: run.actions, clock: { day, time }, vars, waitingAnswer: run.status === 'input' };
 }
 function flowUsesImage(key) {
   return db.flows.some((f) => Object.values(f.nodes).some((n) => n.type === 'send' && n.cfg.image === key));
@@ -1619,6 +2160,112 @@ function csatReport({ from, to, agentId }) {
   };
 }
 
+/* ── WhatsApp Flows (Meta) ──
+ * Formulir interaktif resmi WhatsApp. Flow dibuat & dikelola lewat Flows API ({WABA}/flows), dikirim sebagai pesan
+ * interactive "flow" (dalam jendela 24 jam) atau template bertombol FLOW. Setiap pengiriman membawa flow_token unik;
+ * jawaban (nfm_reply.response_json) dicocokkan lewat token tersebut. Kontaq mendukung flow tanpa endpoint
+ * (navigate + complete). Flow ber-endpoint (data_exchange) memerlukan server endpoint terenkripsi milik Anda sendiri.
+ */
+const WAF_CATEGORIES = ['SIGN_UP', 'SIGN_IN', 'APPOINTMENT_BOOKING', 'LEAD_GENERATION', 'CONTACT_US', 'CUSTOMER_SUPPORT', 'SURVEY', 'OTHER'];
+const WAF_FIELDS = 'id,name,status,categories,validation_errors,json_version,data_api_version,endpoint_uri';
+const WAF_SUBMISSIONS_MAX = 20000;
+const WAF_JSON_MAX = 1024 * 1024;
+const wafById = (id) => (id ? db.waFlows.find((f) => f.id === String(id)) : null);
+const newFlowToken = () => 'kq.' + crypto.randomBytes(12).toString('base64url');
+// Screen dari Flow JSON (untuk memilih screen pertama saat mengirim)
+function wafScreens(json) {
+  try { return (JSON.parse(json || '{}').screens || []).map((s) => ({ id: String(s.id), title: String(s.title || s.id), terminal: !!s.terminal })).filter((s) => s.id); }
+  catch { return []; }
+}
+function wafUpsert(x) {
+  let f = wafById(x.id);
+  if (!f) { f = { id: String(x.id), json: null, alerts: [], createdAt: now() }; db.waFlows.push(f); }
+  Object.assign(f, {
+    name: x.name ?? f.name, status: x.status ?? f.status, categories: x.categories ?? f.categories ?? [],
+    validationErrors: x.validation_errors ?? f.validationErrors ?? [], jsonVersion: x.json_version ?? f.jsonVersion ?? null,
+    endpointUri: x.endpoint_uri ?? f.endpointUri ?? null, syncedAt: now(),
+  });
+  return f;
+}
+const wafPublic = (f, full) => {
+  const subs = wafSubmissions(f.id);
+  return {
+    id: f.id, name: f.name, status: f.status, categories: f.categories, validationErrors: f.validationErrors, jsonVersion: f.jsonVersion,
+    endpointUri: f.endpointUri, syncedAt: f.syncedAt, alerts: (f.alerts || []).slice(0, 10), screens: wafScreens(f.json),
+    sent: subs.length, completed: subs.filter((s) => s.status === 'completed').length, preview: f.preview || null,
+    ...(full ? { json: f.json } : {}),
+  };
+};
+
+// Indeks token → pengiriman (dibangun saat pertama dipakai)
+let wafTokenIdx = null;
+const wafByToken = (token) => {
+  if (!wafTokenIdx) { wafTokenIdx = new Map(); for (const s of db.flowSubmissions) wafTokenIdx.set(s.token, s); }
+  return token ? wafTokenIdx.get(token) || null : null;
+};
+const wafSubmissions = (flowId) => db.flowSubmissions.filter((s) => s.flowId === String(flowId));
+function pushSubmission(s) {
+  wafByToken(null);
+  db.flowSubmissions.push(s); wafTokenIdx.set(s.token, s);
+  if (db.flowSubmissions.length > WAF_SUBMISSIONS_MAX) for (const old of db.flowSubmissions.splice(0, db.flowSubmissions.length - WAF_SUBMISSIONS_MAX)) wafTokenIdx.delete(old.token);
+}
+// Dipanggil dari addMessage untuk pesan keluar yang membawa flowToken
+function recordFlowSend(conv, msg) {
+  const c = msg.content;
+  if (wafByToken(c.flowToken)) return;
+  pushSubmission({ id: uid('fs_'), token: c.flowToken, flowId: c.flowId || null, flowName: c.flowName || 'Flow', conversationId: conv.id, contactId: conv.contactId,
+    messageId: msg.id, via: msg.type === 'template' ? 'template' : msg.auto ? 'automation' : 'inbox', mode: c.mode || 'published',
+    sentBy: msg.userName || '', sentAt: msg.timestamp, status: 'sent', response: null, completedAt: 0 });
+}
+function recordFlowSubmission(conv, contact, msg) {
+  const c = msg.content;
+  let s = wafByToken(c.token);
+  if (!s) {
+    // Token tidak dikenal (mis. flow dikirim di luar Kontaq): kaitkan ke flow dari pesan yang dibalas bila ada
+    const orig = msg.contextId ? idx.wamid.get(msg.contextId) : null;
+    s = { id: uid('fs_'), token: c.token || uid('tk_'), flowId: orig?.content?.flowId || null, flowName: orig?.content?.flowName || 'Flow tidak dikenal',
+      conversationId: conv.id, contactId: contact.id, messageId: null, via: 'external', mode: 'published', sentBy: '', sentAt: 0, status: 'sent', response: null, completedAt: 0 };
+    pushSubmission(s);
+  }
+  // Jawaban ganda untuk token yang sama: simpan jawaban terakhir
+  Object.assign(s, { status: 'completed', response: c.response, completedAt: msg.timestamp, responseMessageId: msg.id });
+  msg.content.flowName = s.flowName; msg.content.flowId = s.flowId;
+  save();
+  io?.to('admins').emit('waflow:submission', { flowId: s.flowId, id: s.id });
+}
+
+// Pesan interaktif "flow". b: { flowId, body, cta, header?, footer?, screen?, mode?, data? }
+function buildWaFlowMessage(b) {
+  const f = wafById(b.flowId);
+  if (!f) throw new HttpError(400, 'WhatsApp Flow tidak ditemukan. Sinkronkan daftar flow terlebih dahulu.');
+  const mode = b.mode === 'draft' ? 'draft' : 'published';
+  if (['DEPRECATED', 'BLOCKED'].includes(f.status)) throw new HttpError(400, `Flow "${f.name}" berstatus ${f.status} dan tidak dapat dikirim.`);
+  if (mode === 'published' && !['PUBLISHED', 'THROTTLED'].includes(f.status)) throw new HttpError(400, `Flow "${f.name}" belum diterbitkan (status ${f.status}). Terbitkan dulu, atau kirim dalam mode draft untuk uji.`);
+  const body = str(b.body, 1024), cta = str(b.cta, 30);
+  if (!body) throw new HttpError(400, 'Isi teks pesan.');
+  if (!cta) throw new HttpError(400, 'Isi teks tombol (maks. 30 karakter).');
+  const screen = str(b.screen, 80) || wafScreens(f.json)[0]?.id;
+  if (!screen) throw new HttpError(400, 'Isi ID screen pertama (Flow JSON belum dimuat — buka flow di menu WhatsApp Flows).');
+  const token = newFlowToken();
+  const payload = { screen };
+  if (b.data && typeof b.data === 'object' && !Array.isArray(b.data) && Object.keys(b.data).length) payload.data = b.data;
+  const interactive = { type: 'flow', body: { text: body },
+    action: { name: 'flow', parameters: { flow_message_version: '3', flow_token: token, flow_id: f.id, flow_cta: cta, mode, flow_action: 'navigate', flow_action_payload: payload } } };
+  const header = str(b.header, 60), footer = str(b.footer, 60);
+  if (header) interactive.header = { type: 'text', text: header };
+  if (footer) interactive.footer = { text: footer };
+  return { interactive, content: { kind: 'flow', header, body, footer, button: cta, flowId: f.id, flowName: f.name, flowToken: token, mode }, token };
+}
+
+function handleWaFlowWebhook(v) {
+  const f = wafById(v.flow_id);
+  if (!f) return;
+  if (v.event === 'FLOW_STATUS_CHANGE' && v.new_status) f.status = v.new_status;
+  f.alerts = [{ at: now(), event: v.event, message: v.message || '', state: v.alert_state || null, oldStatus: v.old_status || null, newStatus: v.new_status || null }, ...(f.alerts || [])].slice(0, 20);
+  save();
+  io?.to('admins').emit('waflow:update', wafPublic(f));
+}
+
 function handleTemplateStatus(value) {
   const t = db.templates.find((x) => String(x.id) === String(value.message_template_id) || (x.name === value.message_template_name && x.language === value.message_template_language));
   if (t) {
@@ -1786,7 +2433,178 @@ const MEDIA_RULES = {
   audio: { max: 16, mimes: ['audio/aac', 'audio/amr', 'audio/mpeg', 'audio/mp4', 'audio/ogg'] },
   document: { max: 100, mimes: null },
   sticker: { max: 0.5, mimes: ['image/webp'] },
+  // Rekaman voice note dari browser: dikonversi ke OGG/Opus (format wajib pesan suara WhatsApp)
+  voice: { max: 16, mimes: ['audio/webm', 'video/webm', 'audio/ogg', 'audio/mp4', 'audio/x-m4a', 'audio/aac'] },
 };
+// Browser kadang mengirim dokumen sebagai application/octet-stream: tentukan MIME dari ekstensi
+const DOC_MIMES = { pdf: 'application/pdf', txt: 'text/plain', csv: 'text/csv', doc: 'application/msword', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  xls: 'application/vnd.ms-excel', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', ppt: 'application/vnd.ms-powerpoint',
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', zip: 'application/zip' };
+
+/* ── Voice note: WebM/Opus (Chrome/Edge) → OGG/Opus ──
+ * Remux tanpa encode ulang: paket Opus dari blok WebM dipindahkan ke halaman Ogg (RFC 7845). Firefox sudah merekam OGG.
+ */
+const OGG_CRC = (() => {
+  const t = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) { let r = i << 24; for (let j = 0; j < 8; j++) r = r & 0x80000000 ? ((r << 1) ^ 0x04c11db7) >>> 0 : (r << 1) >>> 0; t[i] = r; }
+  return t;
+})();
+function oggCrc(buf) { let c = 0; for (let i = 0; i < buf.length; i++) c = ((c << 8) ^ OGG_CRC[((c >>> 24) ^ buf[i]) & 0xff]) >>> 0; return c; }
+function oggPage(packets, granule, serial, seq, flags) {
+  const segs = [];
+  for (const p of packets) { let n = p.length; while (n >= 255) { segs.push(255); n -= 255; } segs.push(n); }
+  const head = Buffer.alloc(27 + segs.length);
+  head.write('OggS', 0); head[4] = 0; head[5] = flags;
+  head.writeBigInt64LE(BigInt(granule), 6); head.writeUInt32LE(serial, 14); head.writeUInt32LE(seq, 18);
+  head[26] = segs.length; segs.forEach((s, i) => { head[27 + i] = s; });
+  const page = Buffer.concat([head, ...packets]);
+  page.writeUInt32LE(oggCrc(page), 22);
+  return page;
+}
+// Jumlah sampel (48 kHz) dalam satu paket Opus, dari byte TOC (RFC 6716 §3.1)
+function opusSamples(p) {
+  if (!p.length) return 0;
+  const cfg = p[0] >> 3, code = p[0] & 3;
+  const ms = cfg < 12 ? [10, 20, 40, 60][cfg & 3] : cfg < 16 ? [10, 20][cfg & 1] : [2.5, 5, 10, 20][cfg & 3];
+  const frames = code === 0 ? 1 : code === 3 ? (p[1] || 0) & 0x3f : 2;
+  return Math.round(frames * ms * 48);
+}
+// Ambil paket Opus dari WebM (EBML). Segment/Cluster dengan ukuran "unknown" (MediaRecorder) ditangani dengan menelusuri isinya.
+function webmOpusPackets(buf) {
+  const MASTER = new Set([0x18538067, 0x1f43b675, 0x1654ae6b, 0xae, 0xa0, 0xe1]); // Segment, Cluster, Tracks, TrackEntry, BlockGroup, Audio
+  let pos = 0, curTrack = 0, opusTrack = null, head = null, channels = 1;
+  const packets = [];
+  const vint = (keep) => {
+    const b = buf[pos]; let len = 1, mask = 0x80;
+    while (len <= 8 && !(b & mask)) { len++; mask >>= 1; }
+    if (len > 8 || pos + len > buf.length) throw new Error('rekaman rusak');
+    let v = keep ? b : b & (mask - 1), ones = (b & (mask - 1)) === mask - 1;
+    for (let i = 1; i < len; i++) { v = v * 256 + buf[pos + i]; if (buf[pos + i] !== 0xff) ones = false; }
+    pos += len;
+    return { v, unknown: !keep && ones };
+  };
+  const uint = (d) => d.reduce((n, x) => n * 256 + x, 0);
+  while (pos < buf.length) {
+    const id = vint(true).v, size = vint(false);
+    if (MASTER.has(id)) continue; // telusuri anak elemen
+    const end = size.unknown ? buf.length : Math.min(buf.length, pos + size.v), d = buf.subarray(pos, end);
+    if (id === 0xd7) curTrack = uint(d);
+    else if (id === 0x86 && d.toString('latin1') === 'A_OPUS' && opusTrack == null) opusTrack = curTrack;
+    else if (id === 0x63a2 && d.subarray(0, 8).toString('latin1') === 'OpusHead') head = Buffer.from(d);
+    else if (id === 0x9f) channels = uint(d);
+    else if ((id === 0xa3 || id === 0xa1) && d.length > 4) { // SimpleBlock / Block
+      let p = 0, len = 1, mask = 0x80;
+      while (len <= 8 && !(d[0] & mask)) { len++; mask >>= 1; }
+      let track = d[0] & (mask - 1);
+      for (let i = 1; i < len; i++) track = track * 256 + d[i];
+      p = len + 3; // nomor track + timecode (2) + flags (1)
+      const lacing = (d[len + 2] >> 1) & 3;
+      if (opusTrack == null || track === opusTrack) {
+        if (lacing === 0) packets.push(Buffer.from(d.subarray(p)));
+        else if (lacing === 2) { const n = d[p] + 1, data = d.subarray(p + 1), sz = data.length / n; for (let i = 0; i < n; i++) packets.push(Buffer.from(data.subarray(i * sz, (i + 1) * sz))); }
+        else throw new Error('format lacing rekaman tidak didukung');
+      }
+    }
+    pos = end;
+  }
+  return { packets, head, channels };
+}
+function webmToOgg(buf) {
+  const { packets, head: rawHead, channels } = webmOpusPackets(buf);
+  if (!packets.length) throw new HttpError(400, 'Rekaman kosong atau bukan audio Opus.');
+  let head = rawHead;
+  if (!head) { // OpusHead minimal bila CodecPrivate tidak ada
+    head = Buffer.alloc(19); head.write('OpusHead', 0); head[8] = 1; head[9] = channels; head.writeUInt16LE(312, 10); head.writeUInt32LE(48000, 12);
+  }
+  const vendor = Buffer.from('Kontaq'), tags = Buffer.alloc(8 + 4 + vendor.length + 4);
+  tags.write('OpusTags', 0); tags.writeUInt32LE(vendor.length, 8); vendor.copy(tags, 12);
+  const serial = crypto.randomBytes(4).readUInt32LE(0);
+  const pages = [oggPage([head], 0, serial, 0, 2), oggPage([tags], 0, serial, 1, 0)];
+  let granule = 0, seq = 2;
+  for (let i = 0; i < packets.length; i += 50) {
+    const group = packets.slice(i, i + 50);
+    granule += group.reduce((t, p) => t + opusSamples(p), 0);
+    pages.push(oggPage(group, granule, serial, seq++, i + 50 >= packets.length ? 4 : 0));
+  }
+  return { buffer: Buffer.concat(pages), channels: head[9], duration: Math.max(0, (granule - head.readUInt16LE(10)) / 48000) };
+}
+// Info OGG/Opus asli (Firefox): jumlah kanal & durasi dari granule halaman terakhir
+function oggOpusInfo(buf) {
+  const h = buf.indexOf('OpusHead');
+  if (buf.subarray(0, 4).toString() !== 'OggS' || h < 0) return null;
+  const last = buf.lastIndexOf('OggS');
+  const granule = Number(buf.readBigInt64LE(last + 6));
+  return { channels: buf[h + 9], duration: Math.max(0, (granule - buf.readUInt16LE(h + 10)) / 48000) };
+}
+// Ukuran & animasi WebP (VP8 / VP8L / VP8X)
+function webpInfo(buf) {
+  if (buf.length < 30 || buf.toString('latin1', 0, 4) !== 'RIFF' || buf.toString('latin1', 8, 12) !== 'WEBP') return null;
+  const chunk = buf.toString('latin1', 12, 16);
+  if (chunk === 'VP8X') return { width: 1 + buf.readUIntLE(24, 3), height: 1 + buf.readUIntLE(27, 3), animated: !!(buf[20] & 0x02) };
+  if (chunk === 'VP8 ') return { width: buf.readUInt16LE(26) & 0x3fff, height: buf.readUInt16LE(28) & 0x3fff, animated: false };
+  if (chunk === 'VP8L') { const b = buf.readUInt32LE(21); return { width: (b & 0x3fff) + 1, height: ((b >> 14) & 0x3fff) + 1, animated: false }; }
+  return null;
+}
+function checkSticker(buf) {
+  const info = webpInfo(buf);
+  if (!info) throw new HttpError(400, 'Stiker harus berformat WebP.');
+  if (info.width !== 512 || info.height !== 512) throw new HttpError(400, `Stiker harus 512×512 piksel (file ini ${info.width}×${info.height}).`);
+  if (buf.length > (info.animated ? 500 : 100) * 1024) throw new HttpError(400, `Stiker ${info.animated ? 'animasi maks. 500' : 'statis maks. 100'} KB (file ini ${Math.ceil(buf.length / 1024)} KB).`);
+  return info;
+}
+
+/* Cache media lokal: media keluar disimpan saat diunggah, media masuk saat pertama dibuka.
+ * Mempercepat tampilan & mendukung Range (seek audio/video). Berkas > 30 hari dibersihkan otomatis. */
+const MEDIA_CACHE_DIR = path.join(DATA_DIR, 'media-cache');
+const MEDIA_CACHE_MAX = 2 * 1024 * 1024 * 1024;
+if (!fs.existsSync(MEDIA_CACHE_DIR)) fs.mkdirSync(MEDIA_CACHE_DIR, { recursive: true });
+const mediaCacheFile = (id) => path.join(MEDIA_CACHE_DIR, String(id).replace(/\D/g, ''));
+function cacheMedia(id, buffer, meta) {
+  try { fs.writeFileSync(mediaCacheFile(id), buffer); fs.writeFileSync(mediaCacheFile(id) + '.json', JSON.stringify(meta)); }
+  catch (e) { console.warn('[media-cache]', e.message); }
+}
+function cachedMedia(id) {
+  try { const f = mediaCacheFile(id); return fs.existsSync(f) ? { file: f, ...JSON.parse(fs.readFileSync(f + '.json', 'utf8')) } : null; } catch { return null; }
+}
+setInterval(() => {
+  try {
+    const files = fs.readdirSync(MEDIA_CACHE_DIR).filter((f) => !f.endsWith('.json') && !f.endsWith('.tmp')).map((f) => { const p = path.join(MEDIA_CACHE_DIR, f); const s = fs.statSync(p); return { p, at: s.mtimeMs, size: s.size }; }).sort((a, b) => a.at - b.at);
+    let total = files.reduce((t, f) => t + f.size, 0);
+    for (const f of files) {
+      if (now() - f.at < 30 * 86400000 && total <= MEDIA_CACHE_MAX) break;
+      fs.rmSync(f.p, { force: true }); fs.rmSync(f.p + '.json', { force: true }); total -= f.size;
+    }
+  } catch (e) { console.warn('[media-cache]', e.message); }
+}, 3600000);
+
+/* Pustaka stiker bersama (berkas di data/stickers, metadata di db.stickers). Media ID Meta diunggah ulang setelah 25 hari. */
+const STICKER_DIR = path.join(DATA_DIR, 'stickers');
+const STICKERS_MAX = 120;
+if (!fs.existsSync(STICKER_DIR)) fs.mkdirSync(STICKER_DIR, { recursive: true });
+const stickerFile = (id) => path.join(STICKER_DIR, String(id).replace(/[^\w-]/g, '') + '.webp');
+const stickerOr404 = (id) => { const s = (db.stickers || []).find((x) => x.id === String(id)); if (!s) throw new HttpError(404, 'Stiker tidak ditemukan.'); return s; };
+function addSticker(buf, by) {
+  const info = checkSticker(buf);
+  const hash = crypto.createHash('sha256').update(buf).digest('hex').slice(0, 16);
+  db.stickers = db.stickers || [];
+  let s = db.stickers.find((x) => x.hash === hash);
+  if (!s) {
+    s = { id: uid('st_').replace(/[^\w-]/g, ''), hash, animated: info.animated, size: buf.length, createdAt: now(), lastUsedAt: now(), createdBy: by, metaId: null, metaAt: 0 };
+    fs.writeFileSync(stickerFile(s.id), buf);
+    db.stickers.push(s);
+    // Pustaka penuh: buang yang paling lama tidak dipakai
+    while (db.stickers.length > STICKERS_MAX) { const old = db.stickers.sort((a, b) => a.lastUsedAt - b.lastUsedAt).shift(); fs.rmSync(stickerFile(old.id), { force: true }); }
+  }
+  s.lastUsedAt = now(); save();
+  return s;
+}
+async function ensureStickerMedia(s) {
+  if (s.metaId && now() - s.metaAt < 25 * 86400000) return s.metaId;
+  const buffer = fs.readFileSync(stickerFile(s.id));
+  s.metaId = await uploadMedia({ buffer, mimetype: 'image/webp', originalname: s.id + '.webp' }); s.metaAt = now(); save();
+  cacheMedia(s.metaId, buffer, { mime: 'image/webp', size: buffer.length, filename: s.id + '.webp' });
+  return s.metaId;
+}
 
 /* Halaman */
 app.get('/', (req, res) => {
@@ -1819,6 +2637,7 @@ app.post('/webhook', (req, res) => {
           handleMessages(v); handleStatuses(v);
         } else if (change.field === 'message_template_status_update') handleTemplateStatus(v);
         else if (change.field === 'calls') handleCalls(v);
+        else if (change.field === 'flows') handleWaFlowWebhook(v);
         else if (GROUP_FIELDS.includes(change.field)) {
           const ourPhone = meta().phoneNumberId;
           if (ourPhone && v.metadata?.phone_number_id && v.metadata.phone_number_id !== ourPhone) continue;
@@ -2048,16 +2867,18 @@ app.get('/api/autoreply/media/:key', (req, res) => {
 const flowSummary = (f) => ({
   id: f.id, name: f.name, enabled: f.enabled, order: f.order, settings: f.settings, stats: f.stats, updatedAt: f.updatedAt,
   steps: Object.keys(f.nodes).length - 1, conditions: Object.values(f.nodes).filter((n) => n.type === 'condition').length,
-  waiting: db.flowRuns.filter((r) => r.flowId === f.id && r.status === 'waiting').length,
+  waiting: db.flowRuns.filter((r) => r.flowId === f.id && FLOW_ACTIVE_RUN.includes(r.status)).length,
 });
 const flowOr404 = (id) => { const f = byId('flows', id); if (!f) throw new HttpError(404, 'Flow tidak ditemukan.'); return f; };
-const recentRuns = (pred, n) => db.flowRuns.filter(pred).slice(-n).reverse();
+// Variabel run (mis. respons API & jawaban pelanggan yang masih menunggu) tidak dikirim ke browser
+const recentRuns = (pred, n) => db.flowRuns.filter(pred).slice(-n).reverse().map(({ vars, input, ...r }) => ({ ...r, ...(input ? { input: { expiresAt: input.expiresAt, nodeId: input.nodeId } } : {}) }));
 app.get('/api/flows', requireAdmin, (req, res) => {
   const z = zonedNow(flowTz());
   res.json({
     flows: db.flows.slice().sort((a, b) => a.order - b.order).map(flowSummary),
     runs: recentRuns(() => true, 30), timezone: flowTz(), now: z, labels: contactLabels(),
     autoReplyEnabled: !!arCfg().enabled, hours: arCfg().away.hours,
+    waFlows: db.waFlows.map((f) => ({ id: f.id, name: f.name, status: f.status, screens: wafScreens(f.json) })),
   });
 });
 app.put('/api/flows/order', requireAdmin, wrap(async (req, res) => {
@@ -2074,6 +2895,28 @@ app.get('/api/flows/runs', requireAdmin, (req, res) => {
   const flowId = str(req.query.flowId, 40);
   res.json(recentRuns((r) => !flowId || r.flowId === flowId, 100));
 });
+// Kredensial untuk langkah API Request ({{secret.NAMA}}): nilai disimpan terenkripsi dan tidak pernah dikembalikan ke browser
+app.get('/api/flows/secrets', requireAdmin, (req, res) => {
+  res.json(flowSecretNames().map((name) => ({ name, masked: mask(decrypt(db.settings.flowSecrets[name])), updatedAt: db.settings.flowSecretsAt?.[name] || 0 })));
+});
+app.put('/api/flows/secrets/:name', requireAdmin, wrap(async (req, res) => {
+  const name = String(req.params.name || '');
+  if (!/^[A-Z0-9_]{1,40}$/.test(name)) throw new HttpError(400, 'Nama kredensial hanya huruf besar, angka, dan garis bawah (mis. API_KEY).');
+  const value = typeof req.body.value === 'string' ? req.body.value.trim() : '';
+  if (!value || value.length > 2000) throw new HttpError(400, 'Isi nilai kredensial (maks. 2000 karakter).');
+  db.settings.flowSecrets = { ...db.settings.flowSecrets, [name]: encrypt(value) };
+  db.settings.flowSecretsAt = { ...db.settings.flowSecretsAt, [name]: now() };
+  audit(req, 'flow.secret.set', name); save();
+  res.json({ name, masked: mask(value), updatedAt: now() });
+}));
+app.delete('/api/flows/secrets/:name', requireAdmin, wrap(async (req, res) => {
+  const name = String(req.params.name || '');
+  const used = db.flows.filter((f) => JSON.stringify(f.nodes).includes(`secret.${name}`)).map((f) => f.name);
+  if (used.length) throw new HttpError(400, `Kredensial masih dipakai flow: ${used.join(', ')}.`);
+  if (db.settings.flowSecrets) delete db.settings.flowSecrets[name];
+  audit(req, 'flow.secret.delete', name); save();
+  res.json({ ok: true });
+}));
 app.post('/api/flows/runs/:id/cancel', requireAdmin, wrap(async (req, res) => {
   const n = cancelFlowRuns((r) => r.id === req.params.id, `Dibatalkan oleh ${req.user.name}.`);
   if (!n) throw new HttpError(400, 'Run tidak sedang menunggu.');
@@ -2094,7 +2937,7 @@ app.put('/api/flows/:id', requireAdmin, wrap(async (req, res) => {
   const f = validateFlow(req.body || {}, prev);
   db.flows[db.flows.indexOf(prev)] = f;
   // Run yang menunggu di langkah yang sudah dihapus tidak dapat dilanjutkan
-  cancelFlowRuns((r) => r.flowId === f.id && r.resumeNode && !f.nodes[r.resumeNode], 'Langkah dihapus saat flow diubah.');
+  cancelFlowRuns((r) => r.flowId === f.id && ((r.resumeNode && !f.nodes[r.resumeNode]) || (r.input && f.nodes[r.input.nodeId]?.type !== (r.input.kind === 'flow' ? 'waflow' : 'ask'))), 'Langkah dihapus saat flow diubah.');
   audit(req, 'flow.update', `${f.name} (${f.enabled ? 'aktif' : 'nonaktif'}, ${Object.keys(f.nodes).length - 1} langkah)`); save();
   res.json({ ...f, runs: recentRuns((r) => r.flowId === f.id, 30) });
 }));
@@ -2356,6 +3199,147 @@ app.post('/api/conversations/:id/csat', wrap(async (req, res) => {
   audit(req, 'csat.send', byId('contacts', conv.contactId)?.phone);
   res.json(csatPublic(survey));
 }));
+
+/* WhatsApp Flows (Meta). Daftar dapat dibaca semua pengguna (agen mengirim flow yang sudah terbit); pengelolaan khusus admin. */
+const wafOr404 = (id) => { const f = wafById(id); if (!f) throw new HttpError(404, 'Flow tidak ditemukan. Sinkronkan dari Meta.'); return f; };
+// Muat detail + Flow JSON terbaru dari Meta. JSON diunduh dari download_url aset (CDN Meta).
+async function wafRefresh(f) {
+  wafUpsert(await graph('get', f.id, { params: { fields: WAF_FIELDS } }));
+  const assets = await graph('get', `${f.id}/assets`).catch(() => ({ data: [] }));
+  const asset = (assets.data || []).find((a) => a.asset_type === 'FLOW_JSON');
+  if (asset?.download_url && /^https:\/\//.test(asset.download_url)) {
+    try {
+      const r = await axios.get(asset.download_url, { responseType: 'text', timeout: 20000, maxContentLength: WAF_JSON_MAX, transformResponse: [(d) => d] });
+      f.json = String(r.data);
+    } catch (e) { console.warn('[waflow] unduh JSON gagal', e.message); }
+  }
+  save();
+  return f;
+}
+function wafJsonOrThrow(text) {
+  const json = typeof text === 'string' ? text : '';
+  if (!json.trim()) throw new HttpError(400, 'Flow JSON kosong.');
+  if (Buffer.byteLength(json) > WAF_JSON_MAX) throw new HttpError(400, 'Flow JSON maksimal 1 MB.');
+  try { JSON.parse(json); } catch (e) { throw new HttpError(400, 'Flow JSON tidak valid: ' + e.message); }
+  return json;
+}
+const wafCategories = (v) => {
+  const cats = [...new Set((Array.isArray(v) ? v : []).filter((c) => WAF_CATEGORIES.includes(c)))];
+  if (!cats.length) throw new HttpError(400, 'Pilih minimal satu kategori.');
+  return cats;
+};
+app.get('/api/wa-flows', (req, res) => {
+  const rows = db.waFlows.slice().sort((a, b) => String(a.name).localeCompare(String(b.name)));
+  res.json({ categories: WAF_CATEGORIES, flows: rows.map((f) => (req.user.role === 'admin' ? wafPublic(f) : { id: f.id, name: f.name, status: f.status, screens: wafScreens(f.json) })) });
+});
+app.post('/api/wa-flows/sync', requireAdmin, wrap(async (req, res) => {
+  const seen = []; let after, pages = 0;
+  do {
+    const r = await graph('get', `${needWaba()}/flows`, { params: { fields: WAF_FIELDS, limit: 100, after } });
+    seen.push(...(r.data || []));
+    after = r.paging?.next ? r.paging.cursors?.after : null;
+  } while (after && ++pages < 20);
+  const ids = new Set(seen.map((x) => String(x.id)));
+  seen.forEach(wafUpsert);
+  db.waFlows = db.waFlows.filter((f) => ids.has(f.id)); // flow yang sudah dihapus di Meta (jawaban yang tersimpan tetap ada)
+  // Flow JSON dimuat untuk flow yang belum punya salinan lokal (dibutuhkan untuk memilih screen pertama)
+  for (const f of db.waFlows.filter((x) => !x.json).slice(0, 30)) await wafRefresh(f).catch(() => {});
+  audit(req, 'waflow.sync', `${seen.length} flow`); save();
+  res.json({ total: seen.length, flows: db.waFlows.map((f) => wafPublic(f)) });
+}));
+app.get('/api/wa-flows/:id', requireAdmin, wrap(async (req, res) => {
+  const f = wafOr404(req.params.id);
+  if (req.query.refresh !== '0') await wafRefresh(f).catch((e) => { f.lastError = e.message; });
+  res.json({ ...wafPublic(f, true), lastError: f.lastError || null });
+}));
+app.post('/api/wa-flows', requireAdmin, wrap(async (req, res) => {
+  const name = str(req.body.name, 200);
+  if (!name) throw new HttpError(400, 'Nama flow wajib diisi.');
+  const data = { name, categories: wafCategories(req.body.categories) };
+  if (req.body.cloneFlowId) data.clone_flow_id = String(wafOr404(req.body.cloneFlowId).id);
+  else if (req.body.json) data.flow_json = wafJsonOrThrow(req.body.json);
+  const r = await graph('post', `${needWaba()}/flows`, { data });
+  // Flow dibuat sebagai DRAFT; error validasi JSON dikembalikan Meta tanpa menggagalkan pembuatan
+  const f = wafUpsert({ id: r.id, name, categories: data.categories, status: 'DRAFT', validation_errors: r.validation_errors || [] });
+  if (data.flow_json) f.json = data.flow_json;
+  await wafRefresh(f).catch(() => {});
+  audit(req, 'waflow.create', `${name}${data.clone_flow_id ? ' (salinan)' : ''}`); save();
+  res.json(wafPublic(f, true));
+}));
+app.patch('/api/wa-flows/:id', requireAdmin, wrap(async (req, res) => {
+  const f = wafOr404(req.params.id), data = {};
+  if (req.body.name !== undefined) { data.name = str(req.body.name, 200); if (!data.name) throw new HttpError(400, 'Nama flow wajib diisi.'); }
+  if (req.body.categories !== undefined) data.categories = wafCategories(req.body.categories);
+  if (!Object.keys(data).length) throw new HttpError(400, 'Tidak ada perubahan.');
+  await graph('post', f.id, { data });
+  wafUpsert({ id: f.id, ...data });
+  audit(req, 'waflow.update', f.name); save();
+  res.json(wafPublic(f, true));
+}));
+// Unggah Flow JSON (hanya DRAFT). Meta mengembalikan validation_errors; flow tetap tersimpan sebagai draf.
+app.put('/api/wa-flows/:id/json', requireAdmin, wrap(async (req, res) => {
+  const f = wafOr404(req.params.id);
+  if (f.status !== 'DRAFT') throw new HttpError(400, `Flow berstatus ${f.status} tidak dapat diubah. Gandakan (clone) untuk membuat versi baru.`);
+  const json = wafJsonOrThrow(req.body.json);
+  const fd = new FormData();
+  fd.append('name', 'flow.json');
+  fd.append('asset_type', 'FLOW_JSON');
+  fd.append('file', new Blob([json], { type: 'application/json' }), 'flow.json');
+  const r = await graph('post', `${f.id}/assets`, { data: fd });
+  f.json = json; f.validationErrors = r.validation_errors || [];
+  await wafRefresh(f).catch(() => {});
+  f.json = json; // salinan yang baru diunggah, walau unduhan aset belum diperbarui CDN
+  audit(req, 'waflow.json', `${f.name}: ${f.validationErrors.length} error validasi`); save();
+  res.json(wafPublic(f, true));
+}));
+app.post('/api/wa-flows/:id/preview', requireAdmin, wrap(async (req, res) => {
+  const f = wafOr404(req.params.id);
+  const r = await graph('get', f.id, { params: { fields: `preview.invalidate(${req.body.invalidate ? 'true' : 'false'})` } });
+  f.preview = r.preview ? { url: r.preview.preview_url, expiresAt: r.preview.expires_at } : null; save();
+  res.json(f.preview || {});
+}));
+app.post('/api/wa-flows/:id/:action(publish|deprecate)', requireAdmin, wrap(async (req, res) => {
+  const f = wafOr404(req.params.id), action = req.params.action;
+  if (action === 'publish' && f.status !== 'DRAFT') throw new HttpError(400, 'Hanya flow DRAFT yang dapat diterbitkan.');
+  if (action === 'publish' && f.validationErrors?.length) throw new HttpError(400, 'Perbaiki error validasi Flow JSON sebelum menerbitkan.');
+  if (action === 'deprecate' && f.status !== 'PUBLISHED' && f.status !== 'THROTTLED') throw new HttpError(400, 'Hanya flow yang sudah terbit yang dapat dinonaktifkan.');
+  await graph('post', `${f.id}/${action}`);
+  await wafRefresh(f).catch(() => {});
+  audit(req, 'waflow.' + action, f.name); save();
+  res.json(wafPublic(f, true));
+}));
+app.delete('/api/wa-flows/:id', requireAdmin, wrap(async (req, res) => {
+  const f = wafOr404(req.params.id);
+  if (f.status !== 'DRAFT') throw new HttpError(400, 'Hanya flow DRAFT yang dapat dihapus. Flow yang sudah terbit hanya dapat dinonaktifkan (deprecate).');
+  const used = db.flows.filter((x) => Object.values(x.nodes).some((n) => n.type === 'waflow' && n.cfg.flowId === f.id)).map((x) => x.name);
+  if (used.length) throw new HttpError(400, `Flow masih dipakai di Flow otomatis: ${used.join(', ')}.`);
+  await graph('delete', f.id);
+  db.waFlows = db.waFlows.filter((x) => x.id !== f.id);
+  audit(req, 'waflow.delete', f.name); save();
+  res.json({ ok: true });
+}));
+// Jawaban formulir per flow (isian disimpan apa adanya dari response_json)
+function wafResponseRows(flowId) {
+  return wafSubmissions(flowId).slice().reverse().map((s) => {
+    const contact = byId('contacts', s.contactId);
+    return { id: s.id, status: s.status, sentAt: s.sentAt, completedAt: s.completedAt, via: s.via, mode: s.mode, sentBy: s.sentBy,
+      conversationId: s.conversationId, contact: contact ? contactLabel(contact) : '', phone: contact?.phone || '', response: s.response || null };
+  });
+}
+app.get('/api/wa-flows/:id/responses', requireAdmin, (req, res) => {
+  const rows = wafResponseRows(req.params.id);
+  res.json({ total: rows.length, completed: rows.filter((r) => r.status === 'completed').length, rows: rows.slice(0, 500) });
+});
+app.get('/api/wa-flows/:id/responses.csv', requireAdmin, (req, res) => {
+  const rows = wafResponseRows(req.params.id).filter((r) => r.status === 'completed');
+  const keys = [...new Set(rows.flatMap((r) => Object.keys(r.response || {})))];
+  const cell = (v) => csvCell(v && typeof v === 'object' ? JSON.stringify(v) : v);
+  const iso = (t) => (t ? new Date(t).toISOString() : '');
+  const lines = [['diisi', 'dikirim', 'nomor', 'kontak', 'cara_kirim', ...keys].map(csvCell).join(','),
+    ...rows.map((r) => [iso(r.completedAt), iso(r.sentAt), r.phone, r.contact, r.via, ...keys.map((k) => r.response?.[k])].map(cell).join(','))];
+  audit(req, 'waflow.export', `${req.params.id}: ${rows.length} baris`);
+  res.set('Content-Disposition', `attachment; filename="flow-${req.params.id}.csv"`).type('text/csv').send('﻿' + lines.join('\n'));
+});
 app.get('/api/audit', requireAdmin, (req, res) => {
   const q = str(req.query.q, 100).toLowerCase();
   let rows = db.audit.slice().reverse();
@@ -2783,13 +3767,33 @@ app.post('/api/media', upload.single('file'), wrap(async (req, res) => {
   const kind = str(req.body.kind, 20);
   const rule = MEDIA_RULES[kind];
   if (!rule || !req.file) throw new HttpError(400, 'File dan jenis media wajib diisi.');
-  if (rule.mimes && !rule.mimes.includes(req.file.mimetype)) throw new HttpError(400, `Format ${req.file.mimetype} tidak didukung untuk ${kind}. Didukung: ${rule.mimes.join(', ')}`);
-  if (req.file.size > rule.max * 1024 * 1024) throw new HttpError(400, `Ukuran maksimal ${kind}: ${rule.max} MB.`);
-  const id = await uploadMedia(req.file);
-  res.json({ id, mime: req.file.mimetype, filename: req.file.originalname, size: req.file.size });
+  const file = req.file, ext = path.extname(file.originalname || '').slice(1).toLowerCase();
+  const baseMime = String(file.mimetype || '').split(';')[0].toLowerCase();
+  if (kind === 'document' && (!baseMime || baseMime === 'application/octet-stream') && DOC_MIMES[ext]) file.mimetype = DOC_MIMES[ext];
+  else file.mimetype = baseMime || file.mimetype;
+  if (rule.mimes && !rule.mimes.includes(file.mimetype)) throw new HttpError(400, `Format ${file.mimetype || 'tidak dikenal'} tidak didukung untuk ${kind}. Didukung: ${rule.mimes.join(', ')}`);
+  if (file.size > rule.max * 1024 * 1024) throw new HttpError(400, `Ukuran maksimal ${kind}: ${rule.max >= 1 ? rule.max + ' MB' : rule.max * 1024 + ' KB'}.`);
+  const extra = {};
+  if (kind === 'sticker') Object.assign(extra, { animated: checkSticker(file.buffer).animated });
+  if (kind === 'voice') {
+    // Voice note WhatsApp: OGG/Opus mono. WebM (Chrome/Edge) di-remux; MP4/AAC (Safari) dikirim sebagai audio biasa.
+    let info = null;
+    if (file.mimetype.endsWith('/webm')) {
+      try { info = webmToOgg(file.buffer); } catch (e) { throw e instanceof HttpError ? e : new HttpError(400, 'Rekaman tidak dapat dikonversi: ' + e.message); }
+      Object.assign(file, { buffer: info.buffer, size: info.buffer.length, mimetype: 'audio/ogg', originalname: 'voice.ogg' });
+    } else if (file.mimetype === 'audio/ogg') {
+      info = oggOpusInfo(file.buffer);
+      if (!info) throw new HttpError(400, 'Rekaman OGG harus memakai codec Opus.');
+      file.originalname = 'voice.ogg';
+    } else { file.mimetype = 'audio/mp4'; file.originalname = 'voice.m4a'; }
+    Object.assign(extra, { voice: !!info && info.channels === 1, duration: info ? Math.round(info.duration * 10) / 10 : Number(req.body.duration) || 0 });
+  }
+  const id = await uploadMedia(file);
+  cacheMedia(id, file.buffer, { mime: file.mimetype, size: file.size, filename: file.originalname });
+  res.json({ id, mime: file.mimetype, filename: file.originalname, size: file.size, ...extra });
 }));
-// Proxy media: token tetap di server
-app.get('/api/media/:id', wrap(async (req, res) => {
+// Proxy media (token tetap di server). Hak akses mengikuti percakapan/grup pemilik media.
+function mediaOwnerOr404(req) {
   if (!/^\d+$/.test(req.params.id)) throw new HttpError(400, 'ID media tidak valid.');
   const owner = db.messages.find((m) => m.content?.mediaId === req.params.id);
   if (!owner) throw new HttpError(404, 'Media tidak ditemukan.');
@@ -2798,20 +3802,72 @@ app.get('/api/media/:id', wrap(async (req, res) => {
     const conv = byId('conversations', owner.conversationId);
     if (!conv || !canSeeConv(req.user, conv)) throw new HttpError(404, 'Media tidak ditemukan.');
   }
-  const info = await graph('get', req.params.id);
+  return owner;
+}
+// Unduh dari Meta ke cache lokal (URL media Meta hanya berlaku ±5 menit, jadi selalu diminta ulang)
+async function fetchMediaToCache(id, filename) {
+  const hit = cachedMedia(id);
+  if (hit) return hit;
+  const info = await graph('get', id);
+  if (Number(info.file_size) > 100 * 1024 * 1024) throw new HttpError(400, 'Media lebih dari 100 MB.');
+  const tmp = mediaCacheFile(id) + '.' + uid() + '.tmp';
   try {
-    const r = await axios.get(info.url, { responseType: 'stream', headers: { Authorization: `Bearer ${meta().accessToken}` }, timeout: 60000 });
-    res.set('Content-Type', info.mime_type || r.headers['content-type'] || 'application/octet-stream');
-    res.set('Cache-Control', 'private, max-age=3600');
-    if (req.query.download) res.attachment(owner.content.filename || `media-${req.params.id}`);
-    r.data.pipe(res);
-  } catch (e) { throw metaError(e); }
+    const r = await axios.get(info.url, { responseType: 'stream', headers: { Authorization: `Bearer ${meta().accessToken}` }, timeout: 120000 });
+    await new Promise((ok, no) => { const w = fs.createWriteStream(tmp); r.data.pipe(w); w.on('finish', ok); w.on('error', no); r.data.on('error', no); });
+  } catch (e) { fs.rmSync(tmp, { force: true }); throw e.response ? metaError(e) : new HttpError(502, 'Gagal mengunduh media dari Meta: ' + e.message); }
+  fs.renameSync(tmp, mediaCacheFile(id));
+  const m = { mime: info.mime_type || 'application/octet-stream', size: Number(info.file_size) || fs.statSync(mediaCacheFile(id)).size, filename: filename || '' };
+  fs.writeFileSync(mediaCacheFile(id) + '.json', JSON.stringify(m));
+  return { file: mediaCacheFile(id), ...m };
+}
+app.get('/api/media/:id', wrap(async (req, res) => {
+  const owner = mediaOwnerOr404(req);
+  const c = await fetchMediaToCache(req.params.id, owner.content.filename);
+  res.type(c.mime);
+  if (req.query.download) res.attachment(owner.content.filename || c.filename || `media-${req.params.id}`);
+  res.sendFile(c.file, { headers: { 'Cache-Control': 'private, max-age=86400' } }); // sendFile mendukung Range (seek audio/video)
+}));
+app.get('/api/media/:id/info', wrap(async (req, res) => {
+  mediaOwnerOr404(req);
+  const c = cachedMedia(req.params.id);
+  if (c) return res.json({ mime: c.mime, size: c.size });
+  const info = await graph('get', req.params.id);
+  res.json({ mime: info.mime_type || '', size: Number(info.file_size) || 0 });
+}));
+
+/* Pustaka stiker */
+app.get('/api/stickers', (req, res) => {
+  res.json((db.stickers || []).slice().sort((a, b) => b.lastUsedAt - a.lastUsedAt).map((s) => ({ id: s.id, animated: s.animated, size: s.size })));
+});
+app.get('/api/stickers/:id', (req, res) => {
+  const s = stickerOr404(req.params.id);
+  res.set('Cache-Control', 'private, max-age=604800').type('image/webp').sendFile(stickerFile(s.id));
+});
+app.post('/api/stickers', upload.single('file'), wrap(async (req, res) => {
+  let buf;
+  if (req.file) buf = req.file.buffer;
+  else if (req.body.fromMediaId) { // simpan stiker yang diterima ke pustaka
+    req.params.id = String(req.body.fromMediaId);
+    const owner = mediaOwnerOr404(req);
+    if (owner.type !== 'sticker') throw new HttpError(400, 'Pesan ini bukan stiker.');
+    buf = fs.readFileSync((await fetchMediaToCache(req.params.id)).file);
+  } else throw new HttpError(400, 'Pilih file stiker.');
+  const s = addSticker(buf, req.user.name);
+  audit(req, 'sticker.add', s.id);
+  res.json({ id: s.id, animated: s.animated, size: s.size });
+}));
+app.delete('/api/stickers/:id', requireAdmin, wrap(async (req, res) => {
+  const s = stickerOr404(req.params.id);
+  db.stickers = db.stickers.filter((x) => x.id !== s.id); fs.rmSync(stickerFile(s.id), { force: true });
+  audit(req, 'sticker.delete', s.id); save();
+  res.json({ ok: true });
 }));
 
 app.post('/api/conversations/:id/messages', wrap(async (req, res) => {
   const conv = convOr404(req);
   const contact = byId('contacts', conv.contactId);
   const type = str(req.body.type, 40);
+  if (type === 'flow' && req.body.mode === 'draft' && req.user.role !== 'admin') throw new HttpError(403, 'Hanya admin yang dapat mengirim flow dalam mode draft.');
   if (type === 'template') {
     const tpl = findTemplate(str(req.body.name, 512), str(req.body.language, 15));
     if (!tpl) throw new HttpError(400, 'Template tidak ditemukan. Sinkronkan template terlebih dahulu.');
@@ -2823,6 +3879,24 @@ app.post('/api/conversations/:id/messages', wrap(async (req, res) => {
   }
   // Aturan jendela layanan 24 jam: pesan bebas hanya bila pelanggan mengirim pesan dalam 24 jam terakhir
   if (!windowOpen(conv)) throw new HttpError(400, 'Jendela layanan 24 jam sudah tertutup. Kirim pesan template yang disetujui untuk membuka kembali percakapan.');
+  if (type === 'reaction') {
+    // Reaksi ditempelkan ke pesan target (bukan gelembung baru). Emoji kosong = hapus reaksi.
+    const target = byId('messages', str(req.body.messageId, 40));
+    if (!target || target.conversationId !== conv.id || !target.wamid) throw new HttpError(400, 'Pesan ini tidak dapat diberi reaksi.');
+    if (now() - target.timestamp > 30 * 86400000) throw new HttpError(400, 'Reaksi hanya dapat diberikan pada pesan yang berumur ≤ 30 hari.');
+    const emoji = typeof req.body.emoji === 'string' ? req.body.emoji.trim().slice(0, 16) : '';
+    if (emoji && !/\p{Extended_Pictographic}/u.test(emoji)) throw new HttpError(400, 'Reaksi harus berupa emoji.');
+    await sendToMeta({ messaging_product: 'whatsapp', recipient_type: 'individual', to: contact.phone, type: 'reaction', reaction: { message_id: target.wamid, emoji } },
+      { source: 'inbox', contact, conversation: conv, userId: req.user.id, userName: req.user.name });
+    target.myReaction = emoji || null; save();
+    emitConv(conv, 'message:update', { message: target });
+    return res.json(target);
+  }
+  if (type === 'sticker' && req.body.stickerId) {
+    const st = stickerOr404(req.body.stickerId);
+    Object.assign(req.body, { mediaId: await ensureStickerMedia(st), animated: st.animated });
+    st.lastUsedAt = now(); save();
+  }
   const built = buildOutbound(type, req.body);
   const payload = { messaging_product: 'whatsapp', recipient_type: 'individual', to: contact.phone, type: built.type || type, ...built.payload };
   if (req.body.replyTo) { const ctx = byId('messages', req.body.replyTo); if (ctx?.wamid) payload.context = { message_id: ctx.wamid }; }

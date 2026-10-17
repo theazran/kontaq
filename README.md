@@ -18,7 +18,8 @@ Buka aplikasi → buat akun admin pertama → **Pengaturan › Koneksi Meta**:
 2. Klik **Uji koneksi**, lalu **Subscribe app ke WABA**.
 3. Di Meta App Dashboard › WhatsApp › Configuration, isi Callback URL `PUBLIC_URL/webhook` dan
    Verify Token yang sama, lalu subscribe field `messages`, `message_template_status_update`, `calls`
-   (dan untuk fitur Grup: `group_lifecycle_update`, `group_participants_update`, `group_settings_update`, `group_status_update`).
+   (dan untuk fitur Grup: `group_lifecycle_update`, `group_participants_update`, `group_settings_update`, `group_status_update`;
+   untuk WhatsApp Flows: `flows`).
 
 Webhook wajib HTTPS publik. Untuk pengujian lokal gunakan tunnel (mis. `cloudflared`/`ngrok`).
 
@@ -72,8 +73,44 @@ Flow berbentuk pohon: langkah **Kondisi** membuat cabang **Ya**/**Tidak**, sehin
 
 Flow aktif dicek dari atas ke bawah. Flow pertama yang menjalankan aksi menghentikan pengecekan, dan Auto reply tidak dijalankan
 untuk pesan itu (tidak ada balasan ganda). Pesan hanya dikirim selama jendela layanan 24 jam terbuka (dicek ulang setelah Tunggu),
-maksimal 10 pesan otomatis per jam per percakapan. Langkah Tunggu tersimpan di DB dan berlanjut setelah server restart; dibatalkan
+maksimal 30 pesan otomatis per jam per percakapan. Langkah Tunggu tersimpan di DB dan berlanjut setelah server restart; dibatalkan
 bila pelanggan mengirim pesan lagi atau CS membalas (bisa dimatikan). Riwayat jalan tampil di daftar flow dan di editor.
+
+### Tanya jawab, variabel, dan API Request
+
+- **Tanya pelanggan:** kirim pertanyaan lalu tunggu balasan berikutnya, simpan ke variabel (`{{nama}}` dan `{{nama_label}}`).
+  Jenis jawaban: teks (panjang & format divalidasi), pilihan (≤ 3 tombol, selebihnya pesan daftar), atau tanggal (tombol tanggal
+  terdekat + "Tanggal lain"; ketikan `21-10-2026`, `21/10/2026`, `2026-10-21`, `21 okt`, `besok` diterima; nilai selalu `YYYY-MM-DD`).
+  Cabang **Dijawab** / **Tidak valid** (setelah kesempatan ulang habis). Kata pembatal (bawaan `batal`) dan batas waktu menjawab
+  diatur per flow/langkah; bila CS membalas, pertanyaan yang menunggu dibatalkan.
+- **API Request:** GET/POST ke HTTPS dengan variabel di URL (otomatis di-URL-encode) atau body JSON; respons JSON disimpan ke variabel
+  (`{{hasil.field}}`, `{{hasil_status}}`, `{{hasil_error}}`). Cabang **Berhasil** bila HTTP 2xx, JSON valid, dan field penanda (opsional)
+  sesuai; selain itu **Gagal**. Pengaman: timeout 1–20 dtk, respons maks. 512 KB, tanpa redirect, host tidak boleh berisi variabel,
+  alamat jaringan lokal/privat ditolak (termasuk IP literal & DNS). API key/token disimpan di **Kredensial API** (terenkripsi) dan
+  dipakai sebagai `{{secret.NAMA}}`; tidak pernah dikirim ke browser atau dicatat di log.
+- **Variabel & filter** di semua teks: `{{tanggal|tanggal}}`, `{{item.jam|jam}}`, `{{item.harga|rupiah}}`,
+  `{{x|default:-}}`, `{{data.length}}`. Kondisi **Variabel**: sama dengan, mengandung, lebih/kurang dari, kosong/tidak kosong.
+- **Kirim daftar:** langkah Kirim pesan dapat mengulang daftar dari variabel (mis. hasil API), dipecah per N item (maks. 10 pesan).
+- **Uji flow** dapat memakai jawaban uji dan memanggil API GET sungguhan untuk melihat struktur respons asli.
+
+## WhatsApp Flows (admin)
+
+Menu **WhatsApp Flows** mengelola formulir interaktif resmi WhatsApp lewat
+[Flows API](https://developers.facebook.com/docs/whatsapp/flows/reference/flowsapi) (memakai WABA ID & token di Koneksi Meta).
+
+- **Kelola:** sinkronkan flow dari WABA, buat flow baru dari contoh (formulir kontak, survei, janji temu) atau gandakan (clone),
+  ubah Flow JSON di editor (Meta memvalidasi dan mengembalikan error per baris), pratinjau resmi Meta, terbitkan, nonaktifkan
+  (deprecate), hapus draf. Flow yang sudah terbit tidak dapat diubah — gandakan untuk versi baru.
+- **Kirim:** dari Inbox (ikon formulir di kolom pesan) selama jendela 24 jam terbuka; admin dapat mengirim mode draf untuk uji.
+  Di luar jendela 24 jam, kirim template yang memiliki tombol **Flow** — Kontaq mengisi `flow_token` otomatis (juga untuk campaign).
+- **Jawaban:** `nfm_reply.response_json` dicocokkan dengan pengiriman lewat `flow_token`, tampil sebagai daftar isian di chat dan
+  di tab **Jawaban** per flow (ekspor CSV). Kunci `payload` pada aksi `complete` di Footer menjadi nama isian.
+- **Flow otomatis:** langkah **Kirim WhatsApp Flow** mengirim formulir lalu menunggu jawaban; isian tersedia sebagai
+  `{{formulir.nama_field}}`. Cabang **Diisi** / **Tidak diisi** (dijalankan saat batas waktu habis, mis. untuk pengingat).
+- **Webhook `flows`:** perubahan status (terbit, dibatasi, diblokir, nonaktif) dan peringatan kesehatan dicatat di halaman flow.
+
+Kontaq mendukung flow tanpa endpoint (navigasi antar-screen + `complete`). Flow ber-endpoint (`data_exchange`) dapat dikirim
+dan jawabannya dicatat, tetapi pertukaran datanya dilayani oleh endpoint terenkripsi milik Anda sendiri.
 
 ## Grup WhatsApp (admin)
 
@@ -92,6 +129,34 @@ Syarat: nomor bisnis berstatus **Official Business Account (OBA)**; grup hanya-u
 Buat, hapus, ubah pengaturan, dan keluarkan peserta bersifat asinkron di Meta: Kontaq menampilkan "Menunggu konfirmasi Meta"
 dan baru mengubah data setelah webhook grup tiba. Pesan masuk dari grup (`group_id`) tidak dibuat sebagai percakapan pribadi.
 Grup yang dibuat di luar Kontaq dengan nomor yang sama tercatat otomatis saat event webhook-nya masuk.
+
+## Kirim media & pesan kaya (Inbox)
+
+Composer mengikuti alur WhatsApp: ikon emoji, tombol ＋ untuk lampiran, dan tombol kanan berubah antara **mikrofon**
+(kosong) dan **kirim** (ada teks).
+
+- **Foto & video:** pilih beberapa file sekaligus, seret & lepas ke area chat, atau tempel (Ctrl+V). Layar pratinjau
+  menampilkan tiap file dengan keterangan per file, tombol **HD**, pilihan *kirim sebagai dokumen*, progres unggah per file,
+  dan kirim beruntun. Gambar dikompres ke sisi terpanjang 1600 px (HD: 4096 px); WebP/GIF/BMP/AVIF dikonversi ke JPEG.
+  File di luar batas Meta (video > 16 MB, format tak didukung) otomatis dialihkan menjadi dokumen.
+- **Dokumen:** kartu dengan ikon per jenis (PDF/DOC/XLS/PPT/ZIP), nama, ukuran, dan tombol unduh. MIME diperbaiki dari
+  ekstensi bila browser mengirim `application/octet-stream`.
+- **Pesan suara:** rekam dari composer (jeda, batal, gelombang langsung, maks. 15 menit). Rekaman WebM/Opus Chrome/Edge
+  di-remux ke **OGG/Opus** di server (syarat `voice: true` Meta) tanpa encode ulang; Safari (AAC) dikirim sebagai audio biasa.
+  Pemutar menampilkan gelombang, durasi berjalan, kecepatan 1×/1,5×/2×, dan klik untuk melompat (HTTP Range).
+- **Stiker:** pustaka stiker bersama; buat dari gambar apa pun (otomatis 512×512 WebP ≤ 100 KB) atau simpan stiker yang
+  dikirim pelanggan. Validasi ukuran & dimensi sesuai aturan Meta.
+- **Lokasi:** peta Leaflet/OpenStreetMap — klik peta, geser penanda, cari alamat (Nominatim), atau pakai lokasi saat ini.
+  Di chat, lokasi tampil sebagai peta statis yang dapat dibuka di Google Maps.
+- **Kontak (vCard):** pilih dari daftar Kontak (otomatis mengisi `wa_id`) atau isi manual, maks. 10 per pesan. Kartu kontak
+  masuk punya tombol **Kirim pesan** dan **Simpan kontak**.
+- **Reaksi emoji:** arahkan kursor ke pesan → ikon senyum → emoji cepat atau pemilih lengkap; klik reaksi Anda untuk menghapus.
+  Reaksi pelanggan dan reaksi Anda tampil terpisah.
+- **Lainnya:** lightbox gambar (navigasi ←/→, unduh, Esc), kamera (webcam di desktop, kamera langsung di HP),
+  emoji picker, serta balas dengan kutipan (klik atau geser pesan di layar sentuh).
+
+Media di-cache di `data/media-cache` (maks. 2 GB, 30 hari) sehingga tampil cepat dan mendukung seek; URL media Meta sendiri
+hanya berlaku beberapa menit. Semua unggahan tetap melewati `/api/media` dengan validasi MIME dan ukuran sesuai Cloud API.
 
 ## Kepuasan pelanggan (CSAT)
 
