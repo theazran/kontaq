@@ -242,9 +242,9 @@
   }[s] || '');
   const statusBadge = (s) => {
     const map = { APPROVED: 'green', ACTIVE: 'green', done: 'green', running: 'green', delivered: 'green', read: 'green', open: 'green', ENABLED: 'green',
-      PENDING: 'amber', IN_APPEAL: 'amber', paused: 'amber', pending: 'amber', queued: 'amber', PAUSED: 'amber', ringing: 'amber',
+      PENDING: 'amber', IN_APPEAL: 'amber', paused: 'amber', pending: 'amber', scheduled: 'amber', queued: 'amber', PAUSED: 'amber', ringing: 'amber',
       REJECTED: 'red', DISABLED: 'red', failed: 'red', cancelled: 'red', rejected: 'red', FLAGGED: 'red' };
-    const label = { accepted: 'Diterima Meta', open: 'Terbuka', pending: 'Menunggu', closed: 'Selesai', draft: 'Draf', running: 'Berjalan', paused: 'Dijeda', done: 'Selesai', cancelled: 'Dibatalkan', queued: 'Antre', sent: 'Terkirim', delivered: 'Diterima', read: 'Dibaca', failed: 'Gagal', skipped: 'Dilewati' }[s] || s;
+    const label = { accepted: 'Diterima Meta', open: 'Terbuka', pending: 'Menunggu', closed: 'Selesai', draft: 'Draf', scheduled: 'Terjadwal', running: 'Berjalan', paused: 'Dijeda', done: 'Selesai', cancelled: 'Dibatalkan', queued: 'Antre', sent: 'Terkirim', delivered: 'Diterima', read: 'Dibaca', failed: 'Gagal', skipped: 'Dilewati' }[s] || s;
     return `<span class="badge ${map[s] ? 'badge-' + map[s] : ''}"><span class="dot"></span>${esc(label)}</span>`;
   };
 
@@ -255,6 +255,7 @@
     templates: { rows: [], syncedAt: 0, loaded: false },
     contacts: { q: '', label: '', page: 1 },
     settingsTab: null,
+    rem: { list: [], users: [], loaded: false, tab: 'due', all: false, q: '' },
     call: null, pc: null,
   };
   // Menu dikelompokkan per fungsi; bagian tanpa menu yang boleh diakses (mis. agen) disembunyikan
@@ -269,6 +270,7 @@
     { id: 'dashboard', label: 'Dashboard', icon: 'dash', section: 'main' },
     { id: 'inbox', label: 'Inbox', icon: 'inbox', section: 'main' },
     { id: 'calls', label: 'Panggilan', icon: 'phone', section: 'main' },
+    { id: 'reminders', label: 'Pengingat', icon: 'bell', section: 'main' },
     { id: 'contacts', label: 'Kontak', icon: 'users', section: 'customers' },
     { id: 'groups', label: 'Grup', icon: 'group', section: 'customers', admin: true },
     { id: 'csat', label: 'Kepuasan (CSAT)', icon: 'star', section: 'customers' },
@@ -289,7 +291,7 @@
     $('#tabbar').innerHTML = tabs.map(([id, label]) => `<a href="#/${id}" class="tab-item ${S.view === id ? 'active' : ''}">${ICON[VIEWS.find((x) => x.id === id).icon]}<span>${label}</span>${id === 'inbox' && unread ? `<span class="tab-badge">${unread > 99 ? '99+' : unread}</span>` : ''}</a>`).join('')
       + `<button class="tab-item ${inMenu ? 'active' : ''}" data-act="nav-open">${ICON.menu}<span>Lainnya</span></button>`;
     document.body.classList.toggle('chat-open', S.view === 'inbox' && !!S.inbox.activeId);
-    const item = (v) => `<a href="#/${v.id}" class="nav-item ${S.view === v.id ? 'active' : ''}" ${S.view === v.id ? 'aria-current="page"' : ''}>${ICON[v.icon]}<span class="flex-1 truncate">${v.label}</span>${v.id === 'inbox' && unread ? `<span class="badge badge-green">${unread}</span>` : ''}</a>`;
+    const item = (v) => `<a href="#/${v.id}" class="nav-item ${S.view === v.id ? 'active' : ''}" ${S.view === v.id ? 'aria-current="page"' : ''}>${ICON[v.icon]}<span class="flex-1 truncate">${v.label}</span>${v.id === 'inbox' && unread ? `<span class="badge badge-green">${unread}</span>` : ''}${v.id === 'reminders' && remDueCount() ? `<span class="badge badge-red">${remDueCount()}</span>` : ''}</a>`;
     $('#nav').innerHTML = NAV_SECTIONS.map((s) => {
       const items = VIEWS.filter((v) => v.section === s.id && (!v.admin || S.isAdmin));
       if (!items.length) return '';
@@ -305,9 +307,14 @@
     $('#sidebar').classList.toggle('md:flex', true);
     renderNav();
     const v = $('#view'); v.className = 'flex-1 min-h-0 overflow-y-auto scroll-thin';
-    ({ dashboard: viewDashboard, inbox: () => viewInbox(arg), contacts: viewContacts, templates: viewTemplates, campaigns: viewCampaigns, messagelog: viewMessageLog, autoreply: viewAutoReply, flows: () => viewFlows(arg), groups: () => viewGroups(arg), waflows: () => viewWaFlows(arg), csat: viewCsat, calls: viewCalls, settings: () => viewSettings(arg) })[S.view]();
+    ({ dashboard: viewDashboard, inbox: () => viewInbox(arg), contacts: viewContacts, templates: viewTemplates, campaigns: viewCampaigns, messagelog: viewMessageLog, autoreply: viewAutoReply, flows: () => viewFlows(arg), groups: () => viewGroups(arg), waflows: () => viewWaFlows(arg), csat: viewCsat, reminders: viewReminders, calls: viewCalls, settings: () => viewSettings(arg) })[S.view]();
   }
-  window.addEventListener('hashchange', route);
+  let lastHash = location.hash, skipHash = false;
+  window.addEventListener('hashchange', () => {
+    if (skipHash) { skipHash = false; lastHash = location.hash; return; }
+    if (wfbUnsaved() && !confirm('Perubahan pada flow belum disimpan. Tinggalkan halaman ini?')) { skipHash = true; location.hash = lastHash; return; }
+    lastHash = location.hash; route();
+  });
 
   // Delegasi klik global (data-act)
   const ACT = {
@@ -643,6 +650,7 @@
         <select class="select h-7 text-xs w-28 hidden sm:block" id="cv-status" aria-label="Status percakapan">${[['open', 'Terbuka'], ['pending', 'Menunggu'], ['closed', 'Selesai']].map(([k, l]) => `<option value="${k}" ${c.status === k ? 'selected' : ''}>${l}</option>`).join('')}</select>
         <select class="select h-7 text-xs w-36 hidden sm:block" id="cv-assign" aria-label="Tugaskan ke">${assignOpts}</select>
         <button class="btn btn-ghost btn-icon ${callbackOk(c.contact) ? 'accent-ink' : ''}" id="cv-call" title="${callbackOk(c.contact) ? 'Telepon balik' : 'Minta izin telepon'}" aria-label="${callbackOk(c.contact) ? 'Telepon balik' : 'Minta izin telepon'}">${ICON.phone}</button>
+        <button class="btn btn-ghost btn-icon relative" id="cv-rem" title="Pengingat" aria-label="Pengingat">${remBtnInner(c)}</button>
         <button class="btn btn-ghost btn-icon" id="cv-info-btn" title="Info kontak" aria-label="Info kontak">${ICON.info}</button>
       </div>
       <div id="msgs" class="flex-1 overflow-y-auto overflow-x-hidden scroll-thin chat-bg px-3 md:px-6 py-4 space-y-1.5"></div>
@@ -660,6 +668,7 @@
       if (callbackOk(k)) startCallback({ id: k.id, name: k.name || k.waName || '', phone: k.phone }); else callPermissionModal(activeConv());
     });
     $('#cv-info-btn').addEventListener('click', () => { S.inbox.showInfo = !S.inbox.showInfo; renderInfo(); });
+    $('#cv-rem').addEventListener('click', () => reminderModal(activeConv()));
     $('[data-back]').addEventListener('click', () => { S.inbox.activeId = null; if (isMobile()) S.inbox.showInfo = false; });
     $('#cv-name').addEventListener('click', () => { S.inbox.showInfo = true; renderInfo(); });
     renderMessages(true); renderComposer(); renderTyping();
@@ -1615,6 +1624,7 @@
       </div>
       <div class="p-4 border-b bd"><div class="text-xs font-semibold mb-2">Profil pelanggan</div><div id="info-stats" class="text-xs space-y-1.5"><div class="ink-3">Memuat…</div></div></div>
       <div class="p-4 border-b bd" id="info-csat">${csatInfoHtml(c)}</div>
+      <div class="p-4 border-b bd" id="info-rem">${remInfoHtml(c)}</div>
       <form id="f-contact" class="p-4 space-y-3 border-b bd">
         <div class="sm:hidden grid grid-cols-2 gap-2">
           <select class="select" id="cv-status-m" aria-label="Status percakapan">${[['open', 'Terbuka'], ['pending', 'Menunggu'], ['closed', 'Selesai']].map(([v, l]) => `<option value="${v}" ${c.status === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
@@ -2007,10 +2017,24 @@
   function campaignRow(c) {
     const done = c.total - (c.counts.queued || 0), pct = c.total ? Math.round((done / c.total) * 100) : 0;
     const sent = c.counts.sent + c.counts.delivered + c.counts.read;
+    if (c.series) return campaignSeriesRow(c);
     return `<tr data-cid="${c.id}"><td class="font-medium">${esc(c.name)}${c.lastError ? `<div class="text-[11px] danger-ink truncate max-w-[14rem]" title="${esc(c.lastError)}">${esc(c.lastError)}</div>` : ''}</td>
-      <td class="mono text-xs">${esc(c.templateName)}</td><td>${statusBadge(c.status)}</td>
+      <td class="mono text-xs">${esc(c.templateName)}</td><td>${statusBadge(c.status)}${campaignWhen(c)}</td>
       <td class="w-32"><div class="h-1.5 rounded-full surface-2 overflow-hidden"><div class="h-full rounded-full" style="width:${pct}%;background:var(--accent)"></div></div><div class="text-[11px] ink-3 mt-0.5">${fmtNum(done)} / ${fmtNum(c.total)}</div></td>
       <td class="text-right">${fmtNum(sent)}</td><td class="text-right">${fmtNum(c.counts.delivered + c.counts.read)}</td><td class="text-right">${fmtNum(c.counts.read)}</td><td class="text-right ${c.counts.failed ? 'danger-ink' : ''}">${fmtNum(c.counts.failed)}</td>
+      <td class="text-xs ink-3 whitespace-nowrap">${fmtDT(c.createdAt)}</td><td class="text-right"><button class="btn btn-sm" data-open="${c.id}">Detail</button></td></tr>`;
+  }
+  function campaignWhen(c) {
+    if (c.status === 'scheduled') return `<div class="text-[11px] ink-3 mt-0.5 whitespace-nowrap">${ICON.clock.replace('<svg', '<svg width="10" height="10" style="display:inline;vertical-align:-1px"')} ${fmtTz(c.nextRunAt)}</div>`;
+    if (c.waitingWindow) return `<div class="text-[11px] ink-3 mt-0.5 whitespace-nowrap">Menunggu jam kirim ${c.sendWindow.start.replace(':', '.')}</div>`;
+    return '';
+  }
+  function campaignSeriesRow(c) {
+    const last = c.runs?.[0];
+    return `<tr data-cid="${c.id}"><td class="font-medium">${esc(c.name)} <span class="badge">Berulang</span><div class="text-[11px] ink-3">${esc(c.scheduleText)}</div>${c.lastError ? `<div class="text-[11px] danger-ink truncate max-w-[14rem]" title="${esc(c.lastError)}">${esc(c.lastError)}</div>` : ''}</td>
+      <td class="mono text-xs">${esc(c.templateName)}</td><td>${statusBadge(c.status)}${campaignWhen(c)}</td>
+      <td class="text-[11px] ink-3">${fmtNum(c.runCount || 0)}× dikirim${c.maxRuns ? ' / ' + c.maxRuns : ''}<div>±${fmtNum(c.previewTotal)} kontak per kirim</div></td>
+      <td class="text-right" colspan="4">${last ? `<span class="text-[11px] ink-3">Terakhir: ${fmtNum(last.counts.sent + last.counts.delivered + last.counts.read)} terkirim · ${fmtNum(last.counts.read)} dibaca${last.counts.failed ? ` · <span class="danger-ink">${fmtNum(last.counts.failed)} gagal</span>` : ''}</span>` : '<span class="text-[11px] ink-3">Belum pernah dikirim</span>'}</td>
       <td class="text-xs ink-3 whitespace-nowrap">${fmtDT(c.createdAt)}</td><td class="text-right"><button class="btn btn-sm" data-open="${c.id}">Detail</button></td></tr>`;
   }
   async function campaignModal() {
@@ -2024,25 +2048,49 @@
         <div id="cp-fields" class="space-y-3"></div>
         <div><label class="label">Target label (kosong = semua kontak)</label><div class="flex flex-wrap gap-x-3 gap-y-1.5">${labels.map((l) => `<label class="flex items-center gap-1.5 text-xs"><input type="checkbox" class="check" name="label" value="${esc(l)}">${esc(l)}</label>`).join('') || '<span class="text-xs ink-3">Belum ada label.</span>'}</div></div>
         <label class="flex items-center gap-2 text-xs"><input type="checkbox" class="check" name="optInOnly" checked> Hanya kontak yang sudah opt-in</label>
+        <div class="pt-3 border-t bd space-y-3">
+          <div><div class="label">Waktu kirim</div><div class="seg" id="cp-when"><button type="button" data-w="now" class="active">Draf, kirim manual</button><button type="button" data-w="later">Jadwalkan</button></div></div>
+          <div id="cp-sched" class="hidden">${schedFieldsHtml({ repeat: true, maxRuns: true })}</div>
+          <label class="flex items-center gap-2 text-xs"><input type="checkbox" class="check" name="win"> Hanya kirim pada jam tertentu</label>
+          <div id="cp-win" class="hidden"><div class="grid grid-cols-2 gap-2"><div><label class="label">Dari</label><input type="time" class="input" name="w_start" value="08:00"></div><div><label class="label">Sampai</label><input type="time" class="input" name="w_end" value="20:00"></div></div>
+            <p class="hint">Di luar jam ini antrean berhenti sementara dan otomatis lanjut saat jam kirim dibuka lagi.</p></div>
+        </div>
       </div>
-      <div><div class="label">Pratinjau (contoh)</div><div id="cp-prev"></div><p class="hint mt-3">Campaign dibuat sebagai draf. Anda dapat meninjau jumlah penerima sebelum memulai.</p></div>
+      <div><div class="label">Pratinjau (contoh)</div><div id="cp-prev"></div><p class="hint mt-3" id="cp-note">Campaign dibuat sebagai draf. Anda dapat meninjau jumlah penerima sebelum memulai.</p></div>
     </form>`, { wide: true, footer: '<button class="btn" data-act="modal-close">Batal</button><button class="btn btn-primary" id="cp-go">Buat draf</button>' });
     const f = $('#f-cp'), cur = () => tpls[f.tpl.value];
     const draw = () => { $('#cp-fields').innerHTML = tplFieldsHtml(cur(), { campaign: true }); $('#cp-prev').innerHTML = tplPreview(cur(), f); };
     f.tpl.addEventListener('change', draw);
     f.addEventListener('input', (e) => { if (e.target.name !== 'tpl') $('#cp-prev').innerHTML = tplPreview(cur(), f); });
     draw();
+    let when = 'now';
+    $$('#cp-when [data-w]').forEach((b) => b.addEventListener('click', () => {
+      when = b.dataset.w; $$('#cp-when [data-w]').forEach((x) => x.classList.toggle('active', x === b));
+      $('#cp-sched').classList.toggle('hidden', when !== 'later');
+      $('#cp-go').textContent = when === 'later' ? 'Jadwalkan' : 'Buat draf';
+      $('#cp-note').textContent = when === 'later' ? 'Penerima dihitung ulang dari filter label & opt-in setiap kali jadwal berjalan, sehingga kontak baru ikut dan yang berhenti opt-in tidak dikirimi.' : 'Campaign dibuat sebagai draf. Anda dapat meninjau jumlah penerima sebelum memulai.';
+    }));
+    $$('input', $('#cp-sched')).forEach((x) => { x.required = false; });
+    bindSched(f);
+    f.win.addEventListener('change', () => $('#cp-win').classList.toggle('hidden', !f.win.checked));
     $('#cp-go').addEventListener('click', (e) => busy(e.currentTarget, async () => {
       if (!f.reportValidity()) return;
-      const t = cur();
-      const c = await api('POST', '/api/campaigns', { name: f.name.value, templateName: t.name, language: t.language, values: readTplValues(t, f), labels: $$('input[name=label]:checked', f).map((x) => x.value), optInOnly: f.optInOnly.checked });
-      closeModal(); toast(`Draf dibuat: ${c.total} penerima.`); await viewCampaigns(); campaignDetail(c.id);
+      const t = cur(), schedule = when === 'later' ? readSched(f) : null;
+      if (schedule && (!schedule.date || !schedule.time)) throw new Error('Isi tanggal dan jam kirim.');
+      if (schedule && !(await confirmBox(`${schedSummary(schedule)}. Template berbayar sesuai tarif Meta akan dikirim otomatis tanpa konfirmasi lagi. Lanjutkan?`, 'Jadwalkan'))) return;
+      const c = await api('POST', '/api/campaigns', { name: f.name.value, templateName: t.name, language: t.language, values: readTplValues(t, f), labels: $$('input[name=label]:checked', f).map((x) => x.value), optInOnly: f.optInOnly.checked,
+        schedule, sendWindow: { enabled: f.win.checked, start: f.w_start.value, end: f.w_end.value } });
+      closeModal(); toast(schedule ? `Dijadwalkan: ${fmtTz(c.nextRunAt)} (±${c.total} penerima).` : `Draf dibuat: ${c.total} penerima.`); await viewCampaigns(); campaignDetail(c.id);
     }));
   }
   async function campaignDetail(id) {
     let c; try { c = await api('GET', `/api/campaigns/${id}`); } catch (e) { return fail(e); }
     const act = (a, label, cls = '') => `<button class="btn ${cls}" data-cact="${a}">${label}</button>`;
+    if (c.series) return campaignSeriesDetail(c, act);
     modal(c.name, `<div class="space-y-4">
+      ${c.status === 'scheduled' ? `<div class="sched-box">${ICON.clock}<div><div class="text-[13px] font-medium">Dijadwalkan ${fmtTz(c.nextRunAt, { weekday: 'long' })}</div><div class="text-[11px] ink-3">Penerima dihitung ulang dari filter saat jadwal berjalan. Daftar di bawah adalah perkiraan saat ini.</div></div></div>` : ''}
+      ${c.sendWindow ? `<div class="text-xs ink-3">Jam kirim ${c.sendWindow.start.replace(':', '.')}–${c.sendWindow.end.replace(':', '.')} (${esc(TZ)})${c.waitingWindow ? ' · <span class="warn-ink">menunggu jam kirim</span>' : ''}</div>` : ''}
+      ${c.parentId ? `<div class="text-xs ink-3">Bagian dari broadcast berulang · <button class="underline" data-parent="${c.parentId}">lihat seri</button></div>` : ''}
       <div class="flex flex-wrap items-center gap-2 text-xs">${statusBadge(c.status)}<span class="ink-3">Template <span class="mono">${esc(c.templateName)}</span> · ${esc(c.language)}</span><span class="ink-3">· ${c.labels.length ? 'Label: ' + esc(c.labels.join(', ')) : 'Semua kontak'}${c.optInOnly ? ' · opt-in saja' : ''}</span></div>
       ${c.lastError ? `<div class="text-xs danger-ink">${esc(c.lastError)}</div>` : ''}
       <div class="grid grid-cols-3 sm:grid-cols-6 gap-2">${[['Total', c.total], ['Antre', c.counts.queued], ['Terkirim', c.counts.sent], ['Diterima', c.counts.delivered], ['Dibaca', c.counts.read], ['Gagal', c.counts.failed]].map(([l, n]) => `<div class="card p-2.5"><div class="text-[11px] ink-3">${l}</div><div class="text-lg font-semibold">${fmtNum(n)}</div></div>`).join('')}</div>
@@ -2050,13 +2098,336 @@
         ${c.recipients.map((r) => `<tr><td class="mono text-xs">+${esc(r.phone)}</td><td>${esc(r.name)}</td><td>${statusBadge(r.status)}</td><td class="text-[11px] danger-ink">${esc(r.error || '')}</td></tr>`).join('')}
       </tbody></table></div>${c.total > 1000 ? '<p class="hint">Menampilkan 1.000 penerima pertama. Unduh CSV untuk laporan lengkap.</p>' : ''}
     </div>`, { wide: true, footer: `<a class="btn" href="/api/campaigns/${c.id}/export.csv">Unduh laporan CSV</a><div class="flex-1"></div>
-      ${['draft', 'paused'].includes(c.status) ? act('start', c.status === 'draft' ? 'Mulai kirim' : 'Lanjutkan', 'btn-primary') : ''}${c.status === 'running' ? act('pause', 'Jeda') : ''}${!['done', 'cancelled'].includes(c.status) ? act('cancel', 'Batalkan', 'btn-danger') : ''}` });
+      ${c.status === 'scheduled' ? act('run', 'Kirim sekarang', 'btn-primary') : ''}${['draft', 'paused'].includes(c.status) ? act('start', c.status === 'draft' ? 'Mulai kirim' : 'Lanjutkan', 'btn-primary') : ''}${c.status === 'running' ? act('pause', 'Jeda') : ''}${!['done', 'cancelled'].includes(c.status) ? act('cancel', 'Batalkan', 'btn-danger') : ''}` });
     $$('[data-cact]').forEach((b) => b.addEventListener('click', async () => {
       const a = b.dataset.cact;
       if (a === 'start' && !(await confirmBox(`Kirim template "${c.templateName}" ke ${c.counts.queued} kontak? Pesan template berbayar sesuai tarif Meta.`, 'Kirim'))) return campaignDetail(id);
+      if (a === 'run' && !(await confirmBox(`Kirim template "${c.templateName}" sekarang, tanpa menunggu jadwal?`, 'Kirim sekarang'))) return campaignDetail(id);
       if (a === 'cancel' && !(await confirmBox('Batalkan campaign? Penerima yang masih antre akan dilewati.', 'Batalkan', true))) return campaignDetail(id);
       busy(b, async () => { await api('POST', `/api/campaigns/${id}/${a}`); campaignDetail(id); if (S.view === 'campaigns') viewCampaigns(); });
     }));
+    $('[data-parent]')?.addEventListener('click', (e) => campaignDetail(e.currentTarget.dataset.parent));
+  }
+  function campaignSeriesDetail(c, act) {
+    const id = c.id;
+    modal(c.name, `<div class="space-y-4">
+      <div class="flex flex-wrap items-center gap-2 text-xs">${statusBadge(c.status)}<span class="badge">Berulang</span><span class="ink-3">Template <span class="mono">${esc(c.templateName)}</span> · ${esc(c.language)} · ${c.labels.length ? 'Label: ' + esc(c.labels.join(', ')) : 'Semua kontak'}${c.optInOnly ? ' · opt-in saja' : ''}</span></div>
+      <div class="sched-box">${ICON.clock}<div><div class="text-[13px] font-medium">${esc(c.scheduleText)}</div>
+        <div class="text-[11px] ink-3">${c.status === 'scheduled' ? 'Berikutnya: ' + fmtTz(c.nextRunAt, { weekday: 'long' }) : c.status === 'paused' ? 'Seri dijeda — tidak ada kiriman baru.' : 'Seri berakhir.'}${c.sendWindow ? ` · Jam kirim ${c.sendWindow.start.replace(':', '.')}–${c.sendWindow.end.replace(':', '.')}` : ''} · Zona waktu ${esc(TZ)}</div></div></div>
+      ${c.lastError ? `<div class="text-xs danger-ink">${esc(c.lastError)}</div>` : ''}
+      <div class="grid grid-cols-3 gap-2">${[['Sudah dikirim', `${fmtNum(c.runCount || 0)}×${c.maxRuns ? ' / ' + c.maxRuns : ''}`], ['Perkiraan penerima', '±' + fmtNum(c.previewTotal)], ['Terakhir', c.lastRunAt ? fmtTz(c.lastRunAt) : '—']].map(([l, n]) => `<div class="card p-2.5"><div class="text-[11px] ink-3">${l}</div><div class="text-sm font-semibold">${n}</div></div>`).join('')}</div>
+      <div><div class="text-xs font-semibold mb-2">Riwayat kiriman</div><div class="card overflow-x-auto"><table class="tbl"><thead><tr><th>Waktu</th><th>Status</th><th class="text-right">Penerima</th><th class="text-right">Terkirim</th><th class="text-right">Dibaca</th><th class="text-right">Gagal</th><th></th></tr></thead><tbody>
+        ${(c.runs || []).map((r) => `<tr><td class="text-xs whitespace-nowrap">${fmtTz(r.startedAt)}</td><td>${statusBadge(r.status)}</td><td class="text-right">${fmtNum(r.total)}</td><td class="text-right">${fmtNum(r.counts.sent + r.counts.delivered + r.counts.read)}</td><td class="text-right">${fmtNum(r.counts.read)}</td><td class="text-right ${r.counts.failed ? 'danger-ink' : ''}">${fmtNum(r.counts.failed)}</td><td class="text-right"><button class="btn btn-sm" data-run="${r.id}">Detail</button></td></tr>`).join('') || '<tr><td colspan="7"><div class="empty">Belum ada kiriman.</div></td></tr>'}
+      </tbody></table></div></div>
+    </div>`, { wide: true, footer: `<div class="flex-1"></div>
+      ${['scheduled', 'paused'].includes(c.status) ? act('run', 'Kirim sekarang') : ''}${c.status === 'scheduled' ? act('pause', 'Jeda seri') : ''}${c.status === 'paused' ? act('start', 'Lanjutkan seri', 'btn-primary') : ''}${!['done', 'cancelled'].includes(c.status) ? act('cancel', 'Hentikan seri', 'btn-danger') : ''}` });
+    $$('[data-run]').forEach((b) => b.addEventListener('click', () => campaignDetail(b.dataset.run)));
+    $$('[data-cact]').forEach((b) => b.addEventListener('click', async () => {
+      const a = b.dataset.cact;
+      if (a === 'run' && !(await confirmBox(`Kirim "${c.templateName}" ke ±${c.previewTotal} kontak sekarang? Jadwal berikutnya tidak berubah.`, 'Kirim sekarang'))) return campaignDetail(id);
+      if (a === 'cancel' && !(await confirmBox('Hentikan seri? Tidak ada kiriman baru setelah ini. Kiriman yang sedang berjalan tetap dilanjutkan.', 'Hentikan', true))) return campaignDetail(id);
+      busy(b, async () => { await api('POST', `/api/campaigns/${id}/${a}`); campaignDetail(id); if (S.view === 'campaigns') viewCampaigns(); });
+    }));
+  }
+
+  /* ───────────── Jadwal (dipakai broadcast terjadwal & pengingat) ───────────── */
+  // Semua jadwal memakai zona waktu aplikasi (Auto reply), bukan zona waktu browser
+  const TZ = BOOT?.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const fmtTz = (t, o = {}) => (t ? new Intl.DateTimeFormat('id-ID', { timeZone: TZ, weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', ...o }).format(new Date(t)) : '—');
+  const tzParts = (t = Date.now()) => ({
+    date: new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(t)),
+    time: new Intl.DateTimeFormat('en-GB', { timeZone: TZ, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(t)),
+  });
+  const tzAddDays = (ymd, n) => new Date(Date.UTC(+ymd.slice(0, 4), +ymd.slice(5, 7) - 1, +ymd.slice(8, 10) + n)).toISOString().slice(0, 10);
+  const ymdDow = (ymd) => new Date(ymd + 'T00:00:00Z').getUTCDay();
+  function relDue(t) {
+    const d = t - Date.now(), a = Math.abs(d);
+    const s = a < 60e3 ? 'kurang dari 1 menit' : a < 3600e3 ? Math.round(a / 60e3) + ' menit' : a < 864e5 ? Math.round(a / 3600e3) + ' jam' : Math.round(a / 864e5) + ' hari';
+    return d >= 0 ? 'dalam ' + s : s + ' lalu';
+  }
+  const SCHED_FREQ = { none: 'Tidak berulang', daily: 'Setiap hari', weekly: 'Setiap minggu', monthly: 'Setiap bulan' };
+  function schedFieldsHtml({ repeat = true, maxRuns = false } = {}) {
+    const n = tzParts(Date.now() + 3600e3), today = tzParts().date;
+    return `<div class="space-y-3" data-sched>
+      <div class="grid grid-cols-2 gap-2">
+        <div><label class="label">Tanggal${repeat ? ' mulai' : ''}</label><input type="date" class="input" name="s_date" value="${n.date}" min="${today}" required></div>
+        <div><label class="label">Jam</label><input type="time" class="input" name="s_time" value="${n.time.slice(0, 2)}:00" required></div>
+      </div>
+      ${repeat ? `<div><label class="label">Ulangi</label><select class="select" name="s_freq">${Object.entries(SCHED_FREQ).map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select></div>
+      <div data-s-show="weekly" class="hidden"><div class="label">Hari</div><div class="flex flex-wrap gap-x-3 gap-y-1.5">${AR_DAYS.map((d, i) => `<label class="flex items-center gap-1.5 text-[13px]"><input type="checkbox" class="check" name="s_day" value="${i}">${d}</label>`).join('')}</div></div>
+      <div data-s-show="repeat" class="hidden grid grid-cols-2 gap-2">
+        <div><label class="label">Sampai tanggal</label><input type="date" class="input" name="s_until" min="${today}"><p class="hint">Kosong = tanpa batas.</p></div>
+        ${maxRuns ? '<div><label class="label">Maks. pengiriman</label><input type="number" class="input" name="s_max" min="0" max="1000" placeholder="Tanpa batas"></div>' : ''}
+      </div>` : ''}
+      <p class="hint" data-s-text></p>
+    </div>`;
+  }
+  function readSched(f) {
+    return { date: f.s_date.value, time: f.s_time.value, freq: f.s_freq?.value || 'none', days: $$('input[name=s_day]:checked', f).map((x) => +x.value),
+      until: f.s_until?.value || '', maxRuns: f.s_max ? Number(f.s_max.value) || 0 : 0 };
+  }
+  function schedSummary(s) {
+    if (!s.date || !s.time) return '';
+    const t = s.time.replace(':', '.');
+    const d = new Date(s.date + 'T00:00:00Z').toLocaleDateString('id-ID', { timeZone: 'UTC', weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+    if (s.freq === 'none') return `Dikirim ${d}, pukul ${t}`;
+    const base = s.freq === 'daily' ? `Setiap hari pukul ${t}` : s.freq === 'weekly' ? (s.days.length ? `Setiap ${s.days.map((x) => AR_DAYS[x]).join(', ')} pukul ${t}` : 'Pilih minimal satu hari')
+      : `Setiap tanggal ${+s.date.slice(8, 10)} pukul ${t}${+s.date.slice(8, 10) > 28 ? ' (bulan yang lebih pendek: hari terakhir)' : ''}`;
+    return `${base}, mulai ${d}${s.until ? ' sampai ' + new Date(s.until + 'T00:00:00Z').toLocaleDateString('id-ID', { timeZone: 'UTC', day: 'numeric', month: 'long', year: 'numeric' }) : ''}${s.maxRuns ? `, maks. ${s.maxRuns} kali` : ''}`;
+  }
+  function bindSched(f) {
+    const box = $('[data-sched]', f); if (!box) return;
+    const upd = () => {
+      const s = readSched(f);
+      $$('[data-s-show]', box).forEach((el) => el.classList.toggle('hidden', el.dataset.sShow === 'repeat' ? s.freq === 'none' : el.dataset.sShow !== s.freq));
+      $('[data-s-text]', box).textContent = `${schedSummary(s)} · Zona waktu ${TZ}`;
+    };
+    f.s_freq?.addEventListener('change', () => {
+      // Mingguan: centang hari dari tanggal mulai agar langsung valid
+      if (f.s_freq.value === 'weekly' && !$$('input[name=s_day]:checked', f).length && f.s_date.value) { const cb = $(`input[name=s_day][value="${ymdDow(f.s_date.value)}"]`, f); if (cb) cb.checked = true; }
+      upd();
+    });
+    box.addEventListener('input', upd); box.addEventListener('change', upd);
+    upd();
+  }
+
+  /* ───────────── Pengingat ───────────── */
+  const REM_STATUS = { pending: ['Terjadwal', 'amber'], due: ['Jatuh tempo', 'red'], done: ['Selesai', 'green'], sent: ['Terkirim', 'green'], failed: ['Gagal', 'red'], skipped: ['Dilewati', ''], cancelled: ['Dibatalkan', ''] };
+  const remBadge = (s) => { const [l, c] = REM_STATUS[s] || [s, '']; return `<span class="badge ${c ? 'badge-' + c : ''}"><span class="dot"></span>${esc(l)}</span>`; };
+  const remMine = (r) => (r.assigneeId || r.createdById) === S.user.id;
+  const remActive = (r) => ['pending', 'due'].includes(r.status);
+  const remDueCount = () => S.rem.list.filter((r) => r.status === 'due' && r.kind === 'self' && remMine(r)).length;
+  async function loadReminders() {
+    const d = await api('GET', '/api/reminders');
+    S.rem.list = d.reminders; S.rem.users = d.users; S.rem.loaded = true;
+    remChanged();
+    // Tampilkan kembali pengingat jatuh tempo milik saya (12 jam terakhir) yang belum ditangani
+    S.rem.list.filter((r) => r.status === 'due' && r.kind === 'self' && remMine(r) && Date.now() - (r.firedAt || 0) < 12 * 3600e3).slice(0, 3).forEach((r) => showRemDue(r, true));
+  }
+  function remUpsert(r) {
+    const i = S.rem.list.findIndex((x) => x.id === r.id);
+    if (i >= 0) S.rem.list[i] = r; else S.rem.list.unshift(r);
+    if (!(r.status === 'due' && remMine(r))) $(`#rem-stack [data-rid="${r.id}"]`)?.remove();
+    remChanged();
+  }
+  function remChanged() {
+    renderNav();
+    if (S.view === 'reminders') renderRemList();
+    const c = activeConv();
+    if (S.view === 'inbox' && c) {
+      const box = $('#info-rem'); if (box && !box.contains(document.activeElement)) box.innerHTML = remInfoHtml(c);
+      const b = $('#cv-rem'); if (b) b.innerHTML = remBtnInner(c);
+    }
+  }
+  const remTitle = (r) => r.kind === 'self' ? (r.note || 'Tindak lanjut percakapan')
+    : r.note || (r.mode === 'template' ? 'Template ' + r.template.templateName : remText(r).slice(0, 120));
+  const remText = (r) => String(r.text || '').replace(/\{\{\s*name\s*\}\}/g, r.contactName || 'Kak');
+  function remItemHtml(r, { contact = false } = {}) {
+    const late = r.status === 'due' || (r.status === 'pending' && r.dueAt < Date.now());
+    const who = r.kind === 'self' ? (remMine(r) ? '' : `Untuk ${esc(r.assigneeName)} · `) : `${r.mode === 'template' ? 'Template' : 'Teks'}${r.fallback ? ' + cadangan' : ''} · `;
+    const acts = [];
+    if (r.kind === 'self' && remActive(r)) acts.push(`<button class="btn btn-sm btn-primary" data-ra="done">${ICON.check} Selesai</button>`, `<div class="relative"><button class="btn btn-sm" data-ra="snooze-menu">Tunda</button></div>`);
+    if (remActive(r)) acts.push(`<button class="btn btn-sm btn-ghost" data-ra="cancel">Batalkan</button>`);
+    if (r.kind === 'self' && r.status === 'done') acts.push(`<button class="btn btn-sm btn-ghost" data-ra="reopen">Buka lagi</button>`);
+    if (!remActive(r)) acts.push(`<button class="btn btn-sm btn-ghost btn-icon" data-ra="delete" title="Hapus" aria-label="Hapus">${ICON.trash}</button>`);
+    return `<div class="rem-item ${r.status === 'due' ? 'is-due' : ''}" data-rid="${r.id}">
+      <div class="rem-ic">${r.kind === 'self' ? ICON.bell : ICON.send}</div>
+      <div class="min-w-0 flex-1">
+        <div class="flex items-start gap-2"><div class="text-[13px] font-medium flex-1 min-w-0 break-words">${r.kind === 'customer' && !r.note && r.mode === 'text' ? waFormat(remTitle(r)) : esc(remTitle(r))}</div>${remBadge(r.status)}</div>
+        ${contact ? `<a class="text-xs accent-ink hover:underline" href="#/inbox/${r.conversationId}">${esc(r.contactName || '+' + r.phone)}</a>` : ''}
+        ${r.kind === 'customer' && r.note && r.mode === 'text' ? `<div class="text-xs ink-2 truncate">${esc(remText(r))}</div>` : ''}
+        <div class="text-[11px] ink-3 mt-0.5">${who}${remActive(r) ? `<span class="${late ? 'danger-ink' : ''}">${fmtTz(r.dueAt)} · ${relDue(r.dueAt)}</span>` : [r.lastDetail || REM_STATUS[r.status]?.[0], fmtTz(r.finishedAt || r.lastRunAt)].map(esc).join(' · ')}${r.scheduleText && r.schedule?.freq !== 'none' ? ` · ${esc(r.scheduleText)}` : ''}</div>
+        ${r.kind === 'customer' && r.lastStatus && remActive(r) ? `<div class="text-[11px] ${r.lastStatus === 'sent' ? 'ink-3' : 'danger-ink'}">Terakhir: ${esc(REM_STATUS[r.lastStatus]?.[0] || r.lastStatus)} — ${esc(r.lastDetail || '')}</div>` : ''}
+        <div class="flex flex-wrap items-center gap-1.5 mt-2">${acts.join('')}
+          <details class="rem-hist"><summary class="text-[11px] ink-3 cursor-pointer">Riwayat</summary><ol class="mt-1 space-y-0.5">${(r.history || []).slice().reverse().map((h) => `<li class="text-[11px]"><span class="ink-3">${fmtTz(h.at)}</span> · ${esc(h.detail)}</li>`).join('')}</ol></details>
+        </div>
+      </div></div>`;
+  }
+  const SNOOZE = [[15, '15 menit'], [60, '1 jam'], [180, '3 jam'], ['tomorrow', 'Besok 09.00']];
+  // Menit dari sekarang sampai besok 09.00 waktu aplikasi
+  function snoozeMinutes(v) {
+    if (v !== 'tomorrow') return v;
+    const [h, m] = tzParts().time.split(':').map(Number);
+    return (24 * 60 - (h * 60 + m)) + 9 * 60;
+  }
+  // Delegasi tombol pengingat (daftar, panel info, kartu jatuh tempo)
+  document.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-ra]'); if (!b) return;
+    const item = b.closest('[data-rid]'), r = S.rem.list.find((x) => x.id === item?.dataset.rid); if (!r) return;
+    const a = b.dataset.ra;
+    if (a === 'snooze-menu') {
+      e.stopPropagation();
+      $$('.rem-snooze').forEach((x) => x.remove());
+      const m = document.createElement('div'); m.className = 'rem-snooze pop';
+      m.innerHTML = SNOOZE.map(([v, l]) => `<button data-ra="snooze" data-min="${v}">${l}</button>`).join('');
+      b.parentElement.appendChild(m);
+      setTimeout(() => document.addEventListener('click', () => m.remove(), { once: true }));
+      return;
+    }
+    if (a === 'open') { location.hash = '#/inbox/' + r.conversationId; b.closest('#rem-stack [data-rid]')?.remove(); return; }
+    if (a === 'dismiss') { item.remove(); return; }
+    busy(b, async () => {
+      if (a === 'delete') { await api('DELETE', `/api/reminders/${r.id}`); S.rem.list = S.rem.list.filter((x) => x.id !== r.id); remChanged(); return; }
+      if (a === 'cancel' && !(await confirmBox(r.kind === 'customer' ? 'Batalkan pesan terjadwal ini? Pesan tidak akan dikirim.' : 'Batalkan pengingat ini?', 'Batalkan', true))) return;
+      const n = await api('POST', `/api/reminders/${r.id}/${a}`, a === 'snooze' ? { minutes: snoozeMinutes(b.dataset.min === 'tomorrow' ? 'tomorrow' : +b.dataset.min) } : undefined);
+      remUpsert(n);
+      if (a === 'snooze') toast(`Ditunda sampai ${fmtTz(n.dueAt)}.`);
+    });
+  });
+  // Kartu "jatuh tempo" di pojok layar: tetap tampil sampai ditangani atau ditutup
+  function showRemDue(r, quiet) {
+    let root = $('#rem-stack');
+    if (!root) { root = document.createElement('div'); root.id = 'rem-stack'; root.setAttribute('aria-live', 'polite'); document.body.appendChild(root); }
+    $(`[data-rid="${r.id}"]`, root)?.remove();
+    const el = document.createElement('div'); el.className = 'rem-due'; el.dataset.rid = r.id; el.setAttribute('role', 'alert');
+    el.innerHTML = `<div class="flex items-start gap-2"><span class="accent-ink mt-0.5">${ICON.bell}</span><div class="min-w-0 flex-1">
+        <div class="text-[11px] ink-3">Pengingat · ${fmtTz(r.dueAt, { weekday: undefined })}</div>
+        <div class="text-[13px] font-medium break-words">${esc(remTitle(r))}</div><div class="text-xs ink-2 truncate">${esc(r.contactName || '+' + r.phone)}</div></div>
+        <button class="btn btn-ghost btn-icon" data-ra="dismiss" aria-label="Tutup">${ICON.x}</button></div>
+      <div class="flex flex-wrap gap-1.5 mt-2"><button class="btn btn-sm btn-primary" data-ra="open">Buka chat</button><button class="btn btn-sm" data-ra="done">Selesai</button><div class="relative"><button class="btn btn-sm" data-ra="snooze-menu">Tunda</button></div></div>`;
+    root.appendChild(el);
+    while (root.children.length > 3) root.firstElementChild.remove();
+    if (!quiet) { playChime(true); notifyBrowser('⏰ Pengingat', `${remTitle(r)} — ${r.contactName || '+' + r.phone}`); }
+  }
+
+  // Panel info Inbox
+  function remBtnInner(c) {
+    const act = S.rem.list.filter((r) => r.conversationId === c.id && remActive(r));
+    const due = act.some((r) => r.status === 'due');
+    return ICON.clock + (act.length ? `<span class="rem-dot ${due ? 'due' : ''}">${act.length}</span>` : '');
+  }
+  function remInfoHtml(c) {
+    const list = S.rem.list.filter((r) => r.conversationId === c.id);
+    const act = list.filter(remActive), past = list.filter((r) => !remActive(r)).slice(0, 3);
+    return `<div class="flex items-center justify-between mb-2"><div class="text-xs font-semibold">Pengingat</div><button class="btn btn-sm" data-act="rem-new">${ICON.plus} Buat</button></div>
+      <div class="space-y-2">${act.map((r) => remItemHtml(r)).join('') || '<p class="text-xs ink-3">Tidak ada pengingat aktif.</p>'}</div>
+      ${past.length ? `<details class="mt-2"><summary class="text-[11px] ink-3 cursor-pointer">Riwayat (${list.length - act.length})</summary><div class="space-y-2 mt-2">${past.map((r) => remItemHtml(r)).join('')}</div></details>` : ''}`;
+  }
+  ACT['rem-new'] = () => { const c = activeConv(); if (c) reminderModal(c); };
+
+  async function reminderModal(conv, kind = 'self') {
+    const k = conv.contact;
+    const tpls = (await ensureTemplates().catch(() => [])).filter((t) => t.status === 'APPROVED');
+    const tplOpts = (none) => (none ? '<option value="">— Tidak ada (lewati bila jendela tertutup) —</option>' : '') + tpls.map((t, i) => {
+      const blocked = t.category === 'MARKETING' && !k.optIn;
+      return `<option value="${i}" ${blocked ? 'disabled' : ''}>${esc(t.name)} · ${esc(t.language)} · ${esc(t.category)}${blocked ? ' (perlu opt-in)' : ''}</option>`;
+    }).join('');
+    const firstOk = tpls.findIndex((t) => !(t.category === 'MARKETING' && !k.optIn));
+    const p = tzParts(), tomorrow = tzAddDays(p.date, 1);
+    const nextMon = tzAddDays(p.date, ((8 - ymdDow(p.date)) % 7) || 7);
+    const presets = [['30m', '30 menit'], ['60m', '1 jam'], ['180m', '3 jam'], [`${tomorrow} 09:00`, 'Besok 09.00'], [`${nextMon} 09:00`, 'Senin 09.00']];
+    const winEnd = conv.windowOpen ? conv.windowExpiresAt : 0;
+    modal('Pengingat · ' + contactName(k), `
+      <div class="seg mb-4" role="tablist"><button type="button" data-rk="self" class="${kind === 'self' ? 'active' : ''}">Ingatkan saya</button><button type="button" data-rk="customer" class="${kind === 'customer' ? 'active' : ''}">Kirim ke pelanggan</button></div>
+      <form id="f-rem-self" class="space-y-3 ${kind === 'self' ? '' : 'hidden'}">
+        <div><div class="label">Kapan</div><div class="flex flex-wrap gap-1.5">${presets.map(([v, l]) => `<button type="button" class="btn btn-sm" data-preset="${v}">${l}</button>`).join('')}</div></div>
+        <div class="grid grid-cols-2 gap-2"><div><label class="label">Tanggal</label><input type="date" class="input" name="date" min="${p.date}" value="${p.date}" required></div>
+          <div><label class="label">Jam</label><input type="time" class="input" name="time" value="${tzParts(Date.now() + 3600e3).time}" required></div></div>
+        <input type="hidden" name="inMinutes" value="">
+        <div><label class="label">Catatan</label><textarea class="textarea" name="note" rows="2" maxlength="500" placeholder="mis. Tanyakan konfirmasi pembayaran"></textarea></div>
+        ${S.isAdmin && S.rem.users.length > 1 ? `<div><label class="label">Ingatkan</label><select class="select" name="assigneeId">${S.rem.users.map((u) => `<option value="${u.id}" ${u.id === S.user.id ? 'selected' : ''}>${esc(u.name)}${u.id === S.user.id ? ' (saya)' : ''}</option>`).join('')}</select></div>` : ''}
+        <label class="flex items-center gap-2 text-xs"><input type="checkbox" class="check" name="reopen" checked> Buka kembali percakapan bila sudah selesai</label>
+        <p class="hint">Pada waktunya muncul notifikasi di Kontaq (dan WhatsApp pribadi bila diaktifkan di Pengaturan › Notifikasi). Zona waktu ${esc(TZ)}.</p>
+      </form>
+      <div id="rem-cust" class="${kind === 'customer' ? '' : 'hidden'}">
+        <form id="f-rem-cust" class="space-y-3">
+          <div class="seg" id="rem-mode"><button type="button" data-mode="text" class="active">Pesan teks</button><button type="button" data-mode="template" ${tpls.length ? '' : 'disabled title="Belum ada template APPROVED"'}>Template</button></div>
+          <div data-m="text" class="space-y-3">
+            <div><label class="label">Pesan</label><textarea class="textarea" name="text" rows="3" maxlength="4096" placeholder="Halo {{name}}, mengingatkan jadwal Anda besok pukul 10.00."></textarea>
+              <p class="hint"><span class="kbd">{{name}}</span> nama kontak. Pesan teks hanya terkirim bila jendela 24 jam masih terbuka saat jadwal — ${winEnd ? `jendela saat ini berakhir ${fmtTz(winEnd)}` : '<span class="danger-ink">jendela saat ini sudah tertutup</span>'}.</p></div>
+            <div><label class="label">Bila jendela 24 jam tertutup, kirim template</label><select class="select" name="fb">${tplOpts(true)}</select></div>
+          </div>
+          <div data-m="template" class="hidden space-y-3"><div><label class="label">Template</label><select class="select" name="tpl">${tplOpts(false)}</select></div></div>
+        </form>
+        <form id="f-rem-tpl" class="space-y-3 mt-3"></form>
+        <form id="f-rem-when" class="space-y-3 mt-3 pt-3 border-t bd">${schedFieldsHtml({ repeat: true })}
+          <div><label class="label">Label internal (opsional)</label><input class="input" name="note" maxlength="200" placeholder="mis. Pengingat cicilan"></div></form>
+        <div id="rem-prev" class="mt-3"></div>
+      </div>`, { footer: '<button class="btn" data-act="modal-close">Batal</button><button class="btn btn-primary" id="rem-go">Simpan pengingat</button>' });
+    let cur = kind, mode = 'text';
+    const fs = $('#f-rem-self'), fc = $('#f-rem-cust'), ft = $('#f-rem-tpl'), fw = $('#f-rem-when');
+    if (firstOk >= 0) fc.tpl.value = firstOk;
+    $$('[data-rk]').forEach((b) => b.addEventListener('click', () => {
+      cur = b.dataset.rk; $$('[data-rk]').forEach((x) => x.classList.toggle('active', x === b));
+      fs.classList.toggle('hidden', cur !== 'self'); $('#rem-cust').classList.toggle('hidden', cur !== 'customer');
+    }));
+    $$('[data-preset]', fs).forEach((b) => b.addEventListener('click', () => {
+      $$('[data-preset]', fs).forEach((x) => x.classList.toggle('btn-primary', x === b));
+      const v = b.dataset.preset;
+      if (v.endsWith('m')) { const t = tzParts(Date.now() + parseInt(v) * 60e3); fs.date.value = t.date; fs.time.value = t.time; fs.inMinutes.value = parseInt(v); }
+      else { const [d, t] = v.split(' '); fs.date.value = d; fs.time.value = t; fs.inMinutes.value = ''; }
+    }));
+    fs.addEventListener('input', (e) => { if (['date', 'time'].includes(e.target.name)) { fs.inMinutes.value = ''; $$('[data-preset]', fs).forEach((x) => x.classList.remove('btn-primary')); } });
+    // Template (utama atau cadangan) memakai form terpisah agar nama field variabel tidak bentrok
+    const activeTpl = () => (mode === 'template' ? tpls[fc.tpl.value] : fc.fb.value !== '' ? tpls[fc.fb.value] : null);
+    const drawTpl = () => {
+      const t = activeTpl();
+      ft.innerHTML = t ? `<div class="text-[11px] ink-3">${mode === 'template' ? 'Variabel template' : 'Variabel template cadangan'}</div>${tplFieldsHtml(t, { campaign: true })}` : '';
+      drawPrev();
+    };
+    const drawPrev = () => {
+      const t = activeTpl();
+      $('#rem-prev').innerHTML = mode === 'text' && fc.text.value.trim() ? `<div class="chat-bg rounded-md p-3"><div class="bubble out">${waFormat(fc.text.value.replace(/\{\{\s*name\s*\}\}/g, contactName(k)))}</div></div>`
+        : t && mode === 'template' ? tplPreview(t, ft) : '';
+    };
+    $$('#rem-mode [data-mode]').forEach((b) => b.addEventListener('click', () => {
+      mode = b.dataset.mode; $$('#rem-mode [data-mode]').forEach((x) => x.classList.toggle('active', x === b));
+      $$('[data-m]', fc).forEach((x) => x.classList.toggle('hidden', x.dataset.m !== mode)); drawTpl();
+    }));
+    fc.addEventListener('change', (e) => { if (['tpl', 'fb'].includes(e.target.name)) drawTpl(); });
+    fc.addEventListener('input', drawPrev); ft.addEventListener('input', drawPrev);
+    bindSched(fw); drawTpl();
+    $('#rem-go').addEventListener('click', (e) => busy(e.currentTarget, async () => {
+      let body;
+      if (cur === 'self') {
+        if (!fs.reportValidity()) return;
+        body = { kind: 'self', conversationId: conv.id, note: fs.note.value, reopen: fs.reopen.checked, assigneeId: fs.assigneeId?.value || undefined,
+          ...(fs.inMinutes.value ? { inMinutes: +fs.inMinutes.value } : { date: fs.date.value, time: fs.time.value }) };
+      } else {
+        if (mode === 'text' && !fc.text.value.trim()) { fc.text.focus(); throw new Error('Isi pesan wajib diisi.'); }
+        if (!ft.reportValidity() || !fw.reportValidity()) return;
+        const t = activeTpl(), tv = t && { templateName: t.name, language: t.language, values: readTplValues(t, ft) };
+        body = { kind: 'customer', conversationId: conv.id, mode, note: fw.note.value, ...readSched(fw),
+          ...(mode === 'text' ? { text: fc.text.value, fallback: tv || null } : { template: tv }) };
+      }
+      const r = await api('POST', '/api/reminders', body);
+      remUpsert(r); closeModal();
+      toast(r.kind === 'self' ? `Pengingat diatur: ${fmtTz(r.dueAt)}.` : `Pesan dijadwalkan: ${fmtTz(r.dueAt)}.`);
+    }));
+  }
+
+  // Halaman Pengingat
+  const REM_TABS = [['due', 'Jatuh tempo'], ['upcoming', 'Akan datang'], ['customer', 'Pesan terjadwal'], ['history', 'Riwayat']];
+  async function viewReminders() {
+    const v = $('#view');
+    v.innerHTML = `<div class="p-4 md:p-6 max-w-4xl space-y-3">
+      <div class="flex flex-wrap items-center gap-2"><div class="seg" id="rem-tabs">${REM_TABS.map(([k, l]) => `<button data-tab="${k}" class="${S.rem.tab === k ? 'active' : ''}">${l}<span class="ml-1 ink-3" data-cnt="${k}"></span></button>`).join('')}</div>
+        <div class="flex-1"></div>
+        ${S.isAdmin ? `<label class="flex items-center gap-2 text-xs"><input type="checkbox" class="check" id="rem-all" ${S.rem.all ? 'checked' : ''}> Semua pengguna</label>` : ''}
+        <input class="input h-8 w-full sm:w-44" id="rem-q" placeholder="Cari kontak/catatan" value="${esc(S.rem.q || '')}" aria-label="Cari pengingat">
+      </div>
+      <p class="text-xs ink-3">Buat pengingat dari Inbox (ikon jam di atas chat atau panel info kontak). Jadwal memakai zona waktu ${esc(TZ)}.</p>
+      <div id="rem-list" class="space-y-2"><div class="empty">Memuat…</div></div></div>`;
+    $$('#rem-tabs [data-tab]').forEach((b) => b.addEventListener('click', () => { S.rem.tab = b.dataset.tab; $$('#rem-tabs [data-tab]').forEach((x) => x.classList.toggle('active', x === b)); renderRemList(); }));
+    $('#rem-all')?.addEventListener('change', (e) => { S.rem.all = e.target.checked; renderRemList(); });
+    $('#rem-q').addEventListener('input', (e) => { S.rem.q = e.target.value; renderRemList(); });
+    try { await loadReminders(); } catch (e) { $('#rem-list').innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+  }
+  function renderRemList() {
+    const box = $('#rem-list'); if (!box || !S.rem.loaded) return;
+    const q = (S.rem.q || '').toLowerCase();
+    const base = S.rem.list.filter((r) => (S.rem.all || remMine(r) || r.createdById === S.user.id)
+      && (!q || [r.contactName, r.phone, r.note, r.text].some((x) => String(x || '').toLowerCase().includes(q))));
+    const groups = {
+      due: base.filter((r) => r.kind === 'self' && r.status === 'due'),
+      upcoming: base.filter((r) => r.kind === 'self' && r.status === 'pending').sort((a, b) => a.dueAt - b.dueAt),
+      customer: base.filter((r) => r.kind === 'customer' && r.status === 'pending').sort((a, b) => a.dueAt - b.dueAt),
+      history: base.filter((r) => !remActive(r)).sort((a, b) => (b.finishedAt || 0) - (a.finishedAt || 0)),
+    };
+    REM_TABS.forEach(([k]) => { const el = $(`[data-cnt="${k}"]`); if (el) el.textContent = k === 'history' ? '' : groups[k].length || ''; });
+    const rows = groups[S.rem.tab] || [];
+    const empty = { due: 'Tidak ada pengingat jatuh tempo.', upcoming: 'Belum ada pengingat terjadwal.', customer: 'Belum ada pesan terjadwal ke pelanggan.', history: 'Belum ada riwayat.' }[S.rem.tab];
+    box.innerHTML = rows.slice(0, 300).map((r) => `<div class="card p-3">${remItemHtml(r, { contact: true })}</div>`).join('') || `<div class="card"><div class="empty">${empty}</div></div>`;
   }
 
   /* ───────────── Auto reply ───────────── */
@@ -3075,57 +3446,43 @@
     let f;
     try { f = await api('GET', '/api/wa-flows/' + encodeURIComponent(id)); } catch (e) { v.innerHTML = `<div class="empty">${esc(e.message)}<br><a href="#/waflows" class="underline text-xs">Kembali</a></div>`; return; }
     if (location.hash !== tok) return;
-    S.wfd = { flow: f, tab: S.wfd?.flow?.id === f.id ? S.wfd.tab : 'json', draft: null };
+    S.wfd = { flow: f, tab: S.wfd?.flow?.id === f.id ? S.wfd.tab : 'builder', draft: null };
+    S.wfb = null; // navigasi ke halaman ini selalu memuat versi tersimpan
     renderWaFlowDetail();
   }
   function renderWaFlowDetail() {
-    const d = S.wfd, f = d.flow, draft = f.status === 'DRAFT', v = $('#view');
-    v.innerHTML = `<div class="p-4 md:p-6 max-w-6xl mx-auto space-y-4">
+    const d = S.wfd, f = d.flow, v = $('#view');
+    wfbEnsure(f);
+    v.innerHTML = `<div class="p-4 md:p-6 max-w-[1600px] mx-auto space-y-4">
       <a href="#/waflows" class="btn btn-ghost btn-sm -ml-2">${ICON.back} Semua flow</a>
-      <section class="card p-4 flex flex-col lg:flex-row lg:items-center gap-3">
-        <div class="flex-1 min-w-0"><div class="flex items-center gap-2 flex-wrap"><span class="font-semibold">${esc(f.name)}</span>${wfBadge(f.status)}</div>
-          <div class="text-[11px] ink-3 mt-0.5 mono">${esc(f.id)}${f.jsonVersion ? ' · Flow JSON ' + esc(f.jsonVersion) : ''} · ${fmtNum(f.sent)} dikirim · ${fmtNum(f.completed)} diisi</div>
-          ${f.endpointUri ? `<div class="text-[11px] mt-1" style="color:var(--warn)">Flow ini memakai endpoint (${esc(f.endpointUri)}). Kontaq hanya mengirim dan mencatat jawabannya; data_exchange dilayani endpoint Anda.</div>` : ''}
-          ${f.lastError ? `<div class="text-[11px] danger-ink mt-1">Gagal memuat dari Meta: ${esc(f.lastError)}</div>` : ''}</div>
-        <div class="flex flex-wrap gap-2 flex-none">
-          <button class="btn" id="wf-preview">${ICON.external} Pratinjau</button>
-          <button class="btn" id="wf-clone">${ICON.copy} Gandakan</button>
-          ${draft ? `<button class="btn btn-primary" id="wf-publish" ${f.validationErrors?.length ? 'disabled title="Perbaiki error validasi terlebih dahulu"' : ''}>Terbitkan</button><button class="btn btn-ghost btn-danger" id="wf-del">${ICON.trash}</button>` : ''}
-          ${['PUBLISHED', 'THROTTLED'].includes(f.status) ? '<button class="btn btn-ghost btn-danger" id="wf-deprecate">Nonaktifkan</button>' : ''}
-        </div>
-      </section>
+      <section class="card wfh" id="wfh"></section>
+      ${f.endpointUri ? `<div class="wfb-note">Flow ini memakai endpoint (${esc(f.endpointUri)}). Kontaq hanya mengirim dan mencatat jawabannya; data_exchange dilayani endpoint Anda.</div>` : ''}
+      ${f.lastError ? `<div class="wfb-note danger">Gagal memuat dari Meta: ${esc(f.lastError)}</div>` : ''}
       ${(f.alerts || []).length ? `<section class="card"><div class="card-h"><div class="card-t">Peringatan dari Meta</div></div>${f.alerts.slice(0, 5).map((a) => `<div class="px-4 py-2 border-b bd last:border-0 text-xs flex gap-3"><span class="ink-3 w-28 flex-none">${esc(fmtDT(a.at))}</span><span class="ink-2">${esc(a.event)}${a.newStatus ? ` → ${esc(a.newStatus)}` : ''}${a.state ? ` (${esc(a.state)})` : ''} ${esc(a.message)}</span></div>`).join('')}</section>` : ''}
-      <div class="tabs">${[['json', 'Flow JSON'], ['responses', `Jawaban (${fmtNum(f.completed)})`], ['info', 'Info']].map(([k, l]) => `<button class="tab ${d.tab === k ? 'active' : ''}" data-wf-tab="${k}">${l}</button>`).join('')}</div>
+      <div class="tabs">${[['builder', 'Editor visual'], ['json', 'Flow JSON'], ['responses', `Jawaban (${fmtNum(f.completed)})`], ['info', 'Info']].map(([k, l]) => `<button class="tab ${d.tab === k ? 'active' : ''}" data-wf-tab="${k}">${l}</button>`).join('')}</div>
       <div id="wf-body"></div>
     </div>`;
-    $$('[data-wf-tab]').forEach((b) => b.addEventListener('click', () => { S.wfd.tab = b.dataset.wfTab; renderWaFlowDetail(); }));
-    $('#wf-preview').addEventListener('click', (e) => busy(e.currentTarget, async () => {
-      const p = await api('POST', `/api/wa-flows/${encodeURIComponent(f.id)}/preview`, {});
-      if (!p.url) throw new Error('Meta tidak mengembalikan tautan pratinjau.');
-      window.open(p.url, '_blank', 'noopener');
+    wfhRender();
+    $$('[data-wf-tab]').forEach((b) => b.addEventListener('click', () => {
+      const to = b.dataset.wfTab;
+      // Perubahan di tab Flow JSON dibawa ke editor visual (belum disimpan)
+      if (d.tab === 'json' && to === 'builder' && d.draft != null && d.draft !== (S.wfb?.dirty ? wfbJsonText() : f.json)) {
+        try { JSON.parse(d.draft); } catch (e) { return toast('Flow JSON belum valid: ' + e.message, true); }
+        const r = wfbFromJson(d.draft);
+        if (!r.m?.screens.length) return toast('Flow JSON tidak memiliki layar.', true);
+        wfbInit(f, d.draft, { dirty: true }); d.draft = null;
+      }
+      d.tab = to; renderWaFlowDetail();
     }));
-    $('#wf-clone').addEventListener('click', () => wfCreateModal(f));
-    $('#wf-publish')?.addEventListener('click', async () => {
-      if (!await confirmBox(`Terbitkan "${f.name}"? Setelah terbit, flow tidak dapat diubah atau dihapus — hanya dapat dinonaktifkan. Pastikan sudah diuji lewat pratinjau.`, 'Terbitkan')) return;
-      busy($('#wf-publish'), async () => { S.wfd.flow = await api('POST', `/api/wa-flows/${encodeURIComponent(f.id)}/publish`); toast('Flow diterbitkan.'); renderWaFlowDetail(); });
-    });
-    $('#wf-deprecate')?.addEventListener('click', async () => {
-      if (!await confirmBox(`Nonaktifkan "${f.name}"? Flow tidak dapat dikirim atau dibuka lagi oleh pelanggan, dan tidak dapat diaktifkan kembali.`, 'Nonaktifkan', true)) return;
-      busy($('#wf-deprecate'), async () => { S.wfd.flow = await api('POST', `/api/wa-flows/${encodeURIComponent(f.id)}/deprecate`); toast('Flow dinonaktifkan.'); renderWaFlowDetail(); });
-    });
-    $('#wf-del')?.addEventListener('click', async () => {
-      if (!await confirmBox(`Hapus draf "${f.name}" dari WABA?`, 'Hapus', true)) return;
-      busy(null, async () => { await api('DELETE', `/api/wa-flows/${encodeURIComponent(f.id)}`); toast('Flow dihapus.'); location.hash = '#/waflows'; });
-    });
-    ({ json: wfJsonTab, responses: wfResponsesTab, info: wfInfoTab })[d.tab]();
+    ({ builder: wfbTab, json: wfJsonTab, responses: wfResponsesTab, info: wfInfoTab })[d.tab]();
   }
   function wfJsonTab() {
     const d = S.wfd, f = d.flow, draft = f.status === 'DRAFT';
-    const text = d.draft ?? (f.json ? (() => { try { return JSON.stringify(JSON.parse(f.json), null, 2); } catch { return f.json; } })() : '');
+    const text = d.draft ?? (S.wfb?.dirty && S.wfb.flowId === f.id ? wfbJsonText() : f.json ? (() => { try { return JSON.stringify(JSON.parse(f.json), null, 2); } catch { return f.json; } })() : '');
     const errs = f.validationErrors || [];
     $('#wf-body').innerHTML = `<div class="grid lg:grid-cols-[minmax(0,1fr)_18rem] gap-4 items-start">
       <section class="card min-w-0">
-        <div class="card-h"><div class="min-w-0"><div class="card-t">Flow JSON</div><div class="text-[11px] ink-3">${draft ? 'Simpan untuk mengunggah ke Meta; Meta memvalidasi dan mengembalikan error bila ada.' : 'Flow sudah terbit dan hanya dapat dibaca. Gandakan untuk mengubah.'}</div></div>
+        <div class="card-h"><div class="min-w-0"><div class="card-t">Flow JSON</div><div class="text-[11px] ink-3">${draft ? (S.wfb?.dirty ? 'Menampilkan hasil editor visual yang belum disimpan. ' : '') + 'Simpan untuk mengunggah ke Meta; Meta memvalidasi dan mengembalikan error bila ada.' : 'Flow sudah terbit dan hanya dapat dibaca. Gandakan untuk mengubah.'}</div></div>
           <div class="flex gap-2 flex-none"><button class="btn btn-sm" id="wf-fmt">Rapikan</button>${draft ? '<button class="btn btn-sm btn-primary" id="wf-save">Simpan & validasi</button>' : ''}</div></div>
         <textarea class="textarea json-editor border-0 rounded-none" id="wf-json" spellcheck="false" ${draft ? '' : 'readonly'} aria-label="Flow JSON">${esc(text)}</textarea>
         <div id="wf-local" class="px-4 py-2 border-t bd text-[11px] ink-3">—</div>
@@ -3164,7 +3521,7 @@
     $('#wf-save')?.addEventListener('click', (e) => busy(e.currentTarget, async () => {
       JSON.parse(ta.value);
       S.wfd.flow = await api('PUT', `/api/wa-flows/${encodeURIComponent(f.id)}/json`, { json: ta.value });
-      S.wfd.draft = null; renderWaFlowDetail();
+      S.wfd.draft = null; S.wfb = null; renderWaFlowDetail();
       const n = S.wfd.flow.validationErrors?.length || 0;
       toast(n ? `Tersimpan dengan ${n} error validasi dari Meta.` : 'Flow JSON tersimpan dan valid.', !!n);
     }));
@@ -3189,20 +3546,1282 @@
   }
   function wfInfoTab() {
     const f = S.wfd.flow;
-    $('#wf-body').innerHTML = `<section class="card max-w-2xl"><form id="f-wfi" class="p-4 space-y-3">
-      <div><label class="label" for="wfi-n">Nama</label><input class="input" id="wfi-n" name="name" maxlength="200" value="${esc(f.name)}"></div>
-      <div><div class="label">Kategori</div><div class="grid grid-cols-2 gap-1.5">${S.wf.categories.map((c) => `<label class="flex items-center gap-2 text-[13px]"><input type="checkbox" class="check" name="categories" value="${c}" ${(f.categories || []).includes(c) ? 'checked' : ''}>${esc(WF_CAT[c] || c)}</label>`).join('')}</div></div>
-      <div class="flex justify-end"><button class="btn btn-primary" id="wfi-save">Simpan</button></div>
-      <div class="text-[11px] ink-3 space-y-1 pt-2 border-t bd">
-        <div>Kirim di luar jendela 24 jam: buat template di Meta dengan tombol <b>Flow</b> yang mengarah ke flow ini, lalu kirim template tersebut — Kontaq mengisi <span class="kbd">flow_token</span> otomatis sehingga jawabannya tetap tercatat.</div>
-        <div>Disinkronkan ${esc(fmtDT(f.syncedAt))}.</div>
-      </div></form></section>`;
-    $('#wfi-save').addEventListener('click', (e) => { e.preventDefault(); busy(e.currentTarget, async () => {
-      const fd = new FormData($('#f-wfi'));
-      S.wfd.flow = await api('PATCH', `/api/wa-flows/${encodeURIComponent(f.id)}`, { name: fd.get('name'), categories: fd.getAll('categories') });
-      toast('Info flow disimpan.'); renderWaFlowDetail();
-    }); });
+    $('#wf-body').innerHTML = `<section class="card max-w-2xl"><div class="p-4 space-y-3 text-xs ink-2">
+      <div>Nama dan kategori diubah dari header di atas, lalu klik <b>Simpan</b>.</div>
+      <div>Kategori: ${(f.categories || []).map((c) => `<span class="badge">${esc(WF_CAT[c] || c)}</span>`).join(' ') || '—'}</div>
+      <div>Kirim di luar jendela 24 jam: buat template di Meta dengan tombol <b>Flow</b> yang mengarah ke flow ini, lalu kirim template tersebut — Kontaq mengisi <span class="kbd">flow_token</span> otomatis sehingga jawabannya tetap tercatat.</div>
+      <div>Data jawaban: Footer <b>Selesai — kirim data</b> mengirim semua isian lewat <span class="kbd">payload</span>; kunci payload = nama field, menjadi kolom di tab Jawaban dan CSV.</div>
+      <div class="ink-3">Disinkronkan ${esc(fmtDT(f.syncedAt))}. <a class="underline" href="https://developers.facebook.com/docs/whatsapp/flows/reference/flowjson" target="_blank" rel="noopener noreferrer">Referensi Flow JSON (Meta)</a></div>
+    </div></section>`;
   }
+
+  /* ───────────── WhatsApp Flow Builder (editor visual) ─────────────
+   * Model editor (S.wfb.m) disusun dari Flow JSON dan dikompilasi kembali menjadi Flow JSON saat disimpan. Layar & komponen
+   * punya uid internal yang stabil; navigasi (Footer, tautan, persetujuan) merujuk uid, sehingga mengganti ID layar,
+   * memindah, atau menghapus layar tidak memutus referensi.
+   * Data antarlayar dibawa otomatis: navigate meneruskan isian layar ini + data yang diterimanya ke layar tujuan (dideklarasikan
+   * di "data" dengan __example__), dan Footer "Selesai" mengirim semuanya lewat payload complete — kunci payload = nama field.
+   * Batas komponen mengikuti referensi Flow JSON Meta; validasi akhir tetap oleh Meta saat disimpan.
+   */
+  const WFB_VERSIONS = ['7.3', '7.2', '7.1', '7.0', '6.3', '6.2', '6.1', '6.0', '5.1', '5.0'];
+  const vge = (v, min) => { const [a, b] = String(v).split('.').map(Number), [c, d] = String(min).split('.').map(Number); return a > c || (a === c && b >= d); };
+  let wfbSeq = 0;
+  const wuid = (p) => p + (++wfbSeq).toString(36) + Math.random().toString(36).slice(2, 6);
+  const wic = (d) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
+  const slugify = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  const clone = (x) => JSON.parse(JSON.stringify(x));
+
+  const FW = [['', 'Normal'], ['bold', 'Tebal'], ['italic', 'Miring'], ['bold_italic', 'Tebal & miring']];
+  const pText = (max, o = {}) => ({ k: 'text', l: 'Teks', t: o.rows ? 'textarea' : 'text', max, req: true, ...o });
+  const pLabel = (max, l = 'Label pertanyaan') => ({ k: 'label', l, t: 'text', max, req: true });
+  const pName = { k: 'name', t: 'name' };
+  const pReq = { k: 'required', l: 'Wajib diisi', t: 'bool' };
+  const pHelp = { k: 'helper-text', l: 'Teks bantuan', t: 'text', max: 80 };
+  const pDesc = { k: 'description', l: 'Deskripsi', t: 'text', max: 300 };
+  const pSens = { k: 'sensitive', l: 'Data sensitif (disamarkan di ringkasan chat)', t: 'bool', min: '5.1' };
+  const pFont = [{ k: 'font-weight', l: 'Gaya huruf', t: 'select', opts: FW }, { k: 'strikethrough', l: 'Coret', t: 'bool' }, { k: 'markdown', l: 'Markdown (**tebal**, *miring*, daftar, tautan)', t: 'bool', min: '5.1' }];
+  const pSel = [{ k: 'min-selected-items', l: 'Min. dipilih', t: 'number', lo: 0, half: true }, { k: 'max-selected-items', l: 'Maks. dipilih', t: 'number', lo: 1, half: true }];
+  const isRange = (p) => p.mode === 'range';
+  const pDates = [{ k: 'min-date', l: 'Tanggal paling awal', t: 'date', half: true }, { k: 'max-date', l: 'Tanggal paling akhir', t: 'date', half: true },
+    { k: 'unavailable-dates', l: 'Tanggal tidak tersedia', t: 'dates', hint: 'Pisahkan dengan koma, format YYYY-MM-DD.' }];
+  const wfbOpts = (titles) => titles.map((t, i) => ({ uid: wuid('o'), id: String(i + 1), title: t, description: '', idAuto: true }));
+  const WFB_COMP = {
+    TextHeading: { g: 'text', n: 'Judul', d: 'Teks besar', ic: '<path d="M5 5v14M13 5v14M5 12h8M17 10l2-1v10"/>', make: () => ({ text: 'Judul' }), props: [pText(80)] },
+    TextSubheading: { g: 'text', n: 'Subjudul', d: 'Judul bagian', ic: '<path d="M5 5v14M13 5v14M5 12h8"/><path d="M16 11a2 2 0 1 1 4 0c0 2.2-4 3.3-4 7h4"/>', make: () => ({ text: 'Subjudul' }), props: [pText(80)] },
+    TextBody: { g: 'text', n: 'Teks isi', d: 'Paragraf', ic: '<path d="M4 6h16M4 10h16M4 14h16M4 18h10"/>', make: () => ({ text: 'Tulis penjelasan di sini.' }), props: [pText(4096, { rows: 4 }), ...pFont] },
+    TextCaption: { g: 'text', n: 'Keterangan', d: 'Teks kecil', ic: '<path d="M6 10h12M6 14h8"/>', make: () => ({ text: 'Keterangan singkat.' }), props: [pText(409, { rows: 2 }), ...pFont] },
+    RichText: { g: 'text', n: 'Rich text', d: 'Konten panjang (syarat, kebijakan)', min: '5.1', ic: '<path d="M4 6h16M4 11h9M4 16h9M16 13l2 5 2-5"/>',
+      make: () => ({ text: '## Syarat & ketentuan\n\nTulis konten di sini. **Tebal**, *miring*, dan daftar:\n- Poin pertama\n- Poin kedua' }),
+      props: [{ k: 'text', l: 'Konten (markdown)', t: 'textarea', rows: 10, req: true, hint: '# Judul · ## Subjudul · **tebal** · *miring* · ~~coret~~ · - daftar · 1. bernomor · [teks](https://…)' }] },
+    EmbeddedLink: { g: 'text', n: 'Tautan', d: 'Teks yang dapat diklik', cap: 2, ic: '<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>',
+      make: () => ({ text: 'Selengkapnya', link: { kind: 'open_url', url: 'https://' } }), props: [pText(25), { k: 'link', t: 'link', l: 'Saat diklik' }] },
+    Image: { g: 'text', n: 'Gambar', d: 'JPEG/PNG, maks. 300 KB', cap: 3, ic: '<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m21 16-5-5-9 9"/>',
+      make: () => ({ src: '', height: 160, 'scale-type': 'contain' }),
+      props: [{ k: 'src', t: 'image' }, { k: 'alt-text', l: 'Teks alternatif', t: 'text', max: 100 }, { k: 'height', l: 'Tinggi (px)', t: 'number', lo: 1, half: true },
+        { k: 'scale-type', l: 'Skala', t: 'select', opts: [['contain', 'Muat utuh'], ['cover', 'Penuhi area']], half: true }] },
+    TextInput: { g: 'form', n: 'Jawaban singkat', d: 'Satu baris', f: 'string', ic: '<rect x="3" y="7" width="18" height="10" rx="2"/><path d="M7 10v4"/>',
+      make: () => ({ label: 'Jawaban singkat', 'input-type': 'text', required: true }),
+      props: [pLabel(20), pName, { k: 'input-type', l: 'Tipe input', t: 'select', opts: [['text', 'Teks'], ['number', 'Angka'], ['email', 'Email'], ['phone', 'Nomor telepon'], ['password', 'Kata sandi'], ['passcode', 'Kode (PIN/OTP)']] },
+        pReq, pHelp, { k: 'init-value', l: 'Nilai bawaan', t: 'text', max: 80 }, { k: 'min-chars', l: 'Min. karakter', t: 'number', lo: 0, half: true }, { k: 'max-chars', l: 'Maks. karakter', t: 'number', lo: 1, half: true, ph: '80' },
+        { k: 'pattern', l: 'Pola (regex)', t: 'text', min: '6.2', mono: true, hint: 'Contoh ^[0-9]{16}$. Isi juga teks bantuan sebagai petunjuk format.' }, pSens] },
+    TextArea: { g: 'form', n: 'Jawaban panjang', d: 'Beberapa baris', f: 'string', ic: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9h10M7 13h7"/>',
+      make: () => ({ label: 'Jawaban panjang', required: false }),
+      props: [pLabel(20), pName, pReq, pHelp, { k: 'max-length', l: 'Maks. karakter', t: 'number', lo: 1, ph: '600' }, { k: 'init-value', l: 'Nilai bawaan', t: 'textarea', rows: 2 }, pSens] },
+    Dropdown: { g: 'form', n: 'Dropdown', d: 'Pilih dari daftar', f: 'string', ic: '<rect x="3" y="7" width="18" height="10" rx="2"/><path d="m14 11 2 2 2-2"/>',
+      make: () => ({ label: 'Pilih salah satu', required: true, options: wfbOpts(['Pilihan 1', 'Pilihan 2', 'Pilihan 3']) }),
+      props: [pLabel(20), pName, pReq, { k: 'options', t: 'options', lo: 1, hi: 200 }, { k: 'init-value', l: 'Pilihan bawaan', t: 'optsel' }, pSens] },
+    RadioButtonsGroup: { g: 'form', n: 'Pilihan tunggal', d: 'Satu jawaban', f: 'string', ic: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3.5" fill="currentColor"/>',
+      make: () => ({ label: 'Pilih satu', required: true, options: wfbOpts(['Pilihan 1', 'Pilihan 2', 'Pilihan 3']) }),
+      props: [pLabel(30), pName, pReq, pDesc, { k: 'options', t: 'options', lo: 1, hi: 20, desc: true }, { k: 'init-value', l: 'Pilihan bawaan', t: 'optsel' }, pSens] },
+    CheckboxGroup: { g: 'form', n: 'Pilihan ganda', d: 'Beberapa jawaban', f: 'array', ic: '<rect x="4" y="4" width="16" height="16" rx="3"/><path d="m8 12 3 3 5-6"/>',
+      make: () => ({ label: 'Pilih yang sesuai', required: false, options: wfbOpts(['Pilihan 1', 'Pilihan 2', 'Pilihan 3']) }),
+      props: [pLabel(30), pName, pReq, pDesc, { k: 'options', t: 'options', lo: 1, hi: 20, desc: true }, ...pSel, { k: 'init-value', l: 'Tercentang bawaan', t: 'optmulti' }, pSens] },
+    ChipsSelector: { g: 'form', n: 'Pemilih chip', d: 'Tag yang dapat dipilih', f: 'array', min: '6.3', ic: '<rect x="2" y="8" width="9" height="8" rx="4"/><rect x="13" y="8" width="9" height="8" rx="4"/>',
+      make: () => ({ label: 'Minat Anda', required: false, options: wfbOpts(['Promo', 'Produk baru', 'Acara']) }),
+      props: [pLabel(80), pName, pReq, pDesc, { k: 'options', t: 'options', lo: 2, hi: 20 }, ...pSel, { k: 'init-value', l: 'Terpilih bawaan', t: 'optmulti' }, pSens] },
+    DatePicker: { g: 'form', n: 'Pemilih tanggal', d: 'Satu tanggal', f: 'string', ic: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>',
+      make: () => ({ label: 'Tanggal', required: true }),
+      props: [pLabel(40), pName, pReq, pHelp, ...pDates, { k: 'init-value', l: 'Tanggal bawaan', t: 'date' }, pSens] },
+    CalendarPicker: { g: 'form', n: 'Kalender', d: 'Tanggal atau rentang', f: 'calendar', min: '6.1', ic: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4M8 14h.01M12 14h.01M16 14h.01M8 18h.01M12 18h.01"/>',
+      make: () => ({ label: 'Pilih tanggal', mode: 'single', required: true }),
+      props: [pLabel(40), pName, pReq, pHelp, { k: 'mode', l: 'Mode', t: 'select', opts: [['single', 'Satu tanggal'], ['range', 'Rentang tanggal']] },
+        { k: 'title', l: 'Judul kalender', t: 'text', max: 80, show: isRange }, { k: 'description', l: 'Deskripsi kalender', t: 'text', max: 300, show: isRange },
+        ...pDates, { k: 'include-days', l: 'Hari yang dapat dipilih', t: 'days' },
+        { k: 'min-days', l: 'Min. hari', t: 'number', lo: 1, half: true, show: isRange }, { k: 'max-days', l: 'Maks. hari', t: 'number', lo: 1, half: true, show: isRange }, pSens] },
+    OptIn: { g: 'form', n: 'Persetujuan', d: 'Kotak centang persetujuan', f: 'boolean', cap: 5, ic: '<rect x="3" y="6" width="7" height="7" rx="1.5"/><path d="m4.8 9.6 1.4 1.4 2.4-2.8M13 9.5h8M3 18h18"/>',
+      make: () => ({ label: 'Saya menyetujui syarat & ketentuan.', required: true }),
+      props: [pLabel(120, 'Teks persetujuan'), pName, pReq, { k: 'init-value', l: 'Tercentang bawaan', t: 'bool' }, { k: 'link', t: 'link', l: 'Tautan "Baca selengkapnya"', optional: true }] },
+  };
+  const WFB_DAYS = [['Mon', 'Sen'], ['Tue', 'Sel'], ['Wed', 'Rab'], ['Thu', 'Kam'], ['Fri', 'Jum'], ['Sat', 'Sab'], ['Sun', 'Min']];
+  const WFB_INTERNAL = new Set(['options', 'link', 'sensitive', 'nameAuto']);
+  const WFB_STR_NUM = new Set(['min-chars', 'max-chars', 'max-length']); // Flow JSON: string
+  const WFB_INT = new Set(['min-selected-items', 'max-selected-items', 'min-days', 'max-days', 'height', 'width']);
+  const WFB_DROP_FALSE = new Set(['required', 'strikethrough', 'markdown']);
+  const isField = (c) => !!WFB_COMP[c.type]?.f;
+  const fieldKind = (c) => (WFB_COMP[c.type].f === 'calendar' ? (isRange(c.p) ? 'range' : 'string') : WFB_COMP[c.type].f);
+  const compSummary = (c) => (c.type === 'Raw' ? c.p.json?.type || 'Komponen' : c.type === 'Image' ? (c.p['alt-text'] || (c.p.src ? 'Gambar' : 'Belum ada gambar'))
+    : String(c.p.label || c.p.text || '').replace(/\s+/g, ' ').slice(0, 60));
+
+  /* Flow JSON → model */
+  function wfbFromJson(text) {
+    let j;
+    try { j = typeof text === 'string' ? JSON.parse(text || '{}') : text; } catch (e) { return { error: 'Flow JSON tidak valid: ' + e.message }; }
+    const unsupported = new Set();
+    if (j.data_api_version || j.routing_model) unsupported.add('endpoint (data_api_version / routing_model)');
+    const screens = (Array.isArray(j.screens) ? j.screens : []).map((s) => ({ uid: wuid('s'), src: s }));
+    const uidOf = Object.fromEntries(screens.map((x) => [x.src.id, x.uid]));
+    const action = (a) => {
+      if (!a) return null;
+      if (a.name === 'navigate') return { kind: 'navigate', next: uidOf[a.next?.name] || null };
+      if (a.name === 'open_url') return { kind: 'open_url', url: a.url || '' };
+      unsupported.add(`aksi ${a.name}`); return { kind: 'raw', raw: a };
+    };
+    const m = { version: WFB_VERSIONS.includes(String(j.version)) ? String(j.version) : String(j.version || '7.3'), extra: {}, screens: [] };
+    for (const [k, v] of Object.entries(j)) if (!['version', 'screens'].includes(k)) m.extra[k] = v;
+    for (const { uid, src: s } of screens) {
+      let kids = s.layout?.children || [];
+      if (kids.length === 1 && kids[0].type === 'Form') kids = kids[0].children || [];
+      const sens = new Set(s.sensitive || []);
+      const sc = { uid, id: String(s.id || ''), idAuto: false, title: String(s.title || ''), success: s.success !== false, children: [], footer: null, extra: {} };
+      for (const [k, v] of Object.entries(s)) if (!['id', 'title', 'terminal', 'success', 'data', 'layout', 'sensitive'].includes(k)) sc.extra[k] = v;
+      for (const ch of kids) {
+        if (ch.type === 'Footer') {
+          const { type, label, 'on-click-action': act, ...rest } = ch;
+          const a = act || {};
+          const extraPayload = Object.fromEntries(Object.entries(a.payload || {}).filter(([, v]) => !(typeof v === 'string' && /^\$\{(form|data)\.[^}]+\}$/.test(v))));
+          const f = { label: label || 'Lanjut', action: a.name === 'complete' ? 'complete' : 'navigate', next: a.name === 'navigate' ? uidOf[a.next?.name] || null : null, extraPayload, rest };
+          if (!['complete', 'navigate'].includes(a.name)) { unsupported.add(`aksi Footer ${a.name || '?'}`); f.raw = a; }
+          sc.footer = f; continue;
+        }
+        if (!WFB_COMP[ch.type] || typeof ch['data-source'] === 'string') {
+          if (typeof ch['data-source'] === 'string') unsupported.add('data-source dinamis');
+          sc.children.push({ uid: wuid('c'), type: 'Raw', p: { json: ch } }); continue;
+        }
+        const { type, 'data-source': ds, 'on-click-action': act, ...p } = ch;
+        if (ds) p.options = ds.map((o) => ({ ...o, uid: wuid('o'), id: String(o.id ?? ''), title: String(o.title ?? ''), description: o.description || '', idAuto: false }));
+        if (act) p.link = action(act);
+        if (Array.isArray(p['unavailable-dates'])) p['unavailable-dates'] = p['unavailable-dates'].join(', ');
+        if (type === 'RichText' && Array.isArray(p.text)) p.text = p.text.join('\n');
+        if (p.name && sens.has(p.name)) p.sensitive = true;
+        sc.children.push({ uid: wuid('c'), type, p });
+      }
+      if (!sc.footer) sc.footer = { label: 'Lanjut', action: s.terminal ? 'complete' : 'navigate', next: null, extraPayload: {}, rest: {} };
+      m.screens.push(sc);
+    }
+    return { m, unsupported: [...unsupported] };
+  }
+
+  /* Analisis navigasi: data yang dibawa ke tiap layar & keterjangkauan */
+  function wfbInfo(m) {
+    const byUid = new Map(m.screens.map((s) => [s.uid, s]));
+    const fields = new Map(m.screens.map((s) => [s.uid, s.children.filter(isField).map((c) => [c.p.name, fieldKind(c)])]));
+    const navs = (s) => [...(s.footer.action === 'navigate' ? [s.footer.next] : []), ...s.children.filter((c) => c.p.link?.kind === 'navigate').map((c) => c.p.link.next)];
+    const edges = new Map(m.screens.map((s) => [s.uid, new Set(navs(s).filter((t) => t && t !== s.uid && byUid.has(t)))]));
+    const carry = new Map(m.screens.map((s) => [s.uid, new Map()]));
+    for (let i = 0; i <= m.screens.length + 1; i++) {
+      let changed = false;
+      for (const s of m.screens) {
+        const out = [...carry.get(s.uid), ...fields.get(s.uid)];
+        for (const t of edges.get(s.uid)) { const c = carry.get(t); for (const [n, k] of out) if (n && !c.has(n)) { c.set(n, k); changed = true; } }
+      }
+      if (!changed) break;
+    }
+    const reach = new Set(), q = m.screens[0] ? [m.screens[0].uid] : [];
+    while (q.length) { const u = q.pop(); if (reach.has(u)) continue; reach.add(u); edges.get(u).forEach((t) => q.push(t)); }
+    // Putaran navigasi (A → B → A)
+    let cycle = null;
+    const state = new Map(), path = [];
+    const dfs = (u) => {
+      state.set(u, 1); path.push(u);
+      for (const t of edges.get(u)) {
+        if (cycle) return;
+        if (state.get(t) === 1) { cycle = [...path.slice(path.indexOf(t)), t]; return; }
+        if (!state.get(t)) dfs(t);
+      }
+      path.pop(); state.set(u, 2);
+    };
+    m.screens.forEach((s) => { if (!state.get(s.uid) && !cycle) dfs(s.uid); });
+    return { byUid, fields, edges, carry, reach, cycle };
+  }
+  const DATA_DECL = {
+    string: { type: 'string', __example__: 'Contoh' },
+    array: { type: 'array', items: { type: 'string' }, __example__: [] },
+    boolean: { type: 'boolean', __example__: false },
+    range: { type: 'object', properties: { 'start-date': { type: 'string' }, 'end-date': { type: 'string' } }, __example__: { 'start-date': '2026-01-01', 'end-date': '2026-01-02' } },
+  };
+  const EMPTY_VAL = { string: '', array: [], boolean: false, range: { 'start-date': '', 'end-date': '' } };
+
+  /* Model → Flow JSON */
+  function wfbToJson(m) {
+    const info = wfbInfo(m);
+    const sid = (u) => info.byUid.get(u)?.id || '';
+    const own = (s) => new Set(info.fields.get(s.uid).map(([n]) => n));
+    const navPayload = (s, to) => {
+      const mine = own(s), have = info.carry.get(s.uid);
+      return Object.fromEntries([...(info.carry.get(to) || [])].map(([n, k]) => [n, mine.has(n) ? `\${form.${n}}` : have.has(n) ? `\${data.${n}}` : clone(EMPTY_VAL[k])]));
+    };
+    const act = (s, l) => (l.kind === 'navigate' ? { name: 'navigate', next: { type: 'screen', name: sid(l.next) }, payload: navPayload(s, l.next) }
+      : l.kind === 'open_url' ? { name: 'open_url', url: l.url } : l.raw);
+    const comp = (c, s) => {
+      if (c.type === 'Raw') return c.p.json;
+      const o = { type: c.type };
+      for (const [k, v] of Object.entries(c.p)) {
+        if (WFB_INTERNAL.has(k) || v === '' || v == null || (typeof v === 'number' && !Number.isFinite(v)) || (v === false && WFB_DROP_FALSE.has(k))) continue;
+        if (k === 'unavailable-dates') { const a = String(v).split(',').map((x) => x.trim()).filter(Boolean); if (a.length) o[k] = a; continue; }
+        if (k === 'include-days') { if (Array.isArray(v) && v.length && v.length < 7) o[k] = v; continue; }
+        if (k === 'init-value' && Array.isArray(v) && !v.length) continue;
+        if (c.type === 'RichText' && k === 'text') { o.text = String(v).split('\n'); continue; }
+        o[k] = WFB_STR_NUM.has(k) ? String(v) : WFB_INT.has(k) ? Math.round(Number(v)) : v;
+      }
+      if (c.p.options) o['data-source'] = c.p.options.map(({ uid, idAuto, ...x }) => Object.fromEntries(Object.entries(x).filter(([, v]) => v !== '' && v != null)));
+      if (c.p.link) o['on-click-action'] = act(s, c.p.link);
+      if (c.type === 'CalendarPicker' && !isRange(c.p)) ['title', 'description', 'min-days', 'max-days'].forEach((k) => delete o[k]);
+      return o;
+    };
+    return {
+      version: m.version, ...m.extra,
+      screens: m.screens.map((s) => {
+        const carry = info.carry.get(s.uid), f = s.footer, out = { id: s.id, title: s.title };
+        if (f.action === 'complete') { out.terminal = true; out.success = s.success !== false; }
+        if (carry.size) out.data = Object.fromEntries([...carry].map(([n, k]) => [n, clone(DATA_DECL[k])]));
+        const sens = s.children.filter((c) => isField(c) && c.p.sensitive).map((c) => c.p.name);
+        if (sens.length && vge(m.version, '5.1')) out.sensitive = sens;
+        const mine = own(s);
+        const footer = { type: 'Footer', label: f.label, ...f.rest,
+          'on-click-action': f.raw || (f.action === 'complete'
+            ? { name: 'complete', payload: { ...Object.fromEntries([...carry.keys()].filter((n) => !mine.has(n)).map((n) => [n, `\${data.${n}}`])), ...Object.fromEntries([...mine].map((n) => [n, `\${form.${n}}`])), ...f.extraPayload } }
+            : { name: 'navigate', next: { type: 'screen', name: sid(f.next) }, payload: navPayload(s, f.next) }) };
+        for (const k of ['left-caption', 'center-caption', 'right-caption']) if (!footer[k]) delete footer[k];
+        out.layout = { type: 'SingleColumnLayout', children: [...s.children.map((c) => comp(c, s)), footer] };
+        return { ...out, ...s.extra };
+      }),
+    };
+  }
+
+  /* Validasi lokal (batas resmi komponen Flow JSON) */
+  function wfbValidate(m) {
+    const out = [], info = wfbInfo(m), v = m.version;
+    const err = (msg, s, c, level = 'error') => out.push({ level, msg, s: s?.uid || null, c: c?.uid || null });
+    if (!m.screens.length) err('Flow belum memiliki layar.');
+    if (!m.screens.some((s) => s.footer.action === 'complete')) err('Belum ada layar akhir: atur tombol salah satu layar menjadi "Selesai — kirim data".');
+    const ids = new Map(), names = new Map();
+    for (const s of m.screens) {
+      if (!s.id) err('ID layar wajib diisi.', s);
+      else if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(s.id)) err(`ID layar "${s.id}" hanya boleh huruf, angka, dan garis bawah, diawali huruf.`, s);
+      else if (s.id.toUpperCase() === 'SUCCESS') err('ID layar "SUCCESS" dicadangkan Meta.', s);
+      if (s.id) { if (ids.has(s.id)) err(`ID layar "${s.id}" dipakai lebih dari satu layar.`, s); ids.set(s.id, s); }
+      if (!s.title.trim()) err('Judul layar wajib diisi.', s);
+      if (s.children.length + 1 > 50) err('Maksimal 50 komponen per layar (termasuk tombol).', s);
+      for (const [t, def] of Object.entries(WFB_COMP)) if (def.cap && s.children.filter((c) => c.type === t).length > def.cap) err(`Maksimal ${def.cap} komponen ${def.n} per layar.`, s);
+      if (m.screens[0] !== s && !info.reach.has(s.uid)) err('Layar ini tidak dapat dicapai dari layar pertama.', s, null, 'warn');
+      if (info.carry.get(s.uid).size && m.screens[0] === s) err('Layar pertama menerima data dari layar lain (navigasi berputar); Meta mungkin menolaknya.', s, null, 'warn');
+      const f = s.footer;
+      if (!f.label.trim()) err('Label tombol wajib diisi.', s);
+      if (f.label.length > 35) err('Label tombol maksimal 35 karakter.', s);
+      for (const k of ['left-caption', 'center-caption', 'right-caption']) if ((f.rest[k] || '').length > 15) err('Keterangan tombol maksimal 15 karakter.', s);
+      if (f.rest['center-caption'] && (f.rest['left-caption'] || f.rest['right-caption'])) err('Keterangan tengah tidak dapat digabung dengan kiri/kanan.', s);
+      if (f.action === 'navigate' && (!f.next || !info.byUid.has(f.next))) err('Pilih layar tujuan tombol.', s);
+      if (f.action === 'navigate' && f.next === s.uid) err('Tombol tidak boleh mengarah ke layar ini sendiri.', s);
+      const own = new Set(s.children.filter(isField).map((c) => c.p.name));
+      for (const c of s.children) {
+        const def = WFB_COMP[c.type], p = c.p;
+        if (c.type === 'Raw') { err(`Komponen ${p.json?.type || '?'} tidak didukung editor visual dan disalin apa adanya.`, s, c, 'warn'); continue; }
+        if (def.min && !vge(v, def.min)) err(`${def.n} membutuhkan Flow JSON ${def.min} atau lebih baru.`, s, c);
+        for (const d of def.props) {
+          if (d.show && !d.show(p)) continue;
+          const val = p[d.k];
+          if (d.min && !vge(v, d.min) && val !== undefined && val !== '' && val !== false) err(`${d.l} membutuhkan Flow JSON ${d.min}+.`, s, c);
+          if (d.req && !String(val ?? '').trim()) err(`${d.l} wajib diisi.`, s, c);
+          if (d.max && String(val ?? '').length > d.max) err(`${d.l} maksimal ${d.max} karakter (sekarang ${String(val).length}).`, s, c);
+        }
+        if (isField(c)) {
+          if (!p.name) err('Nama field wajib diisi.', s, c);
+          else if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(p.name)) err(`Nama field "${p.name}" hanya boleh huruf, angka, dan garis bawah.`, s, c);
+          else if (names.has(p.name)) err(`Nama field "${p.name}" sudah dipakai di layar ${names.get(p.name).title || names.get(p.name).id}. Nama harus unik di seluruh flow.`, s, c);
+          if (p.name) names.set(p.name, s);
+        }
+        if (p.options) {
+          const d = def.props.find((x) => x.t === 'options');
+          if (p.options.length < d.lo) err(`Minimal ${d.lo} pilihan.`, s, c);
+          if (p.options.length > d.hi) err(`Maksimal ${d.hi} pilihan.`, s, c);
+          const oid = new Set();
+          p.options.forEach((o, i) => {
+            if (!o.title.trim()) err(`Pilihan ${i + 1}: judul wajib diisi.`, s, c);
+            if (o.title.length > 30) err(`Pilihan "${o.title.slice(0, 20)}…": judul maksimal 30 karakter.`, s, c);
+            if ((o.description || '').length > 300) err(`Pilihan ${i + 1}: deskripsi maksimal 300 karakter.`, s, c);
+            if (!o.id) err(`Pilihan ${i + 1}: ID wajib diisi.`, s, c); else if (oid.has(o.id)) err(`ID pilihan "${o.id}" ganda.`, s, c);
+            oid.add(o.id);
+          });
+          const iv = p['init-value'];
+          if (iv && !(Array.isArray(iv) ? iv : [iv]).every((x) => oid.has(x))) err('Nilai bawaan tidak ada di daftar pilihan.', s, c);
+        }
+        const lo = Number(p['min-selected-items']), hi = Number(p['max-selected-items']);
+        if (p['min-selected-items'] !== undefined && p['min-selected-items'] !== '' && p['max-selected-items'] !== undefined && p['max-selected-items'] !== '' && lo > hi) err('Min. dipilih tidak boleh lebih dari maks. dipilih.', s, c);
+        if (p.options && hi > p.options.length) err('Maks. dipilih melebihi jumlah pilihan.', s, c);
+        if (p['min-chars'] !== undefined && p['max-chars'] !== undefined && p['min-chars'] !== '' && p['max-chars'] !== '' && Number(p['min-chars']) > Number(p['max-chars'])) err('Min. karakter melebihi maks. karakter.', s, c);
+        if (p.pattern) { try { new RegExp(p.pattern); } catch (e) { err('Pola regex tidak valid: ' + e.message, s, c); } if (!p['helper-text']) err('Pola regex wajib disertai teks bantuan.', s, c); }
+        if (p['min-date'] && p['max-date'] && p['min-date'] > p['max-date']) err('Tanggal paling awal setelah tanggal paling akhir.', s, c);
+        if (p['unavailable-dates'] && String(p['unavailable-dates']).split(',').map((x) => x.trim()).filter(Boolean).some((x) => !/^\d{4}-\d{2}-\d{2}$/.test(x))) err('Tanggal tidak tersedia harus berformat YYYY-MM-DD.', s, c);
+        if (c.type === 'Image') {
+          if (!p.src) err('Unggah gambar.', s, c);
+          else if (p.src.length * 0.75 > 300 * 1024) err('Gambar maksimal 300 KB.', s, c);
+        }
+        if (p.link) {
+          if (p.link.kind === 'navigate' && (!p.link.next || !info.byUid.has(p.link.next))) err('Pilih layar tujuan tautan.', s, c);
+          if (p.link.kind === 'open_url') {
+            if (!vge(v, '6.0')) err('Membuka URL membutuhkan Flow JSON 6.0+.', s, c);
+            if (!/^https?:\/\/[^\s/]+\.[^\s]+$/.test(p.link.url || '')) err('URL tautan tidak valid.', s, c);
+          }
+        }
+        // Referensi ${data.x} / ${form.x} di teks
+        for (const t of [p.text, p.label, p.description, p['helper-text']].filter((x) => typeof x === 'string')) {
+          for (const [, kind, n] of t.matchAll(/\$\{(data|form)\.([A-Za-z0-9_]+)\}/g)) {
+            if (kind === 'data' && !info.carry.get(s.uid).has(n)) err(`\${data.${n}} tidak tersedia di layar ini (bukan isian layar sebelumnya).`, s, c);
+            if (kind === 'form' && !own.has(n)) err(`\${form.${n}} bukan field di layar ini.`, s, c);
+          }
+        }
+      }
+    }
+    if (info.cycle) err(`Navigasi berputar: ${info.cycle.map((u) => info.byUid.get(u).id).join(' → ')}. Meta biasanya menolak putaran pada flow tanpa endpoint.`, info.byUid.get(info.cycle[0]), null, 'warn');
+    const size = JSON.stringify(wfbToJson(m)).length;
+    if (size > 3 * 1024 * 1024) err('Flow JSON melebihi 3 MB (biasanya karena gambar). Kurangi atau perkecil gambar.');
+    return out;
+  }
+
+  /* State & helper */
+  const wb = () => S.wfb;
+  const wScreen = (u = wb().sel.s) => wb().m.screens.find((s) => s.uid === u);
+  const wComp = (s = wScreen(), u = wb().sel.c) => s?.children.find((c) => c.uid === u);
+  function wfbInit(f, text, { dirty = false } = {}) {
+    const r = wfbFromJson(text ?? f.json ?? '');
+    const readOnly = f.status !== 'DRAFT';
+    if (r.error || !r.m.screens.length) {
+      const m = r.m && r.m.screens.length ? r.m : { version: '7.3', extra: {}, screens: [] };
+      if (!m.screens.length) m.screens.push(wfbNewScreen(m, 'Formulir', true));
+      S.wfb = { flowId: f.id, m, src: f.json, unsupported: r.unsupported || [], parseError: r.error || null, readOnly: false, dirty: dirty || !!r.error, sel: { s: m.screens[0].uid, c: null }, pane: 'edit', sim: null, pv: {}, catOpen: false };
+    } else {
+      S.wfb = { flowId: f.id, m: r.m, src: f.json, unsupported: r.unsupported, parseError: null, readOnly: r.unsupported.length > 0,
+        dirty, sel: { s: r.m.screens[0].uid, c: null }, pane: 'edit', sim: null, pv: {}, catOpen: false };
+    }
+    S.wfb.locked = readOnly; // status flow: hanya DRAFT yang dapat diubah
+    S.wfb.meta = { name: f.name, category: (f.categories || [])[0] || 'OTHER' };
+  }
+  function uniqName(base, except) {
+    const used = new Set(wb().m.screens.flatMap((s) => s.children.filter((c) => isField(c) && c.uid !== except).map((c) => c.p.name)));
+    let b = slugify(base) || 'jawaban'; if (/^\d/.test(b)) b = 'f_' + b; b = b.slice(0, 40);
+    let n = b, i = 2; while (used.has(n)) n = `${b}_${i++}`;
+    return n;
+  }
+  function uniqScreenId(base, except, m = wb().m) {
+    const used = new Set(m.screens.filter((s) => s.uid !== except).map((s) => s.id));
+    let b = slugify(base).toUpperCase().replace(/[0-9]/g, '').replace(/_+/g, '_').replace(/^_|_$/g, '') || 'LAYAR';
+    if (b === 'SUCCESS') b = 'SUKSES';
+    b = b.slice(0, 40);
+    let n = b, i = 0; while (used.has(n)) n = `${b}_${String.fromCharCode(65 + (i % 26)).repeat(1 + Math.floor(i++ / 26))}`;
+    return n;
+  }
+  function wfbNewScreen(m, title, terminal) {
+    const uid = wuid('s');
+    const s = { uid, id: '', idAuto: true, title, success: true, extra: {}, children: [],
+      footer: { label: terminal ? 'Kirim' : 'Lanjut', action: terminal ? 'complete' : 'navigate', next: null, extraPayload: {}, rest: {} } };
+    s.id = uniqScreenId(title, uid, m);
+    return s;
+  }
+  function wfbNewComp(type) {
+    const def = WFB_COMP[type], c = { uid: wuid('c'), type, p: def.make() };
+    if (def.f) { c.p.name = uniqName(c.p.label, c.uid); c.p.nameAuto = true; }
+    return c;
+  }
+
+  /* Render: tata letak 3 panel */
+  function wfbEnsure(f) {
+    const b = S.wfb;
+    if (!b || b.flowId !== f.id || (!b.dirty && b.src !== f.json)) { const meta = b?.flowId === f.id && wfbMetaDirty() ? b.meta : null; wfbInit(f); if (meta) S.wfb.meta = meta; return; }
+    b.locked = f.status !== 'DRAFT';
+    if (!wfbMetaDirty()) b.meta = { name: f.name, category: (f.categories || [])[0] || 'OTHER' };
+  }
+  function wfbTab() {
+    const f = S.wfd.flow;
+    wfbEnsure(f);
+    const b = wb();
+    $('#wf-body').innerHTML = `
+      ${b.parseError ? `<div class="wfb-note danger">Flow JSON di Meta tidak dapat dibaca (${esc(b.parseError)}). Editor dimulai dari layar kosong — menyimpan akan menimpa JSON tersebut.</div>` : ''}
+      ${b.unsupported.length ? `<div class="wfb-note">Flow ini memakai fitur yang belum didukung editor visual (${esc(b.unsupported.join(', '))}), jadi editor dibuka <b>hanya baca</b> agar tidak merusaknya. Ubah lewat tab <b>Flow JSON</b>.</div>` : ''}
+      ${b.locked ? `<div class="wfb-note">Flow berstatus ${esc(WF_STATUS[f.status]?.[1] || f.status)} tidak dapat diubah — Meta hanya mengizinkan perubahan pada draf. <button class="underline" data-wfb-act="clone">Gandakan</button> untuk membuat versi baru.</div>` : ''}
+      <div class="wfb-panes-tabs seg lg:hidden" role="tablist">${[['screens', 'Layar'], ['edit', 'Editor'], ['preview', 'Pratinjau']].map(([k, l]) => `<button data-wfb-pane="${k}" class="${b.pane === k ? 'active' : ''}">${l}</button>`).join('')}</div>
+      <div class="wfb">
+        <aside class="wfb-pane wfb-left ${b.pane === 'screens' ? 'on' : ''}" id="wfb-left"></aside>
+        <section class="wfb-pane wfb-mid ${b.pane === 'edit' ? 'on' : ''}" id="wfb-mid"></section>
+        <aside class="wfb-pane wfb-right ${b.pane === 'preview' ? 'on' : ''}" id="wfb-right"></aside>
+      </div>`;
+    $$('[data-wfb-pane]').forEach((x) => x.addEventListener('click', () => wfbPane(x.dataset.wfbPane)));
+    wfbRenderLeft(); wfbRenderMid(); wfbRenderPreview(); wfbRenderStatus();
+    if (!$('#wf-body').dataset.wfb) { $('#wf-body').dataset.wfb = '1'; wfbBindOnce(); }
+  }
+  const wfbRO = () => wb().readOnly || wb().locked;
+  const wfbNarrow = () => window.innerWidth < 1024;
+  function wfbPane(p) {
+    wb().pane = p;
+    $$('[data-wfb-pane]').forEach((x) => x.classList.toggle('active', x.dataset.wfbPane === p));
+    [['screens', '#wfb-left'], ['edit', '#wfb-mid'], ['preview', '#wfb-right']].forEach(([k, sel]) => $(sel)?.classList.toggle('on', k === p));
+  }
+
+  // Panel kiri: daftar layar
+  function wfbRenderLeft() {
+    const b = wb(), el = $('#wfb-left'); if (!el) return;
+    const info = wfbInfo(b.m), issues = b.issues || [], ro = wfbRO();
+    el.innerHTML = `<div class="card-h"><div class="card-t">Layar <span class="ink-3 font-normal">(${b.m.screens.length})</span></div>${ro ? '' : `<button class="btn btn-sm" data-wfb-act="add-screen">${ICON.plus} Tambah</button>`}</div>
+      <div class="wfb-scrs" id="wfb-scrs">${b.m.screens.map((s, i) => {
+        const bad = issues.some((x) => x.s === s.uid && x.level === 'error'), next = s.footer.action === 'navigate' ? info.byUid.get(s.footer.next) : null;
+        return `<div class="wfb-scr ${b.sel.s === s.uid ? 'active' : ''}" data-s="${s.uid}">
+          ${ro ? '' : `<button class="wfb-grip" data-grip aria-label="Geser layar ${esc(s.title)} (panah atas/bawah)" title="Seret untuk mengubah urutan">${WFB_GRIP}</button>`}
+          <span class="wfb-num">${i + 1}</span>
+          <button class="flex-1 min-w-0 text-left" data-open-s>
+            <div class="text-[13px] font-medium truncate" data-s-title title="${esc(s.title)}">${esc(s.title || '(tanpa judul)')}</div>
+            <div class="text-[10px] ink-3 truncate"><span class="mono">${esc(s.id)}</span> · ${s.footer.action === 'complete' ? 'akhir' : next ? '→ ' + esc(next.id) : '<span class="danger-ink">tujuan?</span>'}</div>
+          </button>
+          ${bad ? '<span class="wfb-dot" title="Ada error"></span>' : ''}
+          ${ro ? '' : `<div class="wfb-scr-act"><button class="btn btn-ghost btn-sm btn-icon" data-sa="rename" title="Ganti nama" aria-label="Ganti nama">${ICON.edit}</button><button class="btn btn-ghost btn-sm btn-icon" data-sa="dup" title="Gandakan" aria-label="Gandakan">${ICON.copy}</button><button class="btn btn-ghost btn-sm btn-icon" data-sa="del" title="Hapus" aria-label="Hapus" ${b.m.screens.length < 2 ? 'disabled' : ''}>${ICON.trash}</button></div>`}
+        </div>`;
+      }).join('')}</div>
+      <p class="hint px-3">Layar pertama dibuka saat formulir dimulai. Mengubah urutan tidak mengubah tujuan tombol.</p>
+      <div class="px-3 pb-3 pt-2 mt-2 border-t bd space-y-1">
+        <label class="label" for="wfb-ver">Versi Flow JSON</label>
+        <select class="select" id="wfb-ver" ${ro ? 'disabled' : ''}>${[...new Set([b.m.version, ...WFB_VERSIONS])].map((x) => `<option ${x === b.m.version ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select>
+        <p class="hint">Komponen yang butuh versi lebih baru ditandai di katalog.</p>
+      </div>`;
+    if (!ro) wfbSortable($('#wfb-scrs'), '.wfb-scr', (from, to) => { const a = b.m.screens; a.splice(to, 0, a.splice(from, 1)[0]); wfbChanged(true); });
+  }
+
+  // Panel tengah: properti layar / komponen
+  function wfbRenderMid() {
+    const b = wb(), el = $('#wfb-mid'), s = wScreen(); if (!el || !s) return;
+    const c = wComp(s), ro = wfbRO(), info = wfbInfo(b.m), carry = [...info.carry.get(s.uid).keys()];
+    const others = b.m.screens.filter((x) => x.uid !== s.uid);
+    el.innerHTML = `<fieldset ${ro ? 'disabled' : ''} class="space-y-4 min-w-0">
+      <section class="card">
+        <div class="card-h"><div class="card-t">Layar ${b.m.screens.indexOf(s) + 1}</div><span class="text-[11px] ink-3">${s.footer.action === 'complete' ? 'Layar akhir' : 'Layar perantara'}</span></div>
+        <div class="p-4 space-y-3" data-scope="screen">
+          <div id="wfb-iss-s"></div>
+          <div><label class="label" for="wfb-st">Judul layar</label><input class="input" id="wfb-st" data-sk="title" value="${esc(s.title)}" maxlength="80"></div>
+          <div><label class="label" for="wfb-sid">ID layar</label><div class="flex gap-2"><input class="input mono" id="wfb-sid" data-sk="id" value="${esc(s.id)}" maxlength="60" spellcheck="false">
+            <label class="flex items-center gap-1.5 text-xs whitespace-nowrap"><input type="checkbox" class="check" data-sk="idAuto" ${s.idAuto ? 'checked' : ''}> Otomatis</label></div>
+            <p class="hint">Dipakai di Flow JSON dan saat mengirim formulir. Tujuan tombol ikut diperbarui saat ID diganti.</p></div>
+          <details class="wfb-adv"><summary>Pengaturan lanjutan</summary><div class="space-y-2 pt-2">
+            ${s.footer.action === 'complete' ? `<label class="flex items-center gap-2 text-xs"><input type="checkbox" class="check" data-sk="success" ${s.success !== false ? 'checked' : ''}> Tandai sebagai akhir yang berhasil (<span class="mono">success</span>)</label>` : ''}
+            <div class="text-xs ink-2">${carry.length ? `Data dari layar sebelumnya: ${carry.map((n) => `<span class="kbd">${esc(n)}</span>`).join(' ')} — sisipkan ke teks dengan <span class="mono">\${data.nama_field}</span>.` : 'Layar ini tidak menerima data dari layar lain.'}</div>
+          </div></details>
+        </div>
+      </section>
+      <section class="card">
+        <div class="card-h"><div class="card-t">Komponen <span class="ink-3 font-normal">(${s.children.length})</span></div><button class="btn btn-sm ${b.catOpen ? 'btn-primary' : ''}" data-wfb-act="catalog" aria-expanded="${b.catOpen}">${ICON.plus} Tambah komponen</button></div>
+        ${b.catOpen ? wfbCatalogHtml(s) : ''}
+        <div id="wfb-clist" class="wfb-clist">${wfbCompListHtml(s)}</div>
+      </section>
+      ${c ? `<section class="card wfb-props-card" id="wfb-props">${wfbPropsHtml(s, c)}</section>` : ''}
+      <section class="card">
+        <div class="card-h"><div class="card-t">Tombol & navigasi</div></div>
+        <div class="p-4 space-y-3" data-scope="footer">
+          <div><label class="label" for="wfb-fl">Label tombol <span class="ink-3 font-normal" data-cnt="footer-label">${s.footer.label.length}/35</span></label><input class="input" id="wfb-fl" data-fk="label" value="${esc(s.footer.label)}" maxlength="35"></div>
+          <div><label class="label" for="wfb-fa">Saat tombol ditekan</label><select class="select" id="wfb-fa" data-fk="action" ${s.footer.raw ? 'disabled' : ''}>
+            <option value="navigate" ${s.footer.action === 'navigate' ? 'selected' : ''} ${others.length ? '' : 'disabled'}>Lanjut ke layar lain</option>
+            <option value="complete" ${s.footer.action === 'complete' ? 'selected' : ''}>Selesai — kirim data (layar akhir)</option></select></div>
+          ${s.footer.action === 'navigate' ? `<div><label class="label" for="wfb-fn">Layar tujuan</label><select class="select" id="wfb-fn" data-fk="next"><option value="">— Pilih layar —</option>${others.map((x) => `<option value="${x.uid}" ${s.footer.next === x.uid ? 'selected' : ''}>${b.m.screens.indexOf(x) + 1}. ${esc(x.title)} (${esc(x.id)})</option>`).join('')}</select></div>`
+            : `<p class="text-xs ink-2">Data yang dikirim ke Kontaq: ${[...new Set([...carry, ...s.children.filter(isField).map((x) => x.p.name)])].map((n) => `<span class="kbd">${esc(n)}</span>`).join(' ') || '<span class="ink-3">belum ada field</span>'}</p>`}
+          <details class="wfb-adv"><summary>Keterangan di atas tombol</summary><div class="grid grid-cols-3 gap-2 pt-2">
+            ${[['left-caption', 'Kiri'], ['center-caption', 'Tengah'], ['right-caption', 'Kanan']].map(([k, l]) => `<div><label class="label">${l}</label><input class="input" data-fk="${k}" value="${esc(s.footer.rest[k] || '')}" maxlength="15"></div>`).join('')}
+          </div><p class="hint">Maks. 15 karakter. Tengah tidak dapat digabung dengan kiri/kanan.</p></details>
+        </div>
+      </section>
+    </fieldset>`;
+    if (!ro) wfbSortable($('#wfb-clist'), '.wfb-comp', (from, to) => { const a = s.children; a.splice(to, 0, a.splice(from, 1)[0]); wfbChanged(true); });
+    wfbBindOptSort();
+    wfbRenderIssues();
+  }
+  function wfbCatalogHtml(s) {
+    const v = wb().m.version, n = s.children.length;
+    const group = (g, title) => `<div class="wfb-cat-g"><div class="wfb-cat-h">${title}</div><div class="wfb-cat">${Object.entries(WFB_COMP).filter(([, d]) => d.g === g).map(([t, d]) => {
+      const low = d.min && !vge(v, d.min), full = (d.cap && s.children.filter((c) => c.type === t).length >= d.cap) || n >= 49;
+      const why = low ? `Butuh Flow JSON ${d.min}+` : full ? (n >= 49 ? 'Layar penuh (maks. 50 komponen)' : `Maks. ${d.cap} per layar`) : d.d;
+      return `<button class="wfb-cat-i" data-add="${t}" ${low || full ? 'disabled' : ''} title="${esc(why)}"><span class="wfb-ic">${wic(d.ic)}</span><span class="min-w-0"><span class="block text-[12px] font-medium truncate">${esc(d.n)}</span><span class="block text-[10px] ink-3 truncate">${esc(why)}</span></span></button>`;
+    }).join('')}</div></div>`;
+    return `<div class="wfb-cat-wrap">${group('text', 'Teks & konten')}${group('form', 'Formulir')}</div>`;
+  }
+  function wfbCompListHtml(s) {
+    const b = wb(), ro = wfbRO(), issues = b.issues || [];
+    return s.children.map((c, i) => {
+      const def = WFB_COMP[c.type] || { n: c.p.json?.type || 'Komponen', ic: '<path d="m8 8-4 4 4 4M16 8l4 4-4 4"/>' };
+      const bad = issues.some((x) => x.c === c.uid && x.level === 'error');
+      return `<div class="wfb-comp ${b.sel.c === c.uid ? 'active' : ''}" data-c="${c.uid}">
+        ${ro ? '' : `<button class="wfb-grip" data-grip aria-label="Geser ${esc(def.n)} (panah atas/bawah)" title="Seret untuk mengubah urutan">${WFB_GRIP}</button>`}
+        <button class="flex items-center gap-2 flex-1 min-w-0 text-left" data-open-c><span class="wfb-ic">${wic(def.ic)}</span><span class="min-w-0"><span class="block text-[12px] font-medium">${esc(def.n)}${c.p.required && isField(c) ? ' <span class="danger-ink">*</span>' : ''}</span>
+          <span class="block text-[11px] ink-3 truncate" data-c-sum>${esc(compSummary(c)) || '—'}${isField(c) ? ` · <span class="mono">${esc(c.p.name)}</span>` : ''}</span></span></button>
+        ${bad ? '<span class="wfb-dot" title="Ada error"></span>' : ''}
+        ${ro ? '' : `<div class="wfb-comp-act"><button class="btn btn-ghost btn-sm btn-icon" data-ca="up" ${i ? '' : 'disabled'} aria-label="Naikkan">${ICON.up}</button><button class="btn btn-ghost btn-sm btn-icon" data-ca="down" ${i < s.children.length - 1 ? '' : 'disabled'} aria-label="Turunkan">${ICON.down}</button><button class="btn btn-ghost btn-sm btn-icon" data-ca="dup" aria-label="Gandakan" title="Gandakan">${ICON.copy}</button><button class="btn btn-ghost btn-sm btn-icon" data-ca="del" aria-label="Hapus" title="Hapus">${ICON.trash}</button></div>`}
+      </div>`;
+    }).join('') || '<div class="p-4 text-xs ink-3">Belum ada komponen. Klik <b>Tambah komponen</b>.</div>';
+  }
+  function wfbPropsHtml(s, c) {
+    const def = WFB_COMP[c.type];
+    if (!def) return `<div class="card-h"><div class="card-t">${esc(c.p.json?.type || 'Komponen')}</div><button class="btn btn-ghost btn-sm" data-wfb-act="unselect">${ICON.x}</button></div>
+      <div class="p-4 space-y-2"><p class="text-xs ink-2">Komponen ini tidak didukung editor visual dan disalin apa adanya ke Flow JSON.</p><pre class="json-editor surface-2 rounded p-2 text-[11px]" style="min-height:0;max-height:16rem">${esc(JSON.stringify(c.p.json, null, 2))}</pre></div>`;
+    const v = wb().m.version;
+    const fields = def.props.map((d) => wfbFieldHtml(s, c, d, v)).join('');
+    return `<div class="card-h"><div class="flex items-center gap-2 min-w-0"><span class="wfb-ic">${wic(def.ic)}</span><div class="card-t truncate">${esc(def.n)}</div><span class="mono text-[10px] ink-3">${c.type}</span></div>
+        <button class="btn btn-ghost btn-sm" data-wfb-act="unselect" aria-label="Tutup properti">${ICON.x}</button></div>
+      <div class="p-4 space-y-3" data-scope="comp"><div id="wfb-iss-c"></div><div class="wfb-grid">${fields}</div></div>`;
+  }
+  function wfbFieldHtml(s, c, d, v) {
+    const p = c.p, val = p[d.k], id = 'wfp-' + d.k;
+    if (d.show && !d.show(p)) return '';
+    const low = d.min && !vge(v, d.min);
+    const lab = (extra = '') => `<label class="label" for="${id}">${esc(d.l)}${d.req ? '' : ' <span class="ink-3 font-normal">(opsional)</span>'}${d.max ? ` <span class="ink-3 font-normal" data-cnt="${d.k}">${String(val ?? '').length}/${d.max}</span>` : ''}${low ? ` <span class="badge">Flow JSON ${d.min}+</span>` : ''}${extra}</label>`;
+    const hint = d.hint ? `<p class="hint">${esc(d.hint)}</p>` : '';
+    const wrap = (inner) => `<div class="${d.half ? 'half' : 'full'}">${inner}</div>`;
+    const dis = low ? 'disabled' : '';
+    switch (d.t) {
+      case 'text': return wrap(lab() + `<input class="input ${d.mono ? 'mono' : ''}" id="${id}" data-pk="${d.k}" value="${esc(val ?? '')}" ${d.max ? `maxlength="${d.max}"` : ''} ${dis}>` + wfbVarChips(s, d) + hint);
+      case 'textarea': return wrap(lab() + `<textarea class="textarea" id="${id}" data-pk="${d.k}" rows="${d.rows || 3}" ${d.max ? `maxlength="${d.max}"` : ''} ${dis}>${esc(val ?? '')}</textarea>` + wfbVarChips(s, d) + hint);
+      case 'number': return wrap(lab() + `<input class="input" type="number" id="${id}" data-pk="${d.k}" data-num value="${esc(val ?? '')}" min="${d.lo ?? ''}" placeholder="${esc(d.ph || '')}" ${dis}>` + hint);
+      case 'date': return wrap(lab() + `<input class="input" type="date" id="${id}" data-pk="${d.k}" value="${esc(val ?? '')}" ${dis}>` + hint);
+      case 'dates': return wrap(lab() + `<input class="input mono" id="${id}" data-pk="${d.k}" value="${esc(val ?? '')}" placeholder="2026-12-25, 2026-12-31" ${dis}>` + hint);
+      case 'select': return wrap(lab() + `<select class="select" id="${id}" data-pk="${d.k}" ${dis}>${d.opts.map(([k, l]) => `<option value="${k}" ${(val ?? '') === k ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>` + hint);
+      case 'bool': return `<label class="full flex items-center gap-2 text-xs"><input type="checkbox" class="check" data-pk="${d.k}" data-bool ${val ? 'checked' : ''} ${dis}> ${esc(d.l)}${low ? ` <span class="badge">Flow JSON ${d.min}+</span>` : ''}</label>`;
+      case 'name': return wrap(`<label class="label" for="${id}">Nama field <span class="ink-3 font-normal">(kunci data jawaban)</span></label><div class="flex gap-2"><input class="input mono" id="${id}" data-pk="name" value="${esc(val ?? '')}" maxlength="40" spellcheck="false">
+        <label class="flex items-center gap-1.5 text-xs whitespace-nowrap"><input type="checkbox" class="check" data-pk="nameAuto" data-bool ${p.nameAuto ? 'checked' : ''}> Otomatis</label></div><p class="hint">Unik di seluruh flow. Menjadi nama kolom di tab Jawaban dan CSV.</p>`);
+      case 'days': return wrap(`<div class="label">${esc(d.l)}</div><div class="flex flex-wrap gap-x-3 gap-y-1">${WFB_DAYS.map(([k, l]) => `<label class="flex items-center gap-1.5 text-xs"><input type="checkbox" class="check" data-day="${k}" ${!Array.isArray(val) || !val.length || val.includes(k) ? 'checked' : ''}>${l}</label>`).join('')}</div>`);
+      case 'optsel': return `<div class="full" id="wfb-initv">${lab()}` + `<select class="select" id="${id}" data-pk="${d.k}"><option value="">— Tidak ada —</option>${(p.options || []).map((o) => `<option value="${esc(o.id)}" ${val === o.id ? 'selected' : ''}>${esc(o.title || o.id)}</option>`).join('')}</select></div>`;
+      case 'optmulti': return `<div class="full" id="wfb-initv"><div class="label">${esc(d.l)} <span class="ink-3 font-normal">(opsional)</span></div><div class="flex flex-wrap gap-x-3 gap-y-1">${(p.options || []).map((o) => `<label class="flex items-center gap-1.5 text-xs"><input type="checkbox" class="check" data-initm="${esc(o.id)}" ${(val || []).includes(o.id) ? 'checked' : ''}>${esc(o.title || o.id)}</label>`).join('') || '<span class="text-xs ink-3">Belum ada pilihan.</span>'}</div></div>`;
+      case 'options': return `<div class="full">${wfbOptionsHtml(c, d)}</div>`;
+      case 'link': return `<div class="full">${wfbLinkHtml(s, c, d, v)}</div>`;
+      case 'image': return `<div class="full">${wfbImageHtml(c)}</div>`;
+    }
+    return '';
+  }
+  // Sisipkan ${data.x} (isian layar sebelumnya) ke teks
+  function wfbVarChips(s, d) {
+    if (!['text', 'label', 'description', 'helper-text'].includes(d.k)) return '';
+    const carry = [...wfbInfo(wb().m).carry.get(s.uid).keys()];
+    if (!carry.length) return '';
+    return `<div class="flex flex-wrap items-center gap-1 mt-1"><span class="text-[10px] ink-3">Sisipkan:</span>${carry.map((n) => `<button type="button" class="wfb-chip" data-ins="${d.k}" data-var="\${data.${esc(n)}}">${esc(n)}</button>`).join('')}</div>`;
+  }
+  function wfbOptionsHtml(c, d) {
+    const opts = c.p.options || [];
+    return `<div class="flex items-center justify-between mb-1"><div class="label mb-0">Pilihan <span class="ink-3 font-normal">${opts.length}/${d.hi}</span></div>
+        <div class="flex gap-1"><button type="button" class="btn btn-ghost btn-sm" data-oa="bulk">Tempel daftar</button><button type="button" class="btn btn-sm" data-oa="add" ${opts.length >= d.hi ? 'disabled' : ''}>${ICON.plus} Pilihan</button></div></div>
+      <div class="wfb-opts" id="wfb-opts">${opts.map((o, i) => `<div class="wfb-opt" data-oi="${i}">
+        <button type="button" class="wfb-grip" data-grip aria-label="Geser pilihan">${WFB_GRIP}</button>
+        <div class="flex-1 min-w-0 space-y-1">
+          <div class="flex gap-1.5"><input class="input" data-ok="title" value="${esc(o.title)}" maxlength="30" placeholder="Judul pilihan" aria-label="Judul pilihan ${i + 1}">
+            <input class="input mono w-24 flex-none" data-ok="id" value="${esc(o.id)}" maxlength="60" placeholder="id" aria-label="ID pilihan ${i + 1}" title="ID yang dikirim di jawaban"></div>
+          ${d.desc ? `<input class="input h-7 text-xs" data-ok="description" value="${esc(o.description || '')}" maxlength="300" placeholder="Deskripsi (opsional)" aria-label="Deskripsi pilihan ${i + 1}">` : ''}
+        </div>
+        <button type="button" class="btn btn-ghost btn-sm btn-icon" data-oa="del" aria-label="Hapus pilihan">${ICON.trash}</button>
+      </div>`).join('')}</div>
+      <p class="hint">Judul maks. 30 karakter. ID dikirim sebagai jawaban (otomatis dari judul sampai diubah).</p>`;
+  }
+  function wfbLinkHtml(s, c, d, v) {
+    const l = c.p.link, others = wb().m.screens.filter((x) => x.uid !== s.uid), kind = l?.kind || 'none';
+    return `<div class="label">${esc(d.l)}</div>
+      <select class="select" data-lk="kind">${d.optional ? `<option value="none" ${kind === 'none' ? 'selected' : ''}>Tanpa tautan</option>` : ''}
+        <option value="navigate" ${kind === 'navigate' ? 'selected' : ''} ${others.length ? '' : 'disabled'}>Buka layar lain</option>
+        <option value="open_url" ${kind === 'open_url' ? 'selected' : ''} ${vge(v, '6.0') ? '' : 'disabled'}>Buka URL${vge(v, '6.0') ? '' : ' (Flow JSON 6.0+)'}</option>
+        ${kind === 'raw' ? '<option value="raw" selected>Aksi lanjutan (JSON)</option>' : ''}</select>
+      ${kind === 'navigate' ? `<select class="select mt-2" data-lk="next" aria-label="Layar tujuan tautan"><option value="">— Pilih layar —</option>${others.map((x) => `<option value="${x.uid}" ${l.next === x.uid ? 'selected' : ''}>${esc(x.title)} (${esc(x.id)})</option>`).join('')}</select>` : ''}
+      ${kind === 'open_url' ? `<input class="input mt-2" data-lk="url" value="${esc(l.url || '')}" placeholder="https://contoh.com/syarat" aria-label="URL tautan">` : ''}`;
+  }
+  function wfbImageHtml(c) {
+    const src = c.p.src, kb = src ? Math.round(src.length * 0.75 / 1024) : 0;
+    return `<div class="label">Gambar</div>
+      ${src ? `<div class="wfb-img-prev"><img src="data:${wfbMime(src)};base64,${src}" alt=""><span class="text-[11px] ink-3">${kb} KB</span></div>` : ''}
+      <div class="flex gap-2 mt-1"><label class="btn btn-sm cursor-pointer">${ICON.image} ${src ? 'Ganti' : 'Unggah'} gambar<input type="file" accept="image/png,image/jpeg,image/webp" class="hidden" data-img></label>
+        ${src ? '<button type="button" class="btn btn-ghost btn-sm" data-img-del>Hapus</button>' : ''}</div>
+      <p class="hint">Dikompres otomatis ke JPEG/PNG ≤ 300 KB (batas Meta) dan disimpan di dalam Flow JSON. Maks. 3 gambar per layar.</p>`;
+  }
+  const wfbMime = (b64) => (String(b64).startsWith('iVBOR') ? 'image/png' : 'image/jpeg');
+  async function wfbCompressImage(file) {
+    if (!/^image\/(png|jpeg|webp|gif|bmp|avif)$/.test(file.type)) throw new Error('Pilih file gambar (JPEG/PNG).');
+    const img = await createImageBitmap(file);
+    let w = Math.min(img.width, 1080);
+    // PNG kecil dipertahankan apa adanya (transparansi tetap)
+    if (file.type === 'image/png' && file.size <= 280 * 1024 && img.width <= 1080) {
+      const b64 = await new Promise((r) => { const fr = new FileReader(); fr.onload = () => r(String(fr.result).split(',')[1]); fr.readAsDataURL(file); });
+      return { src: b64, w: img.width, h: img.height };
+    }
+    for (let round = 0; round < 8; round++, w = Math.round(w * 0.8)) {
+      const h = Math.round(img.height * w / img.width), cv = document.createElement('canvas');
+      cv.width = w; cv.height = h;
+      const g = cv.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, w, h); g.drawImage(img, 0, 0, w, h);
+      for (const q of [0.85, 0.72, 0.6]) {
+        const b64 = cv.toDataURL('image/jpeg', q).split(',')[1];
+        if (b64.length * 0.75 <= 290 * 1024) return { src: b64, w, h };
+      }
+    }
+    throw new Error('Gambar terlalu besar untuk dikompres ke 300 KB.');
+  }
+
+  /* Pratinjau ponsel */
+  const wfbVals = () => (wb().sim ? wb().sim.values : wb().pv);
+  function wfbSubst(t, s) {
+    const vals = wfbVals();
+    return String(t ?? '').replace(/\$\{(data|form)\.([A-Za-z0-9_]+)\}/g, (_, k, n) => {
+      const v = vals[n];
+      const out = Array.isArray(v) ? v.join(', ') : v && typeof v === 'object' ? [v['start-date'], v['end-date']].filter(Boolean).join(' – ') : v === true ? 'Ya' : v === false ? 'Tidak' : v;
+      return out || `[${n}]`;
+    });
+  }
+  // Markdown ringan untuk pratinjau (heading, daftar, tebal/miring/coret, tautan)
+  function wfbMd(text, block) {
+    const inline = (s) => esc(s).replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>').replace(/(^|[^*])\*([^*\s][^*]*)\*/g, '$1<i>$2</i>').replace(/~~([^~]+)~~/g, '<s>$1</s>')
+      .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+    if (!block) return inline(text).replace(/\n/g, '<br>');
+    const out = []; let list = null;
+    const flush = () => { if (list) { out.push(`<${list.t}>${list.items.map((x) => `<li>${x}</li>`).join('')}</${list.t}>`); list = null; } };
+    for (const line of String(text).split('\n')) {
+      let m;
+      if ((m = /^(#{1,2})\s+(.*)$/.exec(line))) { flush(); out.push(`<div class="wfp-h${m[1].length}">${inline(m[2])}</div>`); }
+      else if ((m = /^\s*[-*]\s+(.*)$/.exec(line))) { if (list?.t !== 'ul') { flush(); list = { t: 'ul', items: [] }; } list.items.push(inline(m[1])); }
+      else if ((m = /^\s*\d+\.\s+(.*)$/.exec(line))) { if (list?.t !== 'ol') { flush(); list = { t: 'ol', items: [] }; } list.items.push(inline(m[1])); }
+      else if (!line.trim()) flush();
+      else { flush(); out.push(`<p>${inline(line)}</p>`); }
+    }
+    flush();
+    return out.join('');
+  }
+  function wfbCompPreview(c, s) {
+    const p = c.p, vals = wfbVals(), errs = wb().sim?.errors || {}, sel = !wb().sim && wb().sel.c === c.uid ? 'sel' : '';
+    const opt = p.required ? '' : ' <span class="wfp-opt">(opsional)</span>';
+    const errHtml = p.name && errs[p.name] ? `<div class="wfp-err">${esc(errs[p.name])}</div>` : '';
+    const help = p['helper-text'] ? `<div class="wfp-help">${esc(wfbSubst(p['helper-text'], s))}</div>` : '';
+    const fw = { bold: 'font-weight:600', italic: 'font-style:italic', bold_italic: 'font-weight:600;font-style:italic' }[p['font-weight']] || '';
+    const txt = (t) => (p.markdown ? wfbMd(wfbSubst(t, s)) : esc(wfbSubst(t, s)).replace(/\n/g, '<br>'));
+    const v = p.name ? vals[p.name] : undefined;
+    const box = (inner, cls = '') => `<div class="wfp-c ${sel} ${cls}" data-pc="${c.uid}">${inner}</div>`;
+    const choice = (multi) => `<div class="wfp-label">${esc(wfbSubst(p.label, s))}${opt}</div>${p.description ? `<div class="wfp-desc">${esc(wfbSubst(p.description, s))}</div>` : ''}
+      <div class="wfp-list">${(p.options || []).map((o) => {
+        const on = multi ? (v ?? p['init-value'] ?? []).includes(o.id) : (v ?? p['init-value']) === o.id;
+        return `<label class="wfp-row"><span class="min-w-0 flex-1"><span class="block">${esc(o.title)}</span>${o.description ? `<span class="wfp-desc block">${esc(o.description)}</span>` : ''}</span>
+          <input type="${multi ? 'checkbox' : 'radio'}" name="pv_${esc(p.name)}" value="${esc(o.id)}" data-pv-name="${esc(p.name)}" data-pv-kind="${multi ? 'multi' : 'one'}" ${on ? 'checked' : ''}></label>`;
+      }).join('')}</div>${errHtml}`;
+    switch (c.type) {
+      case 'TextHeading': return box(`<div class="wfp-heading">${esc(wfbSubst(p.text, s))}</div>`);
+      case 'TextSubheading': return box(`<div class="wfp-sub">${esc(wfbSubst(p.text, s))}</div>`);
+      case 'TextBody': return box(`<div class="wfp-body" style="${fw}${p.strikethrough ? ';text-decoration:line-through' : ''}">${txt(p.text)}</div>`);
+      case 'TextCaption': return box(`<div class="wfp-caption" style="${fw}${p.strikethrough ? ';text-decoration:line-through' : ''}">${txt(p.text)}</div>`);
+      case 'RichText': return box(`<div class="wfp-rich">${wfbMd(wfbSubst(p.text, s), true)}</div>`);
+      case 'EmbeddedLink': return box(`<button type="button" class="wfp-link" data-pv-link="${c.uid}">${esc(wfbSubst(p.text, s))}</button>`);
+      case 'Image': return box(p.src ? `<img class="wfp-img" src="data:${wfbMime(p.src)};base64,${p.src}" alt="${esc(p['alt-text'] || '')}" style="height:${Math.max(20, Math.min(600, Number(p.height) || 160))}px;object-fit:${p['scale-type'] === 'cover' ? 'cover' : 'contain'}">` : '<div class="wfp-img-empty">Gambar</div>');
+      case 'TextInput': {
+        const type = { number: 'number', email: 'email', phone: 'tel', password: 'password', passcode: 'password' }[p['input-type']] || 'text';
+        return box(`<label class="wfp-field ${errs[p.name] ? 'bad' : ''}"><span class="wfp-flabel">${esc(wfbSubst(p.label, s))}${opt}</span><input type="${type}" data-pv-name="${esc(p.name)}" value="${esc(v ?? p['init-value'] ?? '')}" maxlength="${Number(p['max-chars']) || 80}" ${p['input-type'] === 'passcode' ? 'inputmode="numeric"' : ''}></label>${errHtml || help}`);
+      }
+      case 'TextArea': return box(`<label class="wfp-field ${errs[p.name] ? 'bad' : ''}"><span class="wfp-flabel">${esc(wfbSubst(p.label, s))}${opt}</span><textarea rows="3" data-pv-name="${esc(p.name)}" maxlength="${Number(p['max-length']) || 600}">${esc(v ?? p['init-value'] ?? '')}</textarea></label>${errHtml || help}`);
+      case 'Dropdown': return box(`<label class="wfp-field wfp-select ${errs[p.name] ? 'bad' : ''}"><span class="wfp-flabel">${esc(wfbSubst(p.label, s))}${opt}</span><select data-pv-name="${esc(p.name)}"><option value=""></option>${(p.options || []).map((o) => `<option value="${esc(o.id)}" ${(v ?? p['init-value']) === o.id ? 'selected' : ''}>${esc(o.title)}</option>`).join('')}</select></label>${errHtml}`);
+      case 'RadioButtonsGroup': return box(choice(false));
+      case 'CheckboxGroup': return box(choice(true));
+      case 'ChipsSelector': return box(`<div class="wfp-label">${esc(wfbSubst(p.label, s))}${opt}</div>${p.description ? `<div class="wfp-desc">${esc(p.description)}</div>` : ''}<div class="wfp-chips">${(p.options || []).map((o) => `<label class="wfp-chipx"><input type="checkbox" value="${esc(o.id)}" data-pv-name="${esc(p.name)}" data-pv-kind="multi" ${(v ?? p['init-value'] ?? []).includes(o.id) ? 'checked' : ''}><span>${esc(o.title)}</span></label>`).join('')}</div>${errHtml}`);
+      case 'DatePicker': return box(`<label class="wfp-field ${errs[p.name] ? 'bad' : ''}"><span class="wfp-flabel">${esc(wfbSubst(p.label, s))}${opt}</span><input type="date" data-pv-name="${esc(p.name)}" value="${esc(v ?? p['init-value'] ?? '')}" min="${esc(p['min-date'] || '')}" max="${esc(p['max-date'] || '')}"></label>${errHtml || help}`);
+      case 'CalendarPicker': {
+        if (isRange(p)) {
+          const r = v || {};
+          return box(`<div class="wfp-label">${esc(wfbSubst(p.label, s))}${opt}</div>${p.title ? `<div class="wfp-sub" style="font-size:14px">${esc(p.title)}</div>` : ''}${p.description ? `<div class="wfp-desc">${esc(p.description)}</div>` : ''}
+            <div class="grid grid-cols-2 gap-2 mt-1"><label class="wfp-field"><span class="wfp-flabel">Mulai</span><input type="date" data-pv-name="${esc(p.name)}" data-pv-kind="start" value="${esc(r['start-date'] || '')}" min="${esc(p['min-date'] || '')}" max="${esc(p['max-date'] || '')}"></label>
+            <label class="wfp-field"><span class="wfp-flabel">Selesai</span><input type="date" data-pv-name="${esc(p.name)}" data-pv-kind="end" value="${esc(r['end-date'] || '')}" min="${esc(p['min-date'] || '')}" max="${esc(p['max-date'] || '')}"></label></div>${errHtml || help}`);
+        }
+        return box(`<label class="wfp-field ${errs[p.name] ? 'bad' : ''}"><span class="wfp-flabel">${esc(wfbSubst(p.label, s))}${opt}</span><input type="date" data-pv-name="${esc(p.name)}" value="${esc(v ?? p['init-value'] ?? '')}" min="${esc(p['min-date'] || '')}" max="${esc(p['max-date'] || '')}"></label>${errHtml || help}`);
+      }
+      case 'OptIn': return box(`<label class="wfp-optin"><input type="checkbox" data-pv-name="${esc(p.name)}" data-pv-kind="bool" ${(v ?? p['init-value']) ? 'checked' : ''}><span>${esc(wfbSubst(p.label, s))}${p.required ? '' : ' <span class="wfp-opt">(opsional)</span>'}${p.link && p.link.kind !== 'none' ? ` <button type="button" class="wfp-link inline" data-pv-link="${c.uid}">Baca selengkapnya</button>` : ''}</span></label>${errHtml}`);
+      default: return box(`<div class="wfp-raw">${esc(c.p.json?.type || 'Komponen')} — tidak dapat dipratinjau</div>`);
+    }
+  }
+  function wfbRenderPreview() {
+    const b = wb(), el = $('#wfb-right'); if (!el) return;
+    const sim = b.sim, s = sim ? wb().m.screens.find((x) => x.uid === sim.stack[sim.stack.length - 1]) : wScreen();
+    const f = S.wfd.flow;
+    const scroll = $('.wfp-scroll', el)?.scrollTop || 0;
+    el.innerHTML = `<div class="wfb-right-in">
+      <div class="flex items-center gap-2 mb-2">
+        <div class="seg"><button data-pv-mode="edit" class="${sim ? '' : 'active'}">Edit</button><button data-pv-mode="sim" class="${sim ? 'active' : ''}">${ICON.play.replace('<svg', '<svg width="12" height="12"')} Uji alur</button></div>
+        <div class="flex-1"></div>
+        ${sim ? `<button class="btn btn-ghost btn-sm" data-pv-act="restart" title="Mulai dari layar pertama">${ICON.refresh} Ulang</button>` : ''}
+      </div>
+      <div class="wfp-phone">
+        <div class="wfp-status"><span>9:41</span><span>●●● ▮</span></div>
+        <div class="wfp-top"><button type="button" class="wfp-x" data-pv-act="${sim && sim.stack.length > 1 ? 'back' : 'close'}" aria-label="${sim && sim.stack.length > 1 ? 'Kembali' : 'Tutup'}">${sim && sim.stack.length > 1 ? ICON.back : ICON.x}</button>
+          <div class="wfp-title">${esc(wfbSubst(s?.title || '', s))}</div><span class="wfp-more">⋮</span></div>
+        <div class="wfp-scroll">${s ? s.children.map((c) => wfbCompPreview(c, s)).join('') : ''}</div>
+        <div class="wfp-foot">
+          ${s && (s.footer.rest['left-caption'] || s.footer.rest['right-caption'] || s.footer.rest['center-caption']) ? `<div class="wfp-caps ${s.footer.rest['center-caption'] ? 'center' : ''}"><span>${esc(s.footer.rest['center-caption'] || s.footer.rest['left-caption'] || '')}</span><span>${esc(s.footer.rest['center-caption'] ? '' : s.footer.rest['right-caption'] || '')}</span></div>` : ''}
+          <button type="button" class="wfp-btn" data-pv-act="footer">${esc(s?.footer.label || 'Lanjut')}</button>
+          <div class="wfp-managed">Dikelola oleh bisnis. <span>Pelajari selengkapnya</span></div>
+        </div>
+        ${sim?.done ? `<div class="wfp-done"><div class="wfp-done-card">
+          <div class="wfp-done-ic">${ICON.check}</div><div class="font-semibold">Formulir terkirim (simulasi)</div>
+          <div class="text-[11px] ink-3 mb-2">Data ini tidak dikirim ke server dan tidak dicatat sebagai jawaban.</div>
+          <pre class="wfp-payload">${esc(JSON.stringify(sim.done, null, 2))}</pre>
+          <button class="btn btn-sm btn-primary w-full" data-pv-act="restart">Uji lagi</button></div></div>` : ''}
+      </div>
+      <div class="text-[11px] ink-3 mt-2 text-center">${sim ? `Layar ${b.m.screens.indexOf(s) + 1} dari ${b.m.screens.length} · data uji tidak dikirim ke mana pun` : 'Klik komponen untuk mengeditnya. Pratinjau mendekati tampilan WhatsApp.'}</div>
+      <div class="text-center mt-1"><button class="text-[11px] underline ink-2" data-wfb-act="meta-preview">Pratinjau resmi Meta ${ICON.external.replace('<svg', '<svg width="10" height="10" style="display:inline"')}</button>${f.status !== 'DRAFT' || !b.dirty ? '' : ' <span class="text-[10px] ink-3">(simpan dulu)</span>'}</div>
+    </div>`;
+    const sc = $('.wfp-scroll', el); if (sc) sc.scrollTop = scroll;
+    // gulir ke komponen terpilih hanya saat pilihan berubah (bukan tiap ketikan)
+    const selEl = $('.wfp-c.sel', el);
+    if (sc && selEl && b.pvSel !== b.sel.c) { const top = selEl.offsetTop - sc.offsetTop; if (top < sc.scrollTop || top > sc.scrollTop + sc.clientHeight - 60) sc.scrollTop = Math.max(0, top - 40); }
+    b.pvSel = b.sel.c;
+  }
+
+  // Validasi isian layar saat uji alur
+  function wfbSimCheck(s) {
+    const vals = wb().sim.values, errs = {};
+    for (const c of s.children.filter(isField)) {
+      const p = c.p, v = vals[p.name] ?? p['init-value'];
+      const empty = v == null || v === '' || v === false || (Array.isArray(v) && !v.length) || (isRange(p) && c.type === 'CalendarPicker' && !(v?.['start-date'] && v?.['end-date']));
+      if (p.required && empty) { errs[p.name] = c.type === 'OptIn' ? 'Wajib dicentang' : 'Wajib diisi'; continue; }
+      if (empty) continue;
+      if (c.type === 'TextInput') {
+        const t = String(v);
+        if (p['min-chars'] && t.length < Number(p['min-chars'])) errs[p.name] = `Minimal ${p['min-chars']} karakter`;
+        else if (p['input-type'] === 'email' && !/^\S+@\S+\.\S+$/.test(t)) errs[p.name] = 'Email tidak valid';
+        else if (p['input-type'] === 'phone' && !/^\+?[0-9 ()-]{6,}$/.test(t)) errs[p.name] = 'Nomor telepon tidak valid';
+        else if (p['input-type'] === 'number' && !/^-?\d+([.,]\d+)?$/.test(t)) errs[p.name] = 'Harus berupa angka';
+        else if (p.pattern) { try { if (!new RegExp(p.pattern).test(t)) errs[p.name] = p['helper-text'] || 'Format tidak sesuai'; } catch {} }
+      }
+      if (Array.isArray(v)) {
+        if (p['min-selected-items'] && v.length < Number(p['min-selected-items'])) errs[p.name] = `Pilih minimal ${p['min-selected-items']}`;
+        if (p['max-selected-items'] && v.length > Number(p['max-selected-items'])) errs[p.name] = `Pilih maksimal ${p['max-selected-items']}`;
+      }
+    }
+    wb().sim.errors = errs;
+    return !Object.keys(errs).length;
+  }
+  // Payload simulasi = payload complete dengan nilai uji
+  function wfbSimPayload(s) {
+    const j = wfbToJson(wb().m), js = j.screens.find((x) => x.id === s.id);
+    const payload = js.layout.children.find((x) => x.type === 'Footer')['on-click-action'].payload || {};
+    const vals = wb().sim.values, info = wfbInfo(wb().m);
+    const kindOf = new Map(wb().m.screens.flatMap((x) => info.fields.get(x.uid)));
+    return Object.fromEntries(Object.entries(payload).map(([k, v]) => {
+      const m = typeof v === 'string' && /^\$\{(form|data)\.([A-Za-z0-9_]+)\}$/.exec(v);
+      return [k, m ? (vals[m[2]] ?? clone(EMPTY_VAL[kindOf.get(m[2])] ?? '')) : v];
+    }));
+  }
+  function wfbSimStart() {
+    const b = wb(), init = {};
+    b.m.screens.forEach((s) => s.children.filter(isField).forEach((c) => { if (c.p['init-value'] !== undefined && c.p['init-value'] !== '') init[c.p.name] = clone(c.p['init-value']); }));
+    b.sim = { stack: [b.m.screens[0].uid], values: init, errors: {}, done: null };
+    wfbRenderPreview();
+  }
+  function wfbPreviewAction(act, el) {
+    const b = wb(), sim = b.sim;
+    const s = sim ? b.m.screens.find((x) => x.uid === sim.stack[sim.stack.length - 1]) : wScreen();
+    const go = (to) => {
+      if (!to || !wScreen(to)) return toast('Layar tujuan belum dipilih.', true);
+      if (sim) { sim.stack.push(to); sim.errors = {}; wfbRenderPreview(); $('#wfb-right .wfp-scroll').scrollTop = 0; }
+      else wfbSelect(to, null);
+    };
+    if (act === 'back' && sim) { sim.stack.pop(); sim.errors = {}; return wfbRenderPreview(); }
+    if (act === 'close') return sim ? toast('Di WhatsApp, tombol ini menutup formulir tanpa mengirim.') : null;
+    if (act === 'restart') return wfbSimStart();
+    if (act === 'footer') {
+      if (sim && !wfbSimCheck(s)) return wfbRenderPreview();
+      if (s.footer.action === 'complete') {
+        if (!sim) return toast('Layar akhir: data dikirim saat pelanggan menekan tombol ini. Pilih "Uji alur" untuk mencoba.');
+        sim.done = wfbSimPayload(s); return wfbRenderPreview();
+      }
+      return go(s.footer.next);
+    }
+    if (act === 'link') {
+      const c = s.children.find((x) => x.uid === el.dataset.pvLink), l = c?.p.link;
+      if (!l || l.kind === 'none') return;
+      if (l.kind === 'open_url') { if (/^https?:\/\//.test(l.url || '')) window.open(l.url, '_blank', 'noopener'); return; }
+      if (l.kind === 'navigate') return go(l.next);
+    }
+  }
+
+  /* Pembaruan */
+  let wfbRaf = 0;
+  // Dipanggil setiap perubahan; struct=true merender ulang panel (perubahan struktur), selain itu hanya bagian yang terpengaruh
+  function wfbChanged(struct) {
+    const b = wb(); b.dirty = true;
+    if (b.sim) { b.sim.stack = b.sim.stack.filter((u) => wScreen(u)); if (!b.sim.stack.length) b.sim = null; }
+    if (struct) { wfbRenderLeft(); wfbRenderMid(); wfbRenderPreview(); wfbRenderStatus(); return; }
+    cancelAnimationFrame(wfbRaf);
+    wfbRaf = requestAnimationFrame(() => {
+      wfbRenderStatus(); wfbRenderPreview();
+      // daftar layar & ringkasan komponen tanpa mengganggu fokus input
+      const s = wScreen(), row = $(`#wfb-scrs [data-s="${s.uid}"]`);
+      if (row) { $('[data-s-title]', row).textContent = s.title || '(tanpa judul)'; }
+      const c = wComp(s), crow = c && $(`#wfb-clist [data-c="${c.uid}"] [data-c-sum]`);
+      if (crow) crow.innerHTML = `${esc(compSummary(c)) || '—'}${isField(c) ? ` · <span class="mono">${esc(c.p.name)}</span>` : ''}`;
+      $$('#wfb-scrs .wfb-scr').forEach((r) => { const bad = (b.issues || []).some((x) => x.s === r.dataset.s && x.level === 'error'); const dot = $('.wfb-dot', r); if (bad && !dot) $('[data-open-s]', r).insertAdjacentHTML('afterend', '<span class="wfb-dot" title="Ada error"></span>'); if (!bad && dot) dot.remove(); });
+    });
+  }
+  function wfbRenderStatus() {
+    const b = wb(); if (!b) return;
+    b.issues = wfbValidate(b.m);
+    const errs = b.issues.filter((x) => x.level === 'error').length, metaErrs = (S.wfd.flow.validationErrors || []).length;
+    const dirty = b.dirty || wfbMetaDirty();
+    const st = $('#wfh-dirty');
+    if (st) { st.className = 'wfh-dirty ' + (dirty ? 'on' : ''); st.innerHTML = dirty ? '<span class="dot"></span> Belum disimpan' : `${ICON.check.replace('<svg', '<svg width="12" height="12"')} Tersimpan`; }
+    const vb = $('#wfh-validate'); if (vb) vb.innerHTML = `${ICON.check} Validasi${errs || (!b.dirty && metaErrs) ? ` <span class="badge badge-red">${errs || metaErrs}</span>` : ''}`;
+    const sb = $('#wfh-save'); if (sb) sb.disabled = !dirty;
+    wfbRenderIssues();
+  }
+  function wfbRenderIssues() {
+    const b = wb(), list = b.issues || [];
+    const html = (xs) => xs.length ? `<ul class="wfb-iss">${xs.map((x) => `<li class="${x.level}">${esc(x.msg)}</li>`).join('')}</ul>` : '';
+    const es = $('#wfb-iss-s'); if (es) es.innerHTML = html(list.filter((x) => x.s === b.sel.s && !x.c));
+    const ec = $('#wfb-iss-c'); if (ec) ec.innerHTML = html(list.filter((x) => x.c && x.c === b.sel.c));
+  }
+  function wfbSelect(s, c) {
+    const b = wb(); b.sel = { s, c };
+    if (b.sim) b.sim = null;
+    wfbRenderLeft(); wfbRenderMid(); wfbRenderPreview();
+    if (c && wfbNarrow()) wfbPane('edit');
+    if (c) $('#wfb-props')?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }
+
+  /* Aksi layar */
+  function wfbAddScreen() {
+    const b = wb(), cur = wScreen(), i = b.m.screens.indexOf(cur);
+    const s = wfbNewScreen(b.m, `Layar ${b.m.screens.length + 1}`, cur.footer.action === 'complete');
+    // Sisipkan ke rantai: layar aktif → layar baru → tujuan lama layar aktif
+    if (cur.footer.action === 'complete') { cur.footer.action = 'navigate'; cur.footer.next = s.uid; if (cur.footer.label === 'Kirim') cur.footer.label = 'Lanjut'; }
+    else { s.footer.next = cur.footer.next; cur.footer.next = s.uid; }
+    b.m.screens.splice(i + 1, 0, s);
+    b.sel = { s: s.uid, c: null };
+    wfbChanged(true);
+    toast(`Layar "${s.title}" ditambahkan setelah "${cur.title}".`);
+  }
+  function wfbDupScreen(u) {
+    const b = wb(), src = wScreen(u), s = clone(src);
+    s.uid = wuid('s'); s.title = src.title + ' (salinan)'; s.idAuto = true;
+    s.id = uniqScreenId(s.title, s.uid);
+    s.children.forEach((c) => {
+      c.uid = wuid('c');
+      if (isField(c)) { c.p.name = uniqName(c.p.name, c.uid); c.p.nameAuto = false; }
+      (c.p.options || []).forEach((o) => { o.uid = wuid('o'); });
+    });
+    // nama field unik juga terhadap sesama komponen salinan
+    const seen = new Set();
+    s.children.filter(isField).forEach((c) => { let n = c.p.name, i = 2; while (seen.has(n)) n = `${c.p.name}_${i++}`; c.p.name = n; seen.add(n); });
+    b.m.screens.splice(b.m.screens.indexOf(src) + 1, 0, s);
+    b.sel = { s: s.uid, c: null };
+    wfbChanged(true);
+  }
+  async function wfbDelScreen(u) {
+    const b = wb(), s = wScreen(u);
+    if (b.m.screens.length < 2) return;
+    const refs = b.m.screens.filter((x) => x.uid !== u && (x.footer.next === u || x.children.some((c) => c.p.link?.next === u)));
+    const bridge = s.footer.action === 'navigate' && s.footer.next !== u ? s.footer.next : null;
+    const fields = s.children.filter(isField).map((c) => c.p.name);
+    const msg = `Hapus layar "${s.title}" beserta ${s.children.length} komponennya?`
+      + (refs.length ? ` ${refs.length} layar mengarah ke layar ini (${refs.map((x) => x.title).join(', ')}); tujuannya akan ${bridge ? `dialihkan ke "${wScreen(bridge).title}"` : 'dikosongkan dan perlu dipilih ulang'}.` : '')
+      + (fields.length ? ` Field ${fields.join(', ')} tidak akan dikumpulkan lagi.` : '');
+    if (!await confirmBox(msg, 'Hapus layar', true)) return;
+    for (const x of b.m.screens) {
+      if (x.footer.next === u) x.footer.next = bridge && bridge !== x.uid ? bridge : null;
+      x.children.forEach((c) => { if (c.p.link?.next === u) c.p.link.next = bridge && bridge !== x.uid ? bridge : null; });
+    }
+    const i = b.m.screens.indexOf(s);
+    b.m.screens.splice(i, 1);
+    b.sel = { s: b.m.screens[Math.max(0, i - 1)].uid, c: null };
+    wfbChanged(true);
+    toast('Layar dihapus.');
+  }
+  function wfbRenameScreen(u) {
+    const row = $(`#wfb-scrs [data-s="${u}"]`), s = wScreen(u); if (!row) return;
+    const t = $('[data-s-title]', row);
+    t.innerHTML = `<input class="input h-7" value="${esc(s.title)}" maxlength="80" aria-label="Judul layar">`;
+    const inp = $('input', t); inp.focus(); inp.select();
+    const done = (ok) => {
+      if (ok && inp.value.trim()) { s.title = inp.value.trim(); if (s.idAuto) s.id = uniqScreenId(s.title, s.uid); }
+      wfbChanged(true);
+    };
+    inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); inp.blur(); } if (e.key === 'Escape') { inp.dataset.cancel = '1'; inp.blur(); } e.stopPropagation(); });
+    inp.addEventListener('blur', () => done(!inp.dataset.cancel), { once: true });
+    inp.addEventListener('click', (e) => e.stopPropagation());
+  }
+
+  /* Pengikat event (sekali per render tab; delegasi pada #wf-body) */
+  function wfbBindOnce() {
+    const root = $('#wf-body');
+    root.addEventListener('click', wfbOnClick);
+    root.addEventListener('input', wfbOnInput);
+    root.addEventListener('change', wfbOnInput);
+    root.addEventListener('change', wfbOnPreviewInput);
+    root.addEventListener('input', wfbOnPreviewInput);
+  }
+  function wfbOnClick(e) {
+    const b = wb(); if (!b) return;
+    const t = e.target;
+    const act = t.closest('[data-wfb-act]')?.dataset.wfbAct;
+    if (act === 'add-screen') return wfbAddScreen();
+    if (act === 'catalog') { b.catOpen = !b.catOpen; return wfbRenderMid(); }
+    if (act === 'unselect') return wfbSelect(b.sel.s, null);
+    if (act === 'clone') return wfCreateModal(S.wfd.flow);
+    if (act === 'meta-preview') return wfbMetaPreview();
+    const add = t.closest('[data-add]');
+    if (add) {
+      const s = wScreen(), c = wfbNewComp(add.dataset.add), at = b.sel.c ? s.children.findIndex((x) => x.uid === b.sel.c) + 1 : s.children.length;
+      s.children.splice(at, 0, c); b.sel.c = c.uid; b.catOpen = false;
+      wfbChanged(true);
+      $('#wfb-props')?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      setTimeout(() => $('#wfb-props input:not([type=checkbox]), #wfb-props textarea')?.focus(), 60);
+      return;
+    }
+    // Panel kiri
+    const srow = t.closest('#wfb-scrs [data-s]');
+    if (srow) {
+      const sa = t.closest('[data-sa]')?.dataset.sa;
+      if (sa === 'rename') return wfbRenameScreen(srow.dataset.s);
+      if (sa === 'dup') return wfbDupScreen(srow.dataset.s);
+      if (sa === 'del') return wfbDelScreen(srow.dataset.s);
+      if (t.closest('[data-open-s]')) { wfbSelect(srow.dataset.s, null); if (wfbNarrow()) wfbPane('edit'); }
+      return;
+    }
+    // Daftar komponen
+    const crow = t.closest('#wfb-clist [data-c]');
+    if (crow) {
+      const s = wScreen(), i = s.children.findIndex((x) => x.uid === crow.dataset.c), ca = t.closest('[data-ca]')?.dataset.ca;
+      if (ca === 'up' || ca === 'down') { const j = i + (ca === 'up' ? -1 : 1); [s.children[i], s.children[j]] = [s.children[j], s.children[i]]; return wfbChanged(true); }
+      if (ca === 'dup') { const c = clone(s.children[i]); c.uid = wuid('c'); (c.p.options || []).forEach((o) => { o.uid = wuid('o'); }); if (isField(c)) { c.p.name = uniqName(c.p.name, c.uid); c.p.nameAuto = false; } s.children.splice(i + 1, 0, c); b.sel.c = c.uid; return wfbChanged(true); }
+      if (ca === 'del') { const c = s.children[i]; s.children.splice(i, 1); if (b.sel.c === c.uid) b.sel.c = null; wfbChanged(true); return toast(`${WFB_COMP[c.type]?.n || 'Komponen'} dihapus.`); }
+      if (t.closest('[data-open-c]')) wfbSelect(s.uid, crow.dataset.c);
+      return;
+    }
+    // Pilihan (options)
+    const oa = t.closest('[data-oa]')?.dataset.oa;
+    if (oa) {
+      const c = wComp(), opts = c.p.options;
+      if (oa === 'add') { const n = opts.length + 1, o = { uid: wuid('o'), id: '', title: `Pilihan ${n}`, description: '', idAuto: true }; o.id = wfbOptId(opts, o.title, o.uid); opts.push(o); }
+      if (oa === 'del') { const i = Number(t.closest('[data-oi]').dataset.oi), [o] = opts.splice(i, 1); wfbFixInit(c, o.id); }
+      if (oa === 'bulk') return wfbBulkOptions(c);
+      return wfbRefreshProps();
+    }
+    const ins = t.closest('[data-ins]');
+    if (ins) {
+      const el = $(`#wfb-props [data-pk="${ins.dataset.ins}"]`); if (!el) return;
+      el.focus(); el.setRangeText(ins.dataset.var, el.selectionStart ?? el.value.length, el.selectionEnd ?? el.value.length, 'end');
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      return;
+    }
+    if (t.closest('[data-img-del]')) { const c = wComp(); c.p.src = ''; return wfbRefreshProps(); }
+    // Pratinjau
+    const mode = t.closest('[data-pv-mode]')?.dataset.pvMode;
+    if (mode) { if (mode === 'sim') wfbSimStart(); else { b.sim = null; wfbRenderPreview(); } return; }
+    const pva = t.closest('[data-pv-act]');
+    if (pva) return wfbPreviewAction(pva.dataset.pvAct, pva);
+    const pvl = t.closest('[data-pv-link]');
+    if (pvl) { e.preventDefault(); return wfbPreviewAction('link', pvl); }
+    const pc = t.closest('#wfb-right [data-pc]');
+    if (pc && !b.sim && b.sel.c !== pc.dataset.pc) {
+      b.sel.c = pc.dataset.pc; b.pvSel = pc.dataset.pc;
+      wfbRenderMid();
+      $$('#wfb-right .wfp-c').forEach((x) => x.classList.toggle('sel', x === pc));
+    }
+  }
+  const wfbOptId = (opts, title, except) => { const used = new Set(opts.filter((o) => o.uid !== except).map((o) => o.id)); const b = slugify(title) || 'opsi'; let n = b, i = 2; while (used.has(n)) n = `${b}_${i++}`; return n; };
+  function wfbFixInit(c, removedId) {
+    const iv = c.p['init-value'];
+    if (Array.isArray(iv)) c.p['init-value'] = iv.filter((x) => x !== removedId);
+    else if (iv === removedId) delete c.p['init-value'];
+  }
+  function wfbRefreshInitField(c) {
+    const box = $('#wfb-initv'), d = WFB_COMP[c.type].props.find((x) => x.k === 'init-value');
+    if (box && d) box.outerHTML = wfbFieldHtml(wScreen(), c, d, wb().m.version);
+  }
+  function wfbRefreshProps() {
+    const s = wScreen(), c = wComp(), box = $('#wfb-props');
+    if (box && c) { const y = $('#wfb-mid').scrollTop; box.innerHTML = wfbPropsHtml(s, c); $('#wfb-mid').scrollTop = y; wfbBindOptSort(); }
+    wfbChanged(false);
+  }
+  function wfbBindOptSort() {
+    const c = wComp(), list = $('#wfb-opts');
+    if (list && c && !wfbRO()) wfbSortable(list, '.wfb-opt', (from, to) => { const a = c.p.options; a.splice(to, 0, a.splice(from, 1)[0]); wfbRefreshProps(); });
+  }
+  function wfbBulkOptions(c) {
+    const d = WFB_COMP[c.type].props.find((x) => x.t === 'options');
+    modal('Tempel daftar pilihan', `<div class="space-y-2"><textarea class="textarea" id="wfb-bulk" rows="10" placeholder="Satu pilihan per baris">${esc(c.p.options.map((o) => o.title).join('\n'))}</textarea>
+      <p class="hint">Satu pilihan per baris, maks. ${d.hi}. Pilihan yang judulnya sama mempertahankan ID-nya.</p></div>`,
+    { footer: '<button class="btn" data-act="modal-close">Batal</button><button class="btn btn-primary" id="wfb-bulk-go">Terapkan</button>' });
+    $('#wfb-bulk-go').addEventListener('click', () => {
+      const lines = $('#wfb-bulk').value.split('\n').map((x) => x.trim().slice(0, 30)).filter(Boolean).slice(0, d.hi);
+      const old = new Map(c.p.options.map((o) => [o.title, o])), next = [];
+      for (const t of lines) { const o = old.get(t) || { uid: wuid('o'), id: '', title: t, description: '', idAuto: true }; if (!o.id) o.id = wfbOptId(next, t, o.uid); next.push(o); }
+      c.p.options = next;
+      const ids = new Set(next.map((o) => o.id));
+      const iv = c.p['init-value']; if (Array.isArray(iv)) c.p['init-value'] = iv.filter((x) => ids.has(x)); else if (iv && !ids.has(iv)) delete c.p['init-value'];
+      closeModal(); wfbRefreshProps();
+    });
+  }
+  async function wfbOnInput(e) {
+    const b = wb(), t = e.target; if (!b || t.closest('#wfb-right')) return;
+    const s = wScreen();
+    if (t.id === 'wfb-ver') { if (e.type !== 'change') return; b.m.version = t.value; return wfbChanged(true); }
+    if (t.dataset.sk) {
+      const k = t.dataset.sk;
+      if (k === 'title') { s.title = t.value; if (s.idAuto) { s.id = uniqScreenId(s.title, s.uid); $('#wfb-sid').value = s.id; } }
+      if (k === 'id') { const v = t.value.toUpperCase().replace(/[^A-Z0-9_]/g, '_'); if (v !== t.value) { const p = t.selectionStart; t.value = v; t.setSelectionRange(p, p); } s.id = v; s.idAuto = false; $('[data-sk="idAuto"]').checked = false; }
+      if (k === 'idAuto') { s.idAuto = t.checked; if (s.idAuto) { s.id = uniqScreenId(s.title, s.uid); $('#wfb-sid').value = s.id; } }
+      if (k === 'success') s.success = t.checked;
+      if (e.type === 'change' && (k === 'idAuto' || k === 'success')) return wfbChanged(true);
+      if (e.type === 'change' && k === 'id') { wfbChanged(false); return wfbRenderLeft(); }
+      return wfbChanged(false);
+    }
+    if (t.dataset.fk) {
+      const k = t.dataset.fk, f = s.footer;
+      if (k === 'label') { f.label = t.value; const n = $('[data-cnt="footer-label"]'); if (n) n.textContent = `${t.value.length}/35`; }
+      else if (k === 'action') { if (e.type !== 'change') return; f.action = t.value; if (f.action === 'navigate' && !f.next) f.next = b.m.screens[b.m.screens.indexOf(s) + 1]?.uid || null; return wfbChanged(true); }
+      else if (k === 'next') { if (e.type !== 'change') return; f.next = t.value || null; return wfbChanged(true); }
+      else f.rest[k] = t.value;
+      return wfbChanged(false);
+    }
+    const c = wComp(); if (!c) return;
+    if (t.dataset.pk) {
+      const k = t.dataset.pk;
+      if (t.type === 'checkbox' && e.type === 'input') return; // checkbox ditangani di change
+      let v = t.dataset.bool !== undefined ? t.checked : t.value;
+      if (t.dataset.num !== undefined) v = t.value === '' ? '' : Number(t.value);
+      if (k === 'nameAuto') { c.p.nameAuto = v; if (v) { c.p.name = uniqName(c.p.label, c.uid); $('#wfp-name').value = c.p.name; } return wfbChanged(false); }
+      if (k === 'name') { const clean = t.value.replace(/[^A-Za-z0-9_]/g, '_'); if (clean !== t.value) t.value = clean; v = clean; c.p.nameAuto = false; const a = $('[data-pk="nameAuto"]'); if (a) a.checked = false; }
+      if (v === '' || v === false) delete c.p[k]; else c.p[k] = v;
+      if (k === 'label' && c.p.nameAuto) { c.p.name = uniqName(t.value, c.uid); const n = $('#wfp-name'); if (n) n.value = c.p.name; }
+      const cnt = $(`#wfb-props [data-cnt="${k}"]`); if (cnt) cnt.textContent = `${t.value.length}/${cnt.textContent.split('/')[1]}`;
+      // perubahan yang mengubah bentuk formulir properti
+      if (e.type === 'change' && ['mode', 'markdown'].includes(k)) return wfbRefreshProps();
+      return wfbChanged(false);
+    }
+    if (t.dataset.day && e.type === 'change') {
+      const days = $$('#wfb-props [data-day]').filter((x) => x.checked).map((x) => x.dataset.day);
+      if (!days.length) { t.checked = true; return toast('Minimal satu hari.', true); }
+      if (days.length === 7) delete c.p['include-days']; else c.p['include-days'] = days;
+      return wfbChanged(false);
+    }
+    if (t.dataset.initm !== undefined && e.type === 'change') {
+      const v = $$('#wfb-props [data-initm]').filter((x) => x.checked).map((x) => x.dataset.initm);
+      if (v.length) c.p['init-value'] = v; else delete c.p['init-value'];
+      return wfbChanged(false);
+    }
+    if (t.dataset.ok) {
+      const o = c.p.options[Number(t.closest('[data-oi]').dataset.oi)], k = t.dataset.ok;
+      if (k === 'title') { o.title = t.value; if (o.idAuto) { const old = o.id; o.id = wfbOptId(c.p.options, t.value, o.uid); $('[data-ok="id"]', t.closest('[data-oi]')).value = o.id; wfbRenameInit(c, old, o.id); } }
+      if (k === 'id') { const old = o.id; o.id = t.value.trim(); o.idAuto = false; wfbRenameInit(c, old, o.id); }
+      if (k === 'description') o.description = t.value;
+      wfbRefreshInitField(c);
+      return wfbChanged(false);
+    }
+    if (t.dataset.lk) {
+      const k = t.dataset.lk;
+      if (k === 'kind') { if (e.type !== 'change') return; if (t.value === 'none') delete c.p.link; else c.p.link = t.value === 'navigate' ? { kind: 'navigate', next: null } : { kind: 'open_url', url: c.p.link?.url || 'https://' }; return wfbRefreshProps(); }
+      if (k === 'next') c.p.link.next = t.value || null;
+      if (k === 'url') c.p.link.url = t.value.trim();
+      return wfbChanged(false);
+    }
+    if (t.dataset.img !== undefined && e.type === 'change' && t.files[0]) {
+      busy(null, async () => { const r = await wfbCompressImage(t.files[0]); c.p.src = r.src; if (!c.p.height) c.p.height = Math.min(300, Math.round(r.h * 320 / r.w)); wfbRefreshProps(); toast(`Gambar ${Math.round(r.src.length * 0.75 / 1024)} KB.`); });
+    }
+  }
+  function wfbRenameInit(c, from, to) {
+    const iv = c.p['init-value'];
+    if (Array.isArray(iv)) c.p['init-value'] = iv.map((x) => (x === from ? to : x)); else if (iv === from) c.p['init-value'] = to;
+  }
+  // Isian pada pratinjau (hanya disimpan di memori browser, tidak dikirim)
+  function wfbOnPreviewInput(e) {
+    const t = e.target; if (!t.closest('#wfb-right') || !t.dataset.pvName) return;
+    const vals = wfbVals(), n = t.dataset.pvName, kind = t.dataset.pvKind;
+    if (kind === 'multi') vals[n] = $$(`#wfb-right [data-pv-name="${n}"]`).filter((x) => x.checked).map((x) => x.value);
+    else if (kind === 'bool') vals[n] = t.checked;
+    else if (kind === 'start' || kind === 'end') vals[n] = { ...(vals[n] || {}), [kind === 'start' ? 'start-date' : 'end-date']: t.value };
+    else vals[n] = t.value;
+    if (wb().sim?.errors?.[n]) { delete wb().sim.errors[n]; const box = t.closest('[data-pc]'); $('.wfp-err', box)?.remove(); $('.wfp-field', box)?.classList.remove('bad'); }
+  }
+
+  /* Seret untuk mengurutkan (mouse & sentuh) + keyboard (panah atas/bawah pada pegangan) */
+  const WFB_GRIP = '<svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/></svg>';
+  function wfbSortable(list, itemSel, onMove) {
+    if (!list || list.dataset.sortable) return;
+    list.dataset.sortable = '1';
+    const items = () => [...list.children].filter((x) => x.matches(itemSel));
+    list.addEventListener('keydown', (e) => {
+      const h = e.target.closest('[data-grip]'); if (!h || !['ArrowUp', 'ArrowDown'].includes(e.key)) return;
+      e.preventDefault();
+      const it = h.closest(itemSel), from = items().indexOf(it), to = from + (e.key === 'ArrowUp' ? -1 : 1);
+      if (to < 0 || to >= items().length) return;
+      onMove(from, to);
+      requestAnimationFrame(() => { const nh = items()[to]?.querySelector('[data-grip]'); nh?.focus(); });
+    });
+    list.addEventListener('pointerdown', (e) => {
+      const h = e.target.closest('[data-grip]'); if (!h || e.button > 0) return;
+      const it = h.closest(itemSel); if (!it || it.parentElement !== list) return;
+      e.preventDefault();
+      const from = items().indexOf(it), r = it.getBoundingClientRect(), dy = e.clientY - r.top;
+      const ghost = it.cloneNode(true);
+      Object.assign(ghost.style, { position: 'fixed', left: r.left + 'px', top: r.top + 'px', width: r.width + 'px', zIndex: 80, pointerEvents: 'none' });
+      ghost.classList.add('dnd-ghost'); document.body.appendChild(ghost);
+      it.classList.add('dnd-ph');
+      const scroller = list.closest('.wfb-pane') || $('#view');
+      let raf = 0, lastY = e.clientY;
+      const move = (ev) => {
+        lastY = ev.clientY; ghost.style.top = ev.clientY - dy + 'px';
+        const others = items().filter((x) => x !== it);
+        const before = others.find((x) => { const b = x.getBoundingClientRect(); return ev.clientY < b.top + b.height / 2; });
+        if (before) { if (it.nextElementSibling !== before) list.insertBefore(it, before); }
+        else { const last = others[others.length - 1]; if (last && last.nextElementSibling !== it) last.after(it); }
+      };
+      const tick = () => { // gulir otomatis di dekat tepi
+        const b = scroller.getBoundingClientRect();
+        if (lastY < b.top + 40) scroller.scrollTop -= 8; else if (lastY > b.bottom - 40) scroller.scrollTop += 8;
+        raf = requestAnimationFrame(tick);
+      };
+      raf = requestAnimationFrame(tick);
+      const end = () => {
+        cancelAnimationFrame(raf);
+        document.removeEventListener('pointermove', move); document.removeEventListener('pointerup', end); document.removeEventListener('pointercancel', end);
+        ghost.remove(); it.classList.remove('dnd-ph');
+        const to = items().indexOf(it);
+        if (to !== from) { list.insertBefore(it, items()[from + (from > to ? 1 : 0)] || null); onMove(from, to); }
+      };
+      document.addEventListener('pointermove', move); document.addEventListener('pointerup', end); document.addEventListener('pointercancel', end);
+    });
+  }
+
+  /* Header editor: simpan, validasi, terbitkan */
+  const wfbMetaDirty = () => { const b = wb(), f = S.wfd?.flow; return !!(b && f && (b.meta.name !== f.name || b.meta.category !== ((f.categories || [])[0] || 'OTHER'))); };
+  function wfbJsonText() { return JSON.stringify(wfbToJson(wb().m), null, 2); }
+  async function wfbSave({ silent } = {}) {
+    const b = wb(), f = S.wfd.flow;
+    if (!b.meta.name.trim()) throw new Error('Nama flow wajib diisi.');
+    if (wfbMetaDirty()) {
+      const cats = b.meta.category === (f.categories || [])[0] ? f.categories : [b.meta.category];
+      S.wfd.flow = await api('PATCH', `/api/wa-flows/${encodeURIComponent(f.id)}`, { name: b.meta.name.trim(), categories: cats });
+    }
+    if (b.dirty && !wfbRO()) {
+      const json = wfbJsonText();
+      S.wfd.flow = await api('PUT', `/api/wa-flows/${encodeURIComponent(f.id)}/json`, { json });
+      b.src = S.wfd.flow.json; b.dirty = false;
+    }
+    b.meta = { name: S.wfd.flow.name, category: (S.wfd.flow.categories || [])[0] || 'OTHER' };
+    const n = S.wfd.flow.validationErrors?.length || 0;
+    if (!silent) toast(n ? `Tersimpan. Meta menemukan ${n} error validasi — buka Validasi.` : 'Tersimpan dan lolos validasi Meta.', !!n);
+    wfhRender(); wfbRenderStatus(); wfbRenderPreview();
+    return n;
+  }
+  function wfbValidateModal() {
+    const b = wb(), f = S.wfd.flow;
+    const local = b ? wfbValidate(b.m) : [], metaErrs = f.validationErrors || [];
+    const errs = local.filter((x) => x.level === 'error'), warns = local.filter((x) => x.level === 'warn');
+    const where = (x) => { const s = b.m.screens.find((y) => y.uid === x.s), c = s?.children.find((y) => y.uid === x.c); return [s && `${b.m.screens.indexOf(s) + 1}. ${s.title || s.id}`, c && (WFB_COMP[c.type]?.n || c.type)].filter(Boolean).join(' › '); };
+    const row = (x, i) => `<button type="button" class="wfb-vrow ${x.level}" data-vi="${i}"><span class="wfb-vic">${x.level === 'error' ? '!' : 'i'}</span><span class="min-w-0"><span class="block text-[13px]">${esc(x.msg)}</span>${where(x) ? `<span class="block text-[11px] ink-3">${esc(where(x))}</span>` : ''}</span></button>`;
+    const all = [...errs, ...warns];
+    modal('Validasi flow', `<div class="space-y-4">
+      <section><div class="flex items-center gap-2 mb-2"><div class="text-xs font-semibold">Pemeriksaan editor</div>${errs.length ? `<span class="badge badge-red">${errs.length} error</span>` : '<span class="badge badge-green">Tidak ada error</span>'}${warns.length ? `<span class="badge badge-amber">${warns.length} peringatan</span>` : ''}</div>
+        <div class="space-y-1">${all.map(row).join('') || '<p class="text-xs ink-3">Struktur, batas karakter, jumlah pilihan, nama field, dan navigasi sudah sesuai.</p>'}</div></section>
+      <section><div class="flex items-center gap-2 mb-2"><div class="text-xs font-semibold">Validasi Meta</div>${b?.dirty ? '<span class="badge">perlu disimpan</span>' : metaErrs.length ? `<span class="badge badge-red">${metaErrs.length} error</span>` : '<span class="badge badge-green">OK</span>'}</div>
+        ${b?.dirty ? '<p class="text-xs ink-2">Ada perubahan yang belum disimpan. Meta memvalidasi Flow JSON saat disimpan.</p>' : ''}
+        <div class="space-y-1">${(b?.dirty ? [] : metaErrs).map((e) => `<div class="wfb-vrow error"><span class="wfb-vic">!</span><span class="min-w-0"><span class="block text-[13px]">${esc(e.message || e.error || 'Error')}</span><span class="block text-[11px] ink-3">${esc([e.error_type || e.error, e.line_start ? 'baris ' + e.line_start : '', e.pointers?.map((p) => p.path).join(', ')].filter(Boolean).join(' · '))}</span></span></div>`).join('') || (b?.dirty ? '' : '<p class="text-xs ink-3">Meta tidak menemukan error pada penyimpanan terakhir.</p>')}</div></section>
+    </div>`, { footer: `<button class="btn" data-act="modal-close">Tutup</button>${b?.dirty && !wfbRO() ? '<button class="btn btn-primary" id="wfv-save">Simpan & validasi di Meta</button>' : ''}` });
+    $$('[data-vi]').forEach((x) => x.addEventListener('click', () => {
+      const it = all[Number(x.dataset.vi)]; closeModal();
+      if (S.wfd.tab !== 'builder') { S.wfd.tab = 'builder'; renderWaFlowDetail(); }
+      if (it.s) wfbSelect(it.s, it.c); if (wfbNarrow()) wfbPane('edit');
+    }));
+    $('#wfv-save')?.addEventListener('click', (e) => busy(e.currentTarget, async () => { await wfbSave({ silent: true }); wfbValidateModal(); }));
+  }
+  async function wfbPublish() {
+    const b = wb(), f = S.wfd.flow;
+    const errs = wfbValidate(b.m).filter((x) => x.level === 'error');
+    if (errs.length) { toast(`Perbaiki ${errs.length} error sebelum menerbitkan.`, true); return wfbValidateModal(); }
+    if ((b.dirty || wfbMetaDirty()) && !await confirmBox('Perubahan belum disimpan. Simpan lalu lanjutkan menerbitkan?', 'Simpan')) return;
+    const n = (b.dirty || wfbMetaDirty()) ? await wfbSave({ silent: true }) : (f.validationErrors || []).length;
+    if (n) { toast(`Meta menemukan ${n} error validasi. Perbaiki sebelum menerbitkan.`, true); return wfbValidateModal(); }
+    if (!await confirmBox(`Terbitkan "${S.wfd.flow.name}"? Setelah terbit, flow tidak dapat diubah atau dihapus — hanya dapat dinonaktifkan. Uji dulu lewat "Uji alur" dan pratinjau resmi Meta.`, 'Terbitkan')) return;
+    S.wfd.flow = await api('POST', `/api/wa-flows/${encodeURIComponent(f.id)}/publish`);
+    S.wfb = null; toast('Flow diterbitkan.'); renderWaFlowDetail();
+  }
+  async function wfbMetaPreview() {
+    const b = wb();
+    if (b?.dirty && !wfbRO()) { if (!await confirmBox('Pratinjau Meta memakai versi yang tersimpan. Simpan perubahan dulu?', 'Simpan')) return; await wfbSave({ silent: true }); }
+    const p = await api('POST', `/api/wa-flows/${encodeURIComponent(S.wfd.flow.id)}/preview`, { invalidate: true }).catch((e) => { fail(e); return null; });
+    if (!p) return;
+    if (!p.url) return toast('Meta tidak mengembalikan tautan pratinjau.', true);
+    window.open(p.url, '_blank', 'noopener');
+  }
+  function wfbDownload() {
+    const text = wb() && S.wfd.tab === 'builder' ? wfbJsonText() : (S.wfd.draft ?? S.wfd.flow.json ?? '');
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+    a.download = `${slugify(S.wfd.flow.name) || 'flow'}.json`; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }
+
+  // Header halaman detail flow (nama, kategori, status, aksi)
+  function wfhRender() {
+    const el = $('#wfh'); if (!el) return;
+    const f = S.wfd.flow, draft = f.status === 'DRAFT';
+    wfbEnsure(f);
+    const b = wb();
+    el.innerHTML = `<div class="wfh-main">
+        <div class="flex-1 min-w-0 space-y-1">
+          <div class="flex items-center gap-2 flex-wrap">
+            <input class="wfh-name" id="wfh-name" value="${esc(b.meta.name)}" maxlength="200" aria-label="Nama flow" placeholder="Nama flow">
+            ${wfBadge(f.status)}<span id="wfh-dirty" class="wfh-dirty"></span>
+          </div>
+          <div class="flex items-center gap-2 flex-wrap text-[11px] ink-3">
+            <select class="select h-7 text-xs w-auto" id="wfh-cat" aria-label="Kategori flow">${S.wf.categories.map((c) => `<option value="${c}" ${b.meta.category === c ? 'selected' : ''}>${esc(WF_CAT[c] || c)} (${c})</option>`).join('')}</select>
+            ${(f.categories || []).length > 1 ? `<span title="Kategori lain akan diganti saat kategori diubah">+${f.categories.length - 1} kategori lain</span>` : ''}
+            <span class="mono">${esc(f.id)}</span><span>· ${fmtNum(f.sent)} dikirim · ${fmtNum(f.completed)} diisi</span>
+          </div>
+        </div>
+        <div class="flex flex-wrap items-center gap-2 flex-none">
+          <button class="btn btn-primary" id="wfh-save" title="Simpan (Ctrl+S)">Simpan</button>
+          <button class="btn" id="wfh-preview">${ICON.play} Pratinjau</button>
+          <button class="btn" id="wfh-validate">${ICON.check} Validasi</button>
+          ${draft ? `<button class="btn btn-accent" id="wfh-publish">Publikasikan</button>` : ''}
+          <div class="relative"><button class="btn btn-icon" id="wfh-more" aria-label="Tindakan lain" aria-haspopup="menu">${WFB_DOTS}</button></div>
+        </div>
+      </div>`;
+    $('#wfh-name').addEventListener('input', (e) => { wb().meta.name = e.target.value; wfbRenderStatus(); });
+    $('#wfh-cat').addEventListener('change', (e) => { wb().meta.category = e.target.value; wfbRenderStatus(); });
+    $('#wfh-save').addEventListener('click', (e) => busy(e.currentTarget, async () => {
+      if (S.wfd.tab === 'json' && S.wfd.draft != null) return $('#wf-save')?.click();
+      await wfbSave();
+    }));
+    $('#wfh-preview').addEventListener('click', () => {
+      if (S.wfd.tab !== 'builder') { S.wfd.tab = 'builder'; renderWaFlowDetail(); }
+      wfbSimStart(); if (wfbNarrow()) wfbPane('preview');
+      $('#wfb-right')?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    });
+    $('#wfh-validate').addEventListener('click', wfbValidateModal);
+    $('#wfh-publish')?.addEventListener('click', (e) => busy(e.currentTarget, wfbPublish));
+    $('#wfh-more').addEventListener('click', (e) => { e.stopPropagation(); wfhMenu(e.currentTarget); });
+    wfbRenderStatus();
+  }
+  function wfhMenu(btn) {
+    $$('.wfh-menu').forEach((x) => x.remove());
+    const f = S.wfd.flow, draft = f.status === 'DRAFT', live = ['PUBLISHED', 'THROTTLED'].includes(f.status);
+    const items = [
+      ['meta-preview', ICON.external, 'Pratinjau resmi Meta'],
+      ['json', ICON.doc, 'Lihat / ubah Flow JSON'],
+      ['download', ICON.download, 'Unduh Flow JSON'],
+      ['clone', ICON.copy, draft ? 'Gandakan' : 'Gandakan untuk mengubah'],
+      ['reload', ICON.refresh, 'Muat ulang dari Meta'],
+      ...(draft ? [['delete', ICON.trash, 'Hapus draf', 'danger']] : []),
+      ...(live ? [['deprecate', ICON.x, 'Nonaktifkan flow', 'danger']] : []),
+    ];
+    const m = document.createElement('div'); m.className = 'pop wfh-menu'; m.setAttribute('role', 'menu');
+    m.innerHTML = items.map(([k, ic, l, cls]) => `<button role="menuitem" data-m="${k}" class="${cls ? 'danger-ink' : ''}">${ic}<span>${l}</span></button>`).join('');
+    btn.parentElement.appendChild(m);
+    setTimeout(() => document.addEventListener('click', () => m.remove(), { once: true }));
+    m.addEventListener('click', async (e) => {
+      const k = e.target.closest('[data-m]')?.dataset.m; if (!k) return;
+      m.remove();
+      if (k === 'meta-preview') return wfbMetaPreview();
+      if (k === 'json') { S.wfd.tab = 'json'; return renderWaFlowDetail(); }
+      if (k === 'download') return wfbDownload();
+      if (k === 'clone') return wfCreateModal(f);
+      if (k === 'reload') {
+        if (wb()?.dirty && !await confirmBox('Muat ulang dari Meta akan membuang perubahan yang belum disimpan.', 'Muat ulang', true)) return;
+        S.wfb = null; return viewWaFlowDetail(f.id);
+      }
+      if (k === 'delete') {
+        if (!await confirmBox(`Hapus draf "${f.name}" dari WABA? Tindakan ini tidak dapat dibatalkan.`, 'Hapus', true)) return;
+        return busy(null, async () => { await api('DELETE', `/api/wa-flows/${encodeURIComponent(f.id)}`); S.wfb = null; toast('Flow dihapus.'); location.hash = '#/waflows'; });
+      }
+      if (k === 'deprecate') {
+        if (!await confirmBox(`Nonaktifkan "${f.name}"? Flow tidak dapat dikirim atau dibuka lagi oleh pelanggan, dan tidak dapat diaktifkan kembali.`, 'Nonaktifkan', true)) return;
+        return busy(null, async () => { S.wfd.flow = await api('POST', `/api/wa-flows/${encodeURIComponent(f.id)}/deprecate`); S.wfb = null; toast('Flow dinonaktifkan.'); renderWaFlowDetail(); });
+      }
+    });
+  }
+  const WFB_DOTS = '<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>';
+  // Peringatan perubahan belum disimpan saat meninggalkan halaman
+  const wfbUnsaved = () => !!(S.view === 'waflows' && S.wfd && S.wfb && S.wfb.flowId === S.wfd.flow?.id && (S.wfb.dirty || wfbMetaDirty() || S.wfd.draft != null));
+  window.addEventListener('beforeunload', (e) => { if (wfbUnsaved()) { e.preventDefault(); e.returnValue = ''; } });
+  document.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's' && S.view === 'waflows' && $('#wfh-save')) { e.preventDefault(); if (!$('#wfh-save').disabled) $('#wfh-save').click(); }
+  });
 
   // Kirim formulir dari Inbox (dalam jendela 24 jam)
   async function waFlowSendModal(conv) {
@@ -4304,13 +5923,13 @@
       <div class="p-4 space-y-3 text-xs">
         ${n.gatewayReady ? '' : `<p class="p-2 rounded" style="background:var(--warn-soft)">Gateway WA belum dikonfigurasi.${S.isAdmin ? ' <a class="underline" href="#/settings/gateway">Atur gateway</a>' : ' Hubungi admin.'}</p>`}
         <div><label class="label">Nomor WhatsApp Anda</label><input class="input mono" name="phone" value="${esc(n.phone)}" inputmode="numeric" placeholder="6281234567890"></div>
-        <div class="space-y-2">${ev('message', 'Pesan masuk (percakapan milik saya / belum ditugaskan)')}${ev('assign', 'Percakapan ditugaskan ke saya')}${ev('call', 'Panggilan masuk')}</div>
+        <div class="space-y-2">${ev('message', 'Pesan masuk (percakapan milik saya / belum ditugaskan)')}${ev('assign', 'Percakapan ditugaskan ke saya')}${ev('call', 'Panggilan masuk')}${ev('reminder', 'Pengingat yang jatuh tempo')}</div>
         <label class="flex items-center gap-2"><input type="checkbox" class="check" name="onlyOffline" ${n.onlyOffline ? 'checked' : ''}> Hanya kirim saat Kontaq tidak sedang terbuka</label>
         <p class="hint">Notifikasi pesan dari percakapan yang sama dibatasi maksimal satu tiap 2 menit. Pengaturan ini tersimpan di akun Anda.</p>
       </div>
       <div class="flex justify-end gap-2 px-4 py-3 border-t bd"><button type="button" class="btn" id="wan-test" ${n.gatewayReady ? '' : 'disabled'}>Kirim tes</button><button class="btn btn-primary" type="submit">Simpan</button></div></form>`;
     const f = $('#f-wan');
-    const body = () => ({ enabled: f.enabled.checked, phone: f.phone.value, onlyOffline: f.onlyOffline.checked, events: { message: f.ev_message.checked, assign: f.ev_assign.checked, call: f.ev_call.checked } });
+    const body = () => ({ enabled: f.enabled.checked, phone: f.phone.value, onlyOffline: f.onlyOffline.checked, events: { message: f.ev_message.checked, assign: f.ev_assign.checked, call: f.ev_call.checked, reminder: f.ev_reminder.checked } });
     f.enabled.addEventListener('change', () => {
       const on = f.enabled.checked; f.enabled.closest('.switch').classList.toggle('on', on);
       busy(null, async () => {
@@ -4338,7 +5957,7 @@
   // di belakang reverse proxy yang tidak meneruskan header Upgrade (mis. Apache tanpa mod_proxy_wstunnel).
   const socket = io({ transports: ['polling', 'websocket'], tryAllTransports: true });
   const live = (ok, text) => { const el = $('#live'); el.className = 'badge ' + (ok ? 'badge-green' : 'badge-amber'); el.innerHTML = `<span class="dot"></span><span>${text}</span>`; };
-  socket.on('connect', () => { live(true, 'Live'); checkRingingCall(); if (S.view === 'inbox') loadConvs().then(renderConvList).catch(() => {}); });
+  socket.on('connect', () => { live(true, 'Live'); loadReminders().catch(() => {}); checkRingingCall(); if (S.view === 'inbox') loadConvs().then(renderConvList).catch(() => {}); });
   socket.on('disconnect', () => live(false, 'Terputus'));
   socket.on('connect_error', (e) => { live(false, 'Terputus'); if (e.message === 'unauthorized') location.reload(); });
   socket.on('message:new', ({ message, conversation }) => {
@@ -4369,7 +5988,7 @@
   socket.on('conversation:update', applyConv);
   socket.on('group:update', grOnUpdate);
   socket.on('waflow:submission', ({ flowId }) => { if (S.view === 'waflows' && S.wfd?.flow?.id === flowId && S.wfd.tab === 'responses') wfResponsesTab(); });
-  socket.on('waflow:update', (f) => { if (S.view === 'waflows' && S.wfd?.flow?.id === f.id && !S.wfd.draft) { Object.assign(S.wfd.flow, f); renderWaFlowDetail(); } });
+  socket.on('waflow:update', (f) => { if (S.view === 'waflows' && S.wfd?.flow?.id === f.id && !S.wfd.draft && !wfbUnsaved()) { Object.assign(S.wfd.flow, f); renderWaFlowDetail(); } });
   socket.on('group:message', grOnMessage);
   socket.on('typing', (t) => { if (t.userId !== S.user.id) setTyping(t.conversationId, t.userId, { name: t.name, seen: Date.now() }); });
   socket.on('conversation:removed', ({ id }) => {
@@ -4387,7 +6006,12 @@
   socket.on('campaign:update', (c) => {
     const tr = $(`#cp-rows tr[data-cid="${c.id}"]`);
     if (tr && S.view === 'campaigns') tr.outerHTML = campaignRow(c);
+    else if (!tr && S.view === 'campaigns' && !$('#modal-root').innerHTML) viewCampaigns();
   });
+  socket.on('reminder:due', (r) => { remUpsert(r); if (remMine(r)) showRemDue(r); });
+  socket.on('reminder:update', remUpsert);
+  socket.on('reminder:removed', ({ id }) => { S.rem.list = S.rem.list.filter((x) => x.id !== id); remChanged(); });
+  socket.on('notice', (n) => toast(n.text, n.level === 'error'));
   socket.on('call:incoming', showIncomingCall);
   socket.on('call:answer', applyAnswer);
   socket.on('call:update', (c) => {

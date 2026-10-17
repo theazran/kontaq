@@ -108,7 +108,7 @@ const csvCell = (v) => {
 const EMPTY_DB = {
   settings: {}, users: [], contacts: [], conversations: [], messages: [],
   templates: [], templatesSyncedAt: 0, campaigns: [], calls: [], audit: [], avatars: {}, autoReply: null, arMedia: {}, costs: null, sendLog: [],
-  flows: [], flowRuns: [], groups: [], csat: null, waFlows: [], flowSubmissions: [], stickers: [],
+  flows: [], flowRuns: [], groups: [], csat: null, waFlows: [], flowSubmissions: [], stickers: [], reminders: [],
 };
 let db;
 try { db = { ...EMPTY_DB, ...JSON.parse(fs.readFileSync(DB_FILE, 'utf8')) }; }
@@ -2169,7 +2169,7 @@ function csatReport({ from, to, agentId }) {
 const WAF_CATEGORIES = ['SIGN_UP', 'SIGN_IN', 'APPOINTMENT_BOOKING', 'LEAD_GENERATION', 'CONTACT_US', 'CUSTOMER_SUPPORT', 'SURVEY', 'OTHER'];
 const WAF_FIELDS = 'id,name,status,categories,validation_errors,json_version,data_api_version,endpoint_uri';
 const WAF_SUBMISSIONS_MAX = 20000;
-const WAF_JSON_MAX = 1024 * 1024;
+const WAF_JSON_MAX = 3 * 1024 * 1024; // gambar (base64, maks. 300 KB per gambar) disimpan di dalam Flow JSON
 const wafById = (id) => (id ? db.waFlows.find((f) => f.id === String(id)) : null);
 const newFlowToken = () => 'kq.' + crypto.randomBytes(12).toString('base64url');
 // Screen dari Flow JSON (untuk memilih screen pertama saat mengirim)
@@ -2325,7 +2325,7 @@ function publicCall(c) {
  * Kredensial gateway diatur admin; tiap pengguna mengaktifkan notifikasi ke nomor WA pribadinya
  * (Pengaturan › Notifikasi & keamanan). Terpisah dari Cloud API: dikirim lewat gateway pihak ketiga.
  */
-const WA_NOTIFY_EVENTS = ['message', 'assign', 'call'];
+const WA_NOTIFY_EVENTS = ['message', 'assign', 'call', 'reminder'];
 const WA_NOTIFY_COOLDOWN_MS = 2 * 60 * 1000; // maks. 1 notifikasi pesan per percakapan per pengguna
 const waNotifyLast = new Map(); // `${userId}:${convId}` -> waktu kirim terakhir
 
@@ -2337,7 +2337,7 @@ function waGateway() {
     apiKey: decrypt(g.apiKeyEnc) || process.env.WA_GATEWAY_API_KEY || '',
   };
 }
-const waNotifyOf = (u) => ({ enabled: false, phone: '', onlyOffline: true, ...u.waNotify, events: { message: true, assign: true, call: true, ...u.waNotify?.events } });
+const waNotifyOf = (u) => ({ enabled: false, phone: '', onlyOffline: true, ...u.waNotify, events: { message: true, assign: true, call: true, reminder: true, ...u.waNotify?.events } });
 
 async function gatewaySend(to, message) {
   const g = waGateway();
@@ -2413,6 +2413,8 @@ app.use((req, res, next) => {
   });
   next();
 });
+// Flow JSON dapat memuat gambar base64: batas lebih besar khusus rute WhatsApp Flows
+app.use('/api/wa-flows', express.json({ limit: '5mb' }));
 app.use(express.json({ limit: '2mb', verify: (req, res, buf) => { req.rawBody = buf; } }));
 app.use('/public', express.static(path.join(__dirname, 'public'), { maxAge: '1h' }));
 app.use((req, res, next) => { req.user = userFromToken(parseCookies(req.headers.cookie)[COOKIE_NAME]); next(); });
@@ -2612,7 +2614,7 @@ app.get('/', (req, res) => {
     user: publicUser(req.user), needsSetup: db.users.length === 0,
     // Versi aset dari waktu ubah file: browser HP langsung memuat CSS terbaru setelah update
     assetVersion: Math.floor(fs.statSync(path.join(__dirname, 'public', 'style.css')).mtimeMs).toString(36),
-    boot: req.user ? { user: publicUser(req.user), campaignRate: CAMPAIGN_RATE } : null,
+    boot: req.user ? { user: publicUser(req.user), campaignRate: CAMPAIGN_RATE, timezone: flowTz() } : null,
   });
 });
 
@@ -3219,7 +3221,7 @@ async function wafRefresh(f) {
 function wafJsonOrThrow(text) {
   const json = typeof text === 'string' ? text : '';
   if (!json.trim()) throw new HttpError(400, 'Flow JSON kosong.');
-  if (Buffer.byteLength(json) > WAF_JSON_MAX) throw new HttpError(400, 'Flow JSON maksimal 1 MB.');
+  if (Buffer.byteLength(json) > WAF_JSON_MAX) throw new HttpError(400, 'Flow JSON maksimal 3 MB (perkecil atau kurangi gambar).');
   try { JSON.parse(json); } catch (e) { throw new HttpError(400, 'Flow JSON tidak valid: ' + e.message); }
   return json;
 }
@@ -3428,7 +3430,7 @@ app.put('/api/costs/settings', requireAdmin, wrap(async (req, res) => {
   res.json(cfg.settings);
 }));
 /* Log pesan API (admin): semua pesan keluar via Cloud API + status pengiriman dari webhook */
-const LOG_SOURCES = { inbox: 'Dashboard', campaign: 'Campaign', auto_reply: 'Auto reply', flow: 'Flow otomatis', group: 'Grup', csat: 'Survei CSAT', external: 'Di luar Kontaq' };
+const LOG_SOURCES = { inbox: 'Dashboard', campaign: 'Campaign', auto_reply: 'Auto reply', flow: 'Flow otomatis', group: 'Grup', csat: 'Survei CSAT', reminder: 'Pengingat', external: 'Di luar Kontaq' };
 function logRow(e) {
   const msg = e.wamid ? idx.wamid.get(e.wamid) : null;
   const contact = e.contactId ? byId('contacts', e.contactId) : idx.contactByPhone.get(e.to);
@@ -3971,12 +3973,109 @@ app.delete('/api/templates/:name', requireAdmin, wrap(async (req, res) => {
 }));
 
 /* Campaign (admin) */
+/* ── Jadwal & perulangan (dipakai broadcast terjadwal dan pengingat) ──
+ * Jadwal disimpan sebagai tanggal + jam lokal pada zona waktu aplikasi (pengaturan Auto reply), sehingga "setiap Senin 09.00"
+ * tetap 09.00 waktu setempat. freq: none | daily | weekly (days: 0=Minggu…6=Sabtu) | monthly (tanggal yang sama; bila bulan
+ * lebih pendek, hari terakhir bulan itu). until: tanggal terakhir (opsional).
+ */
+function tzOffsetMs(tz, at) {
+  const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    .formatToParts(new Date(at)).map((x) => [x.type, x.value]));
+  return Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second) - Math.floor(at / 1000) * 1000;
+}
+function zonedToUtc(ymd, hm, tz) {
+  const [y, m, d] = ymd.split('-').map(Number), [h, mi] = hm.split(':').map(Number);
+  const guess = Date.UTC(y, m - 1, d, h, mi);
+  return guess - tzOffsetMs(tz, guess - tzOffsetMs(tz, guess)); // dua langkah: aman untuk zona ber-DST
+}
+const SCHED_FREQ = { none: 'Sekali', daily: 'Setiap hari', weekly: 'Setiap minggu', monthly: 'Setiap bulan' };
+// Kemunculan berikutnya setelah afterTs (null bila sudah melewati batas "until" / tidak ada lagi)
+function nextOccurrence(s, afterTs) {
+  if (s.freq === 'none') { const t = zonedToUtc(s.date, s.time, s.tz); return t > afterTs ? t : null; }
+  const startDay = Number(s.date.slice(8, 10));
+  let ymd = [s.date, zonedDate(s.tz, afterTs)].sort()[1];
+  for (let i = 0; i < 400; i++, ymd = addDays(ymd, 1)) {
+    if (s.until && ymd > s.until) return null;
+    const d = ymdDate(ymd), wd = d.getUTCDay(), dom = d.getUTCDate();
+    const lastDom = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate();
+    const match = s.freq === 'daily' || (s.freq === 'weekly' && s.days.includes(wd)) || (s.freq === 'monthly' && dom === Math.min(startDay, lastDom));
+    if (!match) continue;
+    const t = zonedToUtc(ymd, s.time, s.tz);
+    if (t > afterTs) return t;
+  }
+  return null;
+}
+function cleanSchedule(b, label) {
+  const s = { date: str(b?.date, 10), time: str(b?.time, 5), freq: SCHED_FREQ[b?.freq] ? b.freq : 'none', until: str(b?.until, 10), tz: flowTz() };
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s.date) || !ymdDate(s.date)) throw new HttpError(400, `${label}: tanggal tidak valid.`);
+  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(s.time)) throw new HttpError(400, `${label}: jam tidak valid (HH:MM).`);
+  if (s.until && (!/^\d{4}-\d{2}-\d{2}$/.test(s.until) || s.until < s.date)) throw new HttpError(400, `${label}: tanggal selesai harus setelah tanggal mulai.`);
+  if (s.freq === 'weekly') {
+    s.days = [...new Set((Array.isArray(b.days) ? b.days : []).map(Number).filter((d) => Number.isInteger(d) && d >= 0 && d <= 6))].sort();
+    if (!s.days.length) throw new HttpError(400, `${label}: pilih minimal satu hari.`);
+  }
+  const first = nextOccurrence(s, now() + 30000);
+  if (!first) throw new HttpError(400, `${label}: waktu sudah lewat${s.until ? ' atau tidak ada jadwal sebelum tanggal selesai' : ''}. Pilih waktu di masa depan.`);
+  if (first - now() > 400 * 86400000) throw new HttpError(400, `${label}: jadwal pertama maksimal ±1 tahun ke depan.`);
+  return { ...s, first };
+}
+function scheduleText(s) {
+  if (!s) return '';
+  const t = s.time.replace(':', '.');
+  if (s.freq === 'none') return `${longDate(s.date)}, pukul ${t}`;
+  const base = s.freq === 'daily' ? `Setiap hari pukul ${t}` : s.freq === 'weekly' ? `Setiap ${s.days.map((d) => ID_DAYS[d]).join(', ')} pukul ${t}` : `Setiap tanggal ${Number(s.date.slice(8, 10))} pukul ${t}`;
+  return base + (s.until ? ` s.d. ${longDate(s.until)}` : '');
+}
+const cleanWindow = (w) => {
+  if (!w?.enabled) return null;
+  const v = { start: str(w.start, 5), end: str(w.end, 5) };
+  if (![v.start, v.end].every((x) => /^([01]\d|2[0-3]):[0-5]\d$/.test(x)) || v.start === v.end) throw new HttpError(400, 'Jam kirim tidak valid.');
+  return v;
+};
+const inSendWindow = (c) => !c.sendWindow || inTimeRange(zonedNow(flowTz()).time, c.sendWindow.start, c.sendWindow.end);
+
+// Penerima campaign dihitung dari filter (label & opt-in); dipanggil ulang saat jadwal berjalan agar opt-out terbaru dihormati
+function campaignTargets(c) {
+  let targets = db.contacts.filter((x) => !c.labels.length || (x.labels || []).some((l) => c.labels.includes(l)));
+  if (c.optInOnly) targets = targets.filter((x) => x.optIn);
+  return targets;
+}
 function campaignSummary(c) {
   const counts = { queued: 0, sent: 0, delivered: 0, read: 0, failed: 0, skipped: 0 };
   c.recipients.forEach((r) => { const k = r.status === 'played' ? 'read' : r.status; counts[k] = (counts[k] || 0) + 1; });
   const { recipients, ...rest } = c;
-  return { ...rest, total: recipients.length, counts };
+  return { ...rest, total: c.series ? c.previewTotal || 0 : recipients.length, counts, scheduleText: scheduleText(c.schedule),
+    waitingWindow: c.status === 'running' && !inSendWindow(c),
+    ...(c.series ? { runs: db.campaigns.filter((x) => x.parentId === c.id).slice(-30).reverse().map((x) => { const s = campaignSummary(x); return { id: s.id, name: s.name, status: s.status, total: s.total, counts: s.counts, startedAt: s.startedAt }; }) } : {}) };
 }
+// Jalankan jadwal: campaign sekali → mulai; seri berulang → buat campaign anak dengan penerima terbaru
+function runScheduledCampaign(c, manual) {
+  const tpl = findTemplate(c.templateName, c.language);
+  const problem = !tpl || tpl.status !== 'APPROVED' ? 'Template tidak lagi berstatus APPROVED.' : !meta().accessToken || !meta().phoneNumberId ? 'Koneksi Meta belum dikonfigurasi.' : null;
+  const targets = problem ? [] : campaignTargets(c);
+  const fail = problem || (!targets.length ? 'Tidak ada kontak yang cocok dengan filter saat jadwal berjalan.' : null);
+  if (c.series) {
+    if (fail) { c.lastError = `${fmtDateTimeTz(now())}: ${fail}`; }
+    else {
+      const child = { id: uid('p_'), parentId: c.id, name: `${c.name} · ${fmtDateTimeTz(now())}`, templateName: c.templateName, language: c.language, values: c.values, labels: c.labels, optInOnly: c.optInOnly,
+        sendWindow: c.sendWindow, status: 'running', createdAt: now(), startedAt: now(), createdBy: c.createdBy + ' (terjadwal)',
+        recipients: targets.map((x) => ({ contactId: x.id, phone: x.phone, status: 'queued', wamid: null, error: null })) };
+      db.campaigns.push(child); c.lastError = null; c.runCount = (c.runCount || 0) + 1; c.lastRunAt = now();
+      io?.to('admins').emit('campaign:update', campaignSummary(child));
+    }
+    if (!manual) { c.nextRunAt = nextOccurrence(c.schedule, now()); if (!c.nextRunAt) { c.status = 'done'; c.finishedAt = now(); } }
+  } else if (fail) {
+    Object.assign(c, { status: 'paused', lastError: fail });
+  } else {
+    Object.assign(c, { status: 'running', startedAt: now(), lastError: null,
+      recipients: targets.map((x) => ({ contactId: x.id, phone: x.phone, status: 'queued', wamid: null, error: null })) });
+  }
+  audit(null, 'campaign.scheduled_run', `${c.name}: ${fail || targets.length + ' penerima'}`);
+  if (fail) io?.to('admins').emit('notice', { level: 'error', text: `Broadcast terjadwal "${c.name}" tidak berjalan: ${fail}` });
+  save();
+  io?.to('admins').emit('campaign:update', campaignSummary(c));
+}
+const fmtDateTimeTz = (t) => new Intl.DateTimeFormat('id-ID', { timeZone: flowTz(), day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }).format(new Date(t));
 app.get('/api/campaigns', requireAdmin, (req, res) => res.json(db.campaigns.slice().reverse().map(campaignSummary)));
 app.get('/api/campaigns/:id', requireAdmin, wrap(async (req, res) => {
   const c = byId('campaigns', req.params.id);
@@ -3991,23 +4090,56 @@ app.post('/api/campaigns', requireAdmin, wrap(async (req, res) => {
   if (!tpl) throw new HttpError(400, 'Template tidak ditemukan.');
   if (tpl.status !== 'APPROVED') throw new HttpError(400, 'Hanya template APPROVED yang dapat dipakai campaign.');
   const labels = cleanLabels(b.labels);
-  let targets = db.contacts.filter((c) => !labels.length || (c.labels || []).some((l) => labels.includes(l)));
-  if (b.optInOnly !== false) targets = targets.filter((c) => c.optIn);
+  const targets = campaignTargets({ labels, optInOnly: b.optInOnly !== false });
   if (!targets.length) throw new HttpError(400, 'Tidak ada kontak yang cocok dengan filter (periksa label & opt-in).');
   // Validasi variabel sekali dengan kontak pertama
   buildTemplateComponents(tpl, b.values || {}, targets[0]);
+  const schedule = b.schedule ? cleanSchedule(b.schedule, 'Jadwal') : null;
+  const series = !!schedule && schedule.freq !== 'none';
+  const maxRuns = series ? Math.max(0, Math.min(1000, Number(b.schedule.maxRuns) || 0)) : 0;
   const camp = {
     id: uid('p_'), name, templateName: tpl.name, language: tpl.language, values: b.values || {}, labels, optInOnly: b.optInOnly !== false,
-    status: 'draft', createdAt: now(), createdBy: req.user.name,
-    recipients: targets.map((c) => ({ contactId: c.id, phone: c.phone, status: 'queued', wamid: null, error: null })),
+    sendWindow: cleanWindow(b.sendWindow),
+    status: schedule ? 'scheduled' : 'draft', createdAt: now(), createdBy: req.user.name,
+    ...(schedule ? { schedule: (({ first, ...x }) => x)(schedule), nextRunAt: schedule.first } : {}),
+    ...(series ? { series: true, maxRuns, runCount: 0, previewTotal: targets.length } : {}),
+    // Seri berulang tidak menyimpan penerima: tiap jadwal membuat campaign anak dengan penerima terbaru
+    recipients: series ? [] : targets.map((c) => ({ contactId: c.id, phone: c.phone, status: 'queued', wamid: null, error: null })),
   };
-  db.campaigns.push(camp); audit(req, 'campaign.create', `${name}: ${targets.length} penerima`); save();
+  db.campaigns.push(camp);
+  audit(req, 'campaign.create', `${name}: ${targets.length} penerima${schedule ? ' · ' + scheduleText(camp.schedule) : ''}`); save();
   res.json(campaignSummary(camp));
 }));
-app.post('/api/campaigns/:id/:action(start|pause|cancel)', requireAdmin, wrap(async (req, res) => {
+app.post('/api/campaigns/:id/:action(start|pause|cancel|run)', requireAdmin, wrap(async (req, res) => {
   const c = byId('campaigns', req.params.id);
   if (!c) throw new HttpError(404, 'Campaign tidak ditemukan.');
   const a = req.params.action;
+  if (a === 'run') {
+    // "Kirim sekarang": campaign terjadwal dijalankan saat ini; seri berulang membuat satu kiriman tambahan tanpa menggeser jadwal
+    if (c.status !== 'scheduled' && !(c.series && c.status === 'paused')) throw new HttpError(400, 'Hanya campaign terjadwal yang dapat dikirim sekarang.');
+    needPhone(); if (!meta().accessToken) throw new HttpError(400, 'Koneksi Meta belum dikonfigurasi.');
+    runScheduledCampaign(c, true);
+    audit(req, 'campaign.run_now', c.name);
+    return res.json(campaignSummary(c));
+  }
+  if (c.series) {
+    // Seri: jeda = tidak membuat kiriman baru; lanjutkan = hitung jadwal berikutnya dari sekarang
+    if (a === 'start') {
+      if (c.status !== 'paused') throw new HttpError(400, 'Seri tidak sedang dijeda.');
+      c.nextRunAt = nextOccurrence(c.schedule, now());
+      if (!c.nextRunAt) throw new HttpError(400, 'Tidak ada jadwal lagi sebelum tanggal selesai.');
+      c.status = 'scheduled';
+    } else if (a === 'pause') {
+      if (c.status !== 'scheduled') throw new HttpError(400, 'Seri tidak sedang terjadwal.');
+      c.status = 'paused';
+    } else {
+      if (['done', 'cancelled'].includes(c.status)) throw new HttpError(400, 'Seri sudah selesai.');
+      c.status = 'cancelled'; c.finishedAt = now(); c.nextRunAt = null;
+    }
+    audit(req, 'campaign.series_' + a, c.name); save();
+    io?.to('admins').emit('campaign:update', campaignSummary(c));
+    return res.json(campaignSummary(c));
+  }
   if (a === 'start') {
     if (!['draft', 'paused'].includes(c.status)) throw new HttpError(400, 'Campaign tidak dapat dimulai dari status ini.');
     needPhone(); if (!meta().accessToken) throw new HttpError(400, 'Koneksi Meta belum dikonfigurasi.');
@@ -4017,7 +4149,7 @@ app.post('/api/campaigns/:id/:action(start|pause|cancel)', requireAdmin, wrap(as
     c.status = 'paused';
   } else {
     if (['done', 'cancelled'].includes(c.status)) throw new HttpError(400, 'Campaign sudah selesai.');
-    c.status = 'cancelled'; c.finishedAt = now();
+    c.status = 'cancelled'; c.finishedAt = now(); c.nextRunAt = null;
     c.recipients.forEach((r) => { if (r.status === 'queued') r.status = 'skipped'; });
   }
   audit(req, 'campaign.' + a, c.name); save();
@@ -4108,6 +4240,186 @@ app.post('/api/calls/:id/:action(accept|reject|terminate)', wrap(async (req, res
   res.json(publicCall(call));
 }));
 
+/* ───────────────────────── 7c. Pengingat ─────────────────────────
+ * Dua jenis, disimpan di db.reminders:
+ *   self     — "Ingatkan saya": pada waktunya pengguna mendapat notifikasi di Kontaq (+ WA gateway bila diaktifkan),
+ *              opsional membuka kembali percakapan yang sudah selesai. Tetap "jatuh tempo" sampai ditandai selesai/ditunda.
+ *   customer — pesan terjadwal ke pelanggan (opsional berulang). Mode template selalu dapat dikirim; mode teks hanya bila
+ *              jendela layanan 24 jam masih terbuka, selain itu memakai template cadangan atau dilewati.
+ * Pengingat pelanggan yang terlambat > 6 jam (mis. server mati) dilewati, bukan dikirim terlambat.
+ */
+const REMINDER_LATE_MS = 6 * 3600000;
+const REMINDER_KEEP = 5000;
+const remUser = (r) => byId('users', r.assigneeId || r.createdById);
+const canSeeReminder = (user, r) => user.role === 'admin' || r.createdById === user.id || r.assigneeId === user.id;
+function reminderPublic(r) {
+  const contact = byId('contacts', r.contactId), conv = byId('conversations', r.conversationId);
+  return { ...r, contactName: contact?.name || contact?.waName || '', phone: contact?.phone || '', assigneeName: remUser(r)?.name || '',
+    scheduleText: r.schedule ? scheduleText(r.schedule) : '', convStatus: conv?.status || null, history: (r.history || []).slice(-20) };
+}
+function emitReminder(r, event = 'reminder:update') {
+  if (!io) return;
+  io.to([...new Set(['admins', 'user:' + r.createdById, 'user:' + (r.assigneeId || r.createdById)])]).emit(event, reminderPublic(r));
+}
+function remHistory(r, status, detail, extra = {}) {
+  r.history = [...(r.history || []), { at: now(), status, detail: String(detail || '').slice(0, 300), ...extra }].slice(-50);
+}
+// Template untuk pelanggan: APPROVED, dan MARKETING hanya ke kontak yang opt-in
+function reminderTemplate(t, contact, label) {
+  const tpl = findTemplate(str(t?.templateName, 512), str(t?.language, 15));
+  if (!tpl) throw new HttpError(400, `${label}: template tidak ditemukan.`);
+  if (tpl.status !== 'APPROVED') throw new HttpError(400, `${label}: template harus berstatus APPROVED.`);
+  if (tpl.category === 'MARKETING' && !contact.optIn) throw new HttpError(400, `${label}: template MARKETING hanya untuk kontak yang opt-in.`);
+  buildTemplateComponents(tpl, t.values || {}, contact); // validasi variabel
+  return { templateName: tpl.name, language: tpl.language, values: t.values || {} };
+}
+
+async function sendCustomerReminder(r) {
+  const conv = byId('conversations', r.conversationId), contact = byId('contacts', r.contactId);
+  if (!conv || !contact) return { status: 'skipped', detail: 'Percakapan/kontak sudah dihapus.' };
+  const who = 'Pengingat · ' + (byId('users', r.createdById)?.name || r.createdByName || 'Kontaq');
+  const useTpl = async (t, note) => {
+    const tpl = findTemplate(t.templateName, t.language);
+    if (!tpl || tpl.status !== 'APPROVED') return { status: 'failed', detail: 'Template tidak lagi berstatus APPROVED.' };
+    if (tpl.category === 'MARKETING' && !contact.optIn) return { status: 'skipped', detail: 'Kontak tidak opt-in untuk template MARKETING.' };
+    const msg = await sendTemplateTo(contact, tpl, t.values, { userName: who, auto: 'reminder' }, { source: 'reminder', userName: who });
+    return { status: 'sent', detail: (note ? note + ' ' : '') + 'Template ' + tpl.name, wamid: msg.wamid };
+  };
+  try {
+    if (r.mode === 'template') return await useTpl(r.template);
+    if (windowOpen(conv)) {
+      const body = fillVars(r.text, contact).slice(0, 4096);
+      const p = await sendToMeta({ messaging_product: 'whatsapp', recipient_type: 'individual', to: contact.phone, type: 'text', text: { body, preview_url: /https?:\/\//.test(body) } },
+        { source: 'reminder', contact, conversation: conv, userName: who });
+      const msg = addMessage(conv, { direction: 'out', type: 'text', content: { body }, wamid: p.messages?.[0]?.id, status: 'accepted', userName: who, auto: 'reminder' });
+      return { status: 'sent', detail: 'Pesan teks', wamid: msg.wamid };
+    }
+    if (r.fallback) return await useTpl(r.fallback, 'Jendela 24 jam tertutup →');
+    return { status: 'skipped', detail: 'Jendela layanan 24 jam tertutup dan tidak ada template cadangan.' };
+  } catch (e) {
+    return { status: 'failed', detail: e.message };
+  }
+}
+
+function fireSelfReminder(r) {
+  const conv = byId('conversations', r.conversationId), contact = byId('contacts', r.contactId), user = remUser(r);
+  r.status = 'due'; r.firedAt = now();
+  remHistory(r, 'due', 'Pengingat jatuh tempo');
+  if (conv && r.reopen && conv.status === 'closed') {
+    conv.status = 'open'; remHistory(r, 'due', 'Percakapan dibuka kembali');
+    emitConv(conv, 'conversation:update', serializeConv(conv));
+  }
+  save();
+  emitReminder(r, 'reminder:due');
+  if (user && waGateway().apiKey) {
+    const link = appLink('#/inbox/' + r.conversationId);
+    notifyUsers('reminder', [user], `⏰ *Pengingat Kontaq*\n${r.note || 'Tindak lanjut percakapan'}\n${contact ? contactLabel(contact) : ''}${link ? '\n' + link : ''}`);
+  }
+}
+
+let reminderBusy = false;
+async function runReminders() {
+  if (reminderBusy) return;
+  reminderBusy = true;
+  try {
+    for (const r of db.reminders) {
+      if (r.status !== 'pending' || r.dueAt > now()) continue;
+      if (r.kind === 'self') { fireSelfReminder(r); continue; }
+      const late = now() - r.dueAt > REMINDER_LATE_MS;
+      const res = late ? { status: 'skipped', detail: 'Terlewat lebih dari 6 jam (server tidak berjalan saat jadwal).' } : await sendCustomerReminder(r);
+      remHistory(r, res.status, res.detail, res.wamid ? { wamid: res.wamid } : {});
+      r.lastRunAt = now(); r.runCount = (r.runCount || 0) + (res.status === 'sent' ? 1 : 0);
+      r.lastStatus = res.status; r.lastDetail = res.detail;
+      const next = r.schedule && r.schedule.freq !== 'none' && r.status === 'pending' ? nextOccurrence(r.schedule, now()) : null;
+      if (next) r.dueAt = next;
+      else if (r.status === 'pending') { r.status = res.status; r.finishedAt = now(); }
+      save(); emitReminder(r);
+      if (res.status !== 'sent') {
+        io?.to('user:' + r.createdById).emit('notice', { level: res.status === 'failed' ? 'error' : 'warn',
+          text: `Pengingat ke ${contactLabel(byId('contacts', r.contactId))} ${res.status === 'failed' ? 'gagal' : 'dilewati'}: ${res.detail}` });
+      }
+    }
+    // Batasi ukuran: buang pengingat final paling lama
+    if (db.reminders.length > REMINDER_KEEP) {
+      const fin = new Set(db.reminders.filter((r) => !['pending', 'due'].includes(r.status)).slice(0, db.reminders.length - REMINDER_KEEP).map((r) => r.id));
+      db.reminders = db.reminders.filter((r) => !fin.has(r.id)); save();
+    }
+  } finally { reminderBusy = false; }
+}
+setInterval(() => runReminders().catch((e) => console.error('[reminders]', e.message)), 15000);
+
+app.get('/api/reminders', wrap(async (req, res) => {
+  let list = db.reminders.filter((r) => canSeeReminder(req.user, r));
+  if (req.query.conversationId) list = list.filter((r) => r.conversationId === req.query.conversationId);
+  res.json({ timezone: flowTz(), now: now(), reminders: list.slice(-2000).reverse().map(reminderPublic),
+    users: req.user.role === 'admin' ? db.users.filter((u) => u.active).map((u) => ({ id: u.id, name: u.name })) : [] });
+}));
+app.post('/api/reminders', wrap(async (req, res) => {
+  const b = req.body || {};
+  const conv = byId('conversations', str(b.conversationId, 40));
+  if (!conv || !canSeeConv(req.user, conv)) throw new HttpError(404, 'Percakapan tidak ditemukan.');
+  const contact = byId('contacts', conv.contactId);
+  if (!contact) throw new HttpError(400, 'Kontak percakapan tidak ditemukan.');
+  const kind = b.kind === 'customer' ? 'customer' : 'self';
+  if (db.reminders.filter((r) => r.conversationId === conv.id && ['pending', 'due'].includes(r.status)).length >= 20) throw new HttpError(400, 'Maksimal 20 pengingat aktif per percakapan.');
+  const r = { id: uid('rm_'), kind, conversationId: conv.id, contactId: contact.id, createdById: req.user.id, createdByName: req.user.name, createdAt: now(), status: 'pending', history: [] };
+  if (kind === 'self') {
+    const due = Number(b.inMinutes) > 0 ? now() + Math.min(Math.round(Number(b.inMinutes)), 60 * 24 * 365) * 60000
+      : cleanSchedule({ date: b.date, time: b.time, freq: 'none' }, 'Waktu pengingat').first;
+    // Admin dapat mengingatkan pengguna lain; agen hanya dirinya sendiri
+    const assignee = req.user.role === 'admin' && b.assigneeId ? byId('users', str(b.assigneeId, 40)) : req.user;
+    if (!assignee || !assignee.active) throw new HttpError(400, 'Pengguna yang diingatkan tidak ditemukan.');
+    Object.assign(r, { dueAt: due, note: str(b.note, 500), reopen: b.reopen !== false, assigneeId: assignee.id });
+  } else {
+    if (!meta().accessToken || !meta().phoneNumberId) throw new HttpError(400, 'Koneksi Meta belum dikonfigurasi.');
+    const sched = cleanSchedule(b, 'Jadwal kirim');
+    r.schedule = (({ first, ...x }) => x)(sched); r.dueAt = sched.first;
+    r.mode = b.mode === 'template' ? 'template' : 'text';
+    r.note = str(b.note, 200);
+    if (r.mode === 'text') {
+      r.text = str(b.text, 4096);
+      if (!r.text) throw new HttpError(400, 'Isi pesan wajib diisi.');
+      r.fallback = b.fallback?.templateName ? reminderTemplate(b.fallback, contact, 'Template cadangan') : null;
+    } else r.template = reminderTemplate(b.template, contact, 'Template');
+  }
+  remHistory(r, 'pending', 'Dibuat oleh ' + req.user.name);
+  db.reminders.push(r);
+  audit(req, 'reminder.create', `${kind === 'self' ? 'Ingatkan' : 'Pesan terjadwal'} · ${contactLabel(contact)} · ${new Date(r.dueAt).toISOString()}`);
+  save(); emitReminder(r);
+  res.json(reminderPublic(r));
+}));
+app.post('/api/reminders/:id/:action(done|snooze|cancel|reopen)', wrap(async (req, res) => {
+  const r = byId('reminders', req.params.id);
+  if (!r || !canSeeReminder(req.user, r)) throw new HttpError(404, 'Pengingat tidak ditemukan.');
+  const a = req.params.action, active = ['pending', 'due'].includes(r.status);
+  if (a === 'done') {
+    if (r.kind !== 'self' || !active) throw new HttpError(400, 'Pengingat tidak dapat ditandai selesai.');
+    r.status = 'done'; r.finishedAt = now(); remHistory(r, 'done', 'Ditandai selesai oleh ' + req.user.name);
+  } else if (a === 'snooze') {
+    if (r.kind !== 'self' || !active) throw new HttpError(400, 'Pengingat tidak dapat ditunda.');
+    const min = Math.round(Number(req.body?.minutes));
+    if (!(min >= 5 && min <= 60 * 24 * 30)) throw new HttpError(400, 'Durasi tunda tidak valid.');
+    r.status = 'pending'; r.dueAt = now() + min * 60000;
+    remHistory(r, 'pending', `Ditunda ${min >= 1440 ? min / 1440 + ' hari' : min >= 60 ? min / 60 + ' jam' : min + ' menit'} oleh ${req.user.name}`);
+  } else if (a === 'reopen') {
+    if (r.kind !== 'self' || r.status !== 'done') throw new HttpError(400, 'Pengingat tidak dapat dibuka lagi.');
+    r.status = 'due'; r.finishedAt = null; remHistory(r, 'due', 'Dibuka lagi oleh ' + req.user.name);
+  } else {
+    if (!active) throw new HttpError(400, 'Pengingat sudah selesai.');
+    r.status = 'cancelled'; r.finishedAt = now(); remHistory(r, 'cancelled', 'Dibatalkan oleh ' + req.user.name);
+  }
+  audit(req, 'reminder.' + a, r.id); save(); emitReminder(r);
+  res.json(reminderPublic(r));
+}));
+app.delete('/api/reminders/:id', wrap(async (req, res) => {
+  const r = byId('reminders', req.params.id);
+  if (!r || !canSeeReminder(req.user, r)) throw new HttpError(404, 'Pengingat tidak ditemukan.');
+  if (['pending', 'due'].includes(r.status)) throw new HttpError(400, 'Batalkan pengingat dulu sebelum dihapus.');
+  db.reminders = db.reminders.filter((x) => x.id !== r.id); save();
+  io?.to([...new Set(['admins', 'user:' + r.createdById, 'user:' + (r.assigneeId || r.createdById)])]).emit('reminder:removed', { id: r.id });
+  res.json({ ok: true });
+}));
+
 /* Error handler */
 app.use('/api', (req, res, next) => next(new HttpError(404, 'Endpoint tidak ditemukan.')));
 app.use((err, req, res, next) => {
@@ -4123,7 +4435,8 @@ app.use((err, req, res, next) => {
 let workerBusy = false;
 setInterval(async () => {
   if (workerBusy) return;
-  const camp = db.campaigns.find((c) => c.status === 'running');
+  // Campaign dengan jam kirim dilewati di luar jam tersebut dan otomatis lanjut saat jam kirim dibuka lagi
+  const camp = db.campaigns.find((c) => c.status === 'running' && inSendWindow(c));
   if (!camp) return;
   workerBusy = true;
   try {
@@ -4155,6 +4468,21 @@ setInterval(async () => {
     io?.to('admins').emit('campaign:update', campaignSummary(camp));
   } finally { workerBusy = false; }
 }, 1000);
+
+// Penjadwal broadcast: cek tiap 15 dtk. Jadwal yang terlewat saat server mati dijalankan sekali saat server hidup;
+// seri berulang lalu melompat ke jadwal berikutnya dari waktu sekarang (tidak mengirim beruntun untuk semua yang terlewat).
+setInterval(() => {
+  for (const c of db.campaigns) {
+    if (c.status !== 'scheduled' || !c.nextRunAt || c.nextRunAt > now()) continue;
+    try {
+      runScheduledCampaign(c, false);
+      if (c.series && c.maxRuns && c.runCount >= c.maxRuns && c.status === 'scheduled') {
+        c.status = 'done'; c.finishedAt = now(); c.nextRunAt = null; save();
+        io?.to('admins').emit('campaign:update', campaignSummary(c));
+      }
+    } catch (e) { console.error('[campaign-scheduler]', c.id, e.message); }
+  }
+}, 15000);
 
 /* ───────────────────────── 9. Socket.IO & start ───────────────────────── */
 

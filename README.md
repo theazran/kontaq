@@ -41,7 +41,7 @@ WA gateway pihak ketiga (`POST` dengan header `x-api-key`, body `{ device, to, m
 
 1. Admin: **Pengaturan › Gateway WA** — isi URL, Device, dan API key (atau `WA_GATEWAY_*` di `.env`), lalu kirim pesan tes.
 2. Tiap pengguna: **Pengaturan › Notifikasi & keamanan › Notifikasi WhatsApp** — isi nomor, pilih jenis
-   (pesan masuk, percakapan ditugaskan, panggilan masuk), lalu aktifkan sakelar. Opsi "Hanya kirim saat Kontaq
+   (pesan masuk, percakapan ditugaskan, panggilan masuk, pengingat jatuh tempo), lalu aktifkan sakelar. Opsi "Hanya kirim saat Kontaq
    tidak sedang terbuka" aktif secara bawaan.
 
 Pesan masuk mengikuti hak akses: percakapan yang sudah ditugaskan hanya memberi tahu agen pemiliknya; yang belum
@@ -99,8 +99,8 @@ Menu **WhatsApp Flows** mengelola formulir interaktif resmi WhatsApp lewat
 [Flows API](https://developers.facebook.com/docs/whatsapp/flows/reference/flowsapi) (memakai WABA ID & token di Koneksi Meta).
 
 - **Kelola:** sinkronkan flow dari WABA, buat flow baru dari contoh (formulir kontak, survei, janji temu) atau gandakan (clone),
-  ubah Flow JSON di editor (Meta memvalidasi dan mengembalikan error per baris), pratinjau resmi Meta, terbitkan, nonaktifkan
-  (deprecate), hapus draf. Flow yang sudah terbit tidak dapat diubah — gandakan untuk versi baru.
+  susun lewat **editor visual** (di bawah) atau ubah Flow JSON langsung (Meta memvalidasi dan mengembalikan error per baris),
+  pratinjau resmi Meta, terbitkan, nonaktifkan (deprecate), hapus draf. Flow yang sudah terbit tidak dapat diubah — gandakan untuk versi baru.
 - **Kirim:** dari Inbox (ikon formulir di kolom pesan) selama jendela 24 jam terbuka; admin dapat mengirim mode draf untuk uji.
   Di luar jendela 24 jam, kirim template yang memiliki tombol **Flow** — Kontaq mengisi `flow_token` otomatis (juga untuk campaign).
 - **Jawaban:** `nfm_reply.response_json` dicocokkan dengan pengiriman lewat `flow_token`, tampil sebagai daftar isian di chat dan
@@ -111,6 +111,32 @@ Menu **WhatsApp Flows** mengelola formulir interaktif resmi WhatsApp lewat
 
 Kontaq mendukung flow tanpa endpoint (navigasi antar-screen + `complete`). Flow ber-endpoint (`data_exchange`) dapat dikirim
 dan jawabannya dicatat, tetapi pertukaran datanya dilayani oleh endpoint terenkripsi milik Anda sendiri.
+
+### Editor visual
+
+Tab **Editor visual** di halaman flow menyusun formulir tanpa menulis JSON:
+
+- **Header:** nama, kategori, status, indikator *belum disimpan*, tombol Simpan (Ctrl+S), Pratinjau, Validasi, Publikasikan,
+  dan menu tindakan sesuai status (pratinjau resmi Meta, lihat/unduh Flow JSON, gandakan, muat ulang, hapus draf / nonaktifkan).
+  Meninggalkan halaman dengan perubahan belum disimpan memunculkan konfirmasi.
+- **Layar (kiri):** tambah, buka, ganti nama, gandakan, hapus (dengan konfirmasi), dan urutkan dengan seret-lepas (mouse, sentuh,
+  atau tombol panah pada pegangan). Layar punya ID internal stabil, jadi tujuan tombol tetap benar saat ID layar diganti atau urutan diubah;
+  menghapus layar mengalihkan tombol yang mengarah ke layar itu ke tujuan berikutnya.
+- **Editor (tengah):** judul & ID layar (otomatis dari judul, dapat diubah), daftar komponen (urutkan, gandakan, hapus), properti
+  komponen terpilih saja, serta tombol & navigasi (lanjut ke layar lain atau *Selesai — kirim data*).
+- **Katalog komponen:** Judul, Subjudul, Teks isi, Keterangan, Rich text, Tautan, Gambar (dikompres ≤ 300 KB), Jawaban singkat/panjang,
+  Dropdown, Pilihan tunggal/ganda, Pemilih chip, Pemilih tanggal, Kalender, Persetujuan. Komponen yang butuh versi Flow JSON lebih baru
+  (RichText 5.1, CalendarPicker 6.1, ChipsSelector 6.3, pola regex 6.2, buka URL 6.0) ditandai.
+- **Pratinjau (kanan):** tampilan ponsel yang langsung mengikuti setiap perubahan; klik komponen untuk mengeditnya. Mode **Uji alur**
+  mencoba formulir dari layar pertama: validasi wajib/format, navigasi & kembali, lalu menampilkan data yang *akan* dikirim — data uji
+  tidak dikirim ke server dan tidak tercatat sebagai jawaban.
+- **Data antarlayar otomatis:** isian dibawa ke layar berikutnya (dapat ditampilkan dengan `${data.nama_field}`, mis. layar ringkasan)
+  dan Footer *Selesai* mengirim semua isian lewat `payload`, sehingga jawaban tetap tercatat di tab Jawaban.
+- **Validasi:** pemeriksaan lokal (batas karakter, jumlah pilihan & komponen per layar, nama field unik, tujuan navigasi, layar tak terjangkau,
+  versi) ditambah error validasi Meta dari penyimpanan terakhir; klik error untuk membuka komponennya.
+
+Flow yang memakai fitur di luar editor (endpoint/`data_exchange`, `data-source` dinamis) dibuka hanya baca di editor visual dan tetap
+dapat diubah di tab **Flow JSON**. Komponen lain yang belum didukung (mis. `If`, `PhotoPicker`) disalin apa adanya.
 
 ## Grup WhatsApp (admin)
 
@@ -171,6 +197,34 @@ Menu **Kepuasan (CSAT)** mengirim survei singkat dan melaporkan hasilnya.
 - **Laporan:** skor CSAT (% jawaban puas: nilai 4–5, atau "Puas" pada skala 3), rata-rata nilai (dinormalkan ke skala 5),
   tingkat respons, distribusi nilai, tren harian (dengan tampilan tabel), per agen, masukan terbaru, dan riwayat survei.
   Filter rentang tanggal dan agen; ekspor CSV (admin). Agen hanya melihat survei percakapan yang ia tangani.
+
+## Broadcast terjadwal (admin)
+
+Di **Campaign › Campaign baru › Waktu kirim** pilih **Jadwalkan**:
+
+- **Sekali** pada tanggal & jam tertentu, atau **berulang** setiap hari, setiap minggu (pilih hari), atau setiap bulan
+  (tanggal yang sama; bulan yang lebih pendek memakai hari terakhir), dengan batas *sampai tanggal* dan/atau *maks. pengiriman*.
+- Penerima dihitung ulang dari filter label & opt-in **saat jadwal berjalan**: kontak baru ikut, yang berhenti opt-in tidak dikirimi.
+  Tiap kemunculan seri berulang menjadi campaign tersendiri (laporan & CSV per kiriman) yang tertaut ke serinya.
+- **Jam kirim** (opsional, mis. 08.00–20.00): di luar jam itu antrean berhenti sementara dan otomatis lanjut.
+- Aksi: **Kirim sekarang** (tanpa menggeser jadwal), **Jeda/Lanjutkan seri**, **Hentikan seri**, **Batalkan**.
+- Jadwal memakai zona waktu aplikasi (Auto reply › zona waktu). Jadwal yang terlewat saat server mati dijalankan sekali saat server
+  hidup; seri berulang lalu melompat ke jadwal berikutnya (tidak mengirim beruntun). Bila template tidak lagi APPROVED atau tidak ada
+  kontak yang cocok, kiriman tidak dibuat dan error tampil di daftar campaign.
+
+## Pengingat
+
+Buat dari Inbox (ikon jam di atas chat, atau **Pengingat › Buat** di panel info kontak). Semua pengingat tampil di menu **Pengingat**
+(Jatuh tempo · Akan datang · Pesan terjadwal · Riwayat); agen melihat miliknya, admin dapat melihat semua pengguna.
+
+- **Ingatkan saya:** tindak lanjut internal (30 menit, 1 jam, besok 09.00, atau tanggal/jam bebas) dengan catatan. Saat jatuh tempo
+  muncul kartu di pojok layar (Buka chat · Selesai · Tunda), bunyi, notifikasi browser, dan — bila diaktifkan di
+  Pengaturan › Notifikasi WhatsApp — pesan ke WhatsApp pribadi. Opsional membuka kembali percakapan yang sudah selesai.
+  Admin dapat mengatur pengingat untuk pengguna lain.
+- **Kirim ke pelanggan:** pesan terjadwal, sekali atau berulang. **Template** APPROVED selalu dapat dikirim (MARKETING hanya ke kontak
+  opt-in). **Pesan teks** hanya dikirim bila jendela layanan 24 jam masih terbuka saat jadwal; bila tertutup, Kontaq mengirim
+  **template cadangan** (bila dipilih) atau melewatinya — status & alasannya tercatat di riwayat pengingat dan di Log pesan (sumber "Pengingat").
+  Pengingat pelanggan yang terlambat lebih dari 6 jam (mis. server mati) dilewati, bukan dikirim terlambat.
 
 ## Pemakaian di HP
 
