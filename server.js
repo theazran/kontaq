@@ -355,8 +355,12 @@ function buildOutbound(type, b) {
       if (type === 'audio' && b.voice && /^audio\/ogg/.test(str(b.mime, 100))) obj.voice = true;
       p[type] = obj;
       const num = (v, max) => { const n = Number(v); return Number.isFinite(n) && n > 0 && n <= max ? Math.round(n * 10) / 10 : 0; };
-      return { payload: p, content: { mediaId: obj.id, caption: obj.caption || '', filename: obj.filename || '', mime: str(b.mime, 100),
-        voice: !!obj.voice, size: num(b.size, 200 * 1024 * 1024), duration: num(b.duration, 86400), width: num(b.width, 20000), height: num(b.height, 20000) } };
+      return {
+        payload: p, content: {
+          mediaId: obj.id, caption: obj.caption || '', filename: obj.filename || '', mime: str(b.mime, 100),
+          voice: !!obj.voice, size: num(b.size, 200 * 1024 * 1024), duration: num(b.duration, 86400), width: num(b.width, 20000), height: num(b.height, 20000)
+        }
+      };
     }
     case 'sticker': {
       if (!b.mediaId) throw new HttpError(400, 'Stiker belum dipilih.');
@@ -688,8 +692,14 @@ function parseInbound(m) {
       return { type: 'interactive_reply', content: { id: r.id || '', title: r.title || r.name || 'Balasan', description: r.description || '' } };
     }
     case 'button': return { type: 'button', content: { text: m.button?.text || '', payload: m.button?.payload || '' } };
-    case 'contacts': return { type: 'contacts', content: { contacts: (m.contacts || []).map((c) => ({ name: c.name?.formatted_name || [c.name?.first_name, c.name?.last_name].filter(Boolean).join(' ') || 'Kontak',
-      phones: (c.phones || []).map((p) => p.phone), waIds: (c.phones || []).map((p) => p.wa_id || ''), emails: (c.emails || []).map((e) => e.email), company: c.org?.company || '' })) } };
+    case 'contacts': return {
+      type: 'contacts', content: {
+        contacts: (m.contacts || []).map((c) => ({
+          name: c.name?.formatted_name || [c.name?.first_name, c.name?.last_name].filter(Boolean).join(' ') || 'Kontak',
+          phones: (c.phones || []).map((p) => p.phone), waIds: (c.phones || []).map((p) => p.wa_id || ''), emails: (c.emails || []).map((e) => e.email), company: c.org?.company || ''
+        }))
+      }
+    };
     default: return { type: 'unsupported', content: { body: `[Pesan tipe "${t}" tidak didukung]` } };
   }
 }
@@ -744,8 +754,10 @@ function autoReplyDefaults() {
     enabled: false, pauseMinutes: 30, keywordCooldownMin: 5,
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Jakarta',
     welcome: { enabled: false, text: 'Halo {{name}}, terima kasih telah menghubungi kami. Tim kami akan segera membalas pesan Anda.', inactiveDays: 30 },
-    away: { enabled: false, text: 'Halo {{name}}, saat ini kami sedang di luar jam operasional. Pesan Anda akan kami balas pada jam kerja berikutnya.', cooldownHours: 12,
-      hours: DAYS.map((_, day) => ({ day, enabled: day >= 1 && day <= 5, open: '08:00', close: '17:00' })) },
+    away: {
+      enabled: false, text: 'Halo {{name}}, saat ini kami sedang di luar jam operasional. Pesan Anda akan kami balas pada jam kerja berikutnya.', cooldownHours: 12,
+      hours: DAYS.map((_, day) => ({ day, enabled: day >= 1 && day <= 5, open: '08:00', close: '17:00' }))
+    },
     rules: [], sent: 0, lastError: null,
   };
 }
@@ -874,8 +886,10 @@ function validateAutoReply(b) {
   out.timezone = tz;
   out.welcome = { enabled: !!b.welcome?.enabled, ...cleanReplyExtras(b.welcome, 'Pesan sambutan', !!b.welcome?.enabled), inactiveDays: num(b.welcome?.inactiveDays ?? 30, 1, 365, 'Hari tidak aktif') };
   const hours = Array.isArray(b.away?.hours) ? b.away.hours : cfg.away.hours;
-  out.away = { enabled: !!b.away?.enabled, ...cleanReplyExtras(b.away, 'Pesan di luar jam kerja', !!b.away?.enabled), cooldownHours: num(b.away?.cooldownHours ?? 12, 0, 168, 'Jeda pesan di luar jam kerja (jam)'),
-    hours: DAYS.map((_, day) => { const h = hours.find((x) => Number(x.day) === day) || {}; return { day, enabled: !!h.enabled, open: time(h.open || '08:00'), close: time(h.close || '17:00') }; }) };
+  out.away = {
+    enabled: !!b.away?.enabled, ...cleanReplyExtras(b.away, 'Pesan di luar jam kerja', !!b.away?.enabled), cooldownHours: num(b.away?.cooldownHours ?? 12, 0, 168, 'Jeda pesan di luar jam kerja (jam)'),
+    hours: DAYS.map((_, day) => { const h = hours.find((x) => Number(x.day) === day) || {}; return { day, enabled: !!h.enabled, open: time(h.open || '08:00'), close: time(h.close || '17:00') }; })
+  };
   if (out.away.hours.some((h) => h.enabled && h.open === h.close)) throw new HttpError(400, 'Jam buka dan tutup tidak boleh sama.');
   const prev = Object.fromEntries(cfg.rules.map((x) => [x.id, x]));
   out.rules = (Array.isArray(b.rules) ? b.rules : []).slice(0, 100).map((x, i) => {
@@ -1054,8 +1068,10 @@ function cleanFlowNode(raw, isRoot) {
       // Ulangi daftar dari variabel (mis. hasil API): teks pesan menjadi judul tiap lembar, item dirender per elemen
       if (c.repeat?.path) {
         const r = c.repeat;
-        cfg.repeat = { path: varPath(r.path, 'daftar'), item: text(r.item, 1500, 'Format tiap item'), perMessage: num(r.perMessage ?? 5, 1, 20, 'item per pesan'),
-          max: num(r.max ?? 30, 1, 100, 'jumlah item maksimal'), more: str(r.more, 500) };
+        cfg.repeat = {
+          path: varPath(r.path, 'daftar'), item: text(r.item, 1500, 'Format tiap item'), perMessage: num(r.perMessage ?? 5, 1, 20, 'item per pesan'),
+          max: num(r.max ?? 30, 1, 100, 'jumlah item maksimal'), more: str(r.more, 500)
+        };
         if (Math.ceil(cfg.repeat.max / cfg.repeat.perMessage) > 10) throw new HttpError(400, `${name}: maksimal 10 pesan per daftar (naikkan item per pesan atau turunkan jumlah maksimal).`);
         if (cfg.image || cfg.buttons.length) throw new HttpError(400, `${name}: daftar berulang hanya untuk pesan teks (tanpa gambar/tombol).`);
       }
@@ -1090,8 +1106,10 @@ function cleanFlowNode(raw, isRoot) {
     case 'waflow': {
       const f = wafById(c.flowId);
       if (!f) throw new HttpError(400, `${name}: pilih WhatsApp Flow (sinkronkan di menu WhatsApp Flows).`);
-      cfg = { flowId: f.id, text: text(c.text, 1024, 'Teks pesan'), cta: text(c.cta, 30, 'Teks tombol'), header: str(c.header, 60), footer: str(c.footer, 60),
-        screen: str(c.screen, 80), var: varName(c.var, 'Simpan jawaban ke variabel'), timeoutMinutes: num(c.timeoutMinutes ?? 60, 1, 1380, 'batas waktu (menit)') };
+      cfg = {
+        flowId: f.id, text: text(c.text, 1024, 'Teks pesan'), cta: text(c.cta, 30, 'Teks tombol'), header: str(c.header, 60), footer: str(c.footer, 60),
+        screen: str(c.screen, 80), var: varName(c.var, 'Simpan jawaban ke variabel'), timeoutMinutes: num(c.timeoutMinutes ?? 60, 1, 1380, 'batas waktu (menit)')
+      };
       break;
     }
     case 'api': {
@@ -1290,12 +1308,16 @@ function askOptions(c, ctx) {
 function askInteractive(n, body, options) {
   const c = n.cfg;
   if (options.length <= 3) {
-    return { type: 'interactive', interactive: { type: 'button', body: { text: body }, action: { buttons: options.map((o, i) => ({ type: 'reply', reply: { id: `fq_${n.id}_${i}`, title: o.title.slice(0, 20) } })) } },
-      record: { type: 'interactive', content: { kind: 'button', header: '', body, footer: '', buttons: options.map((o) => o.title.slice(0, 20)) } } };
+    return {
+      type: 'interactive', interactive: { type: 'button', body: { text: body }, action: { buttons: options.map((o, i) => ({ type: 'reply', reply: { id: `fq_${n.id}_${i}`, title: o.title.slice(0, 20) } })) } },
+      record: { type: 'interactive', content: { kind: 'button', header: '', body, footer: '', buttons: options.map((o) => o.title.slice(0, 20)) } }
+    };
   }
   const rows = options.map((o, i) => ({ id: `fq_${n.id}_${i}`, title: o.title.slice(0, 24), ...(o.desc ? { description: o.desc.slice(0, 72) } : {}) }));
-  return { type: 'interactive', interactive: { type: 'list', body: { text: body }, action: { button: c.button, sections: [{ title: 'Pilihan', rows }] } },
-    record: { type: 'interactive', content: { kind: 'list', header: '', body, footer: '', button: c.button, rows: rows.map((r) => ({ id: r.id, title: r.title, description: r.description || '' })) } } };
+  return {
+    type: 'interactive', interactive: { type: 'list', body: { text: body }, action: { button: c.button, sections: [{ title: 'Pilihan', rows }] } },
+    record: { type: 'interactive', content: { kind: 'list', header: '', body, footer: '', button: c.button, rows: rows.map((r) => ({ id: r.id, title: r.title, description: r.description || '' })) } }
+  };
 }
 async function askSend(flow, n, ctx, body, options, dry) {
   const preview = { text: body, buttons: options.map((o) => o.title) };
@@ -1347,7 +1369,7 @@ async function execAsk(flow, n, ctx, dry) {
     logs.push('Pertanyaan dikirim');
     if (!dry) return wait('menunggu jawaban');
   }
-  for (;;) {
+  for (; ;) {
     const msg = dry ? (ctx.dryAnswers.length ? { type: 'text', content: { body: ctx.dryAnswers.shift() } } : null) : ctx.answer?.msg;
     if (ctx.answer) ctx.answer = null; // jawaban hanya untuk langkah ini
     if (!msg) return { stop: true, action: true, log: [...logs, 'menunggu jawaban pelanggan (isi "Jawaban uji" untuk melanjutkan simulasi)'].join(' → '), previews };
@@ -1409,9 +1431,11 @@ async function execApi(flow, n, ctx, dry) {
   const started = Date.now();
   let res;
   try {
-    res = await axios({ method: c.method, url, headers, data: body, timeout: c.timeoutSec * 1000, maxRedirects: 0, proxy: false,
+    res = await axios({
+      method: c.method, url, headers, data: body, timeout: c.timeoutSec * 1000, maxRedirects: 0, proxy: false,
       maxContentLength: FLOW_API_MAX_BYTES, maxBodyLength: 64 * 1024, responseType: 'text', transformResponse: [(d) => d],
-      validateStatus: () => true, httpsAgent: FLOW_HTTPS_AGENT });
+      validateStatus: () => true, httpsAgent: FLOW_HTTPS_AGENT
+    });
   } catch (e) {
     const msg = e.code === 'ECONNABORTED' || e.code === 'ETIMEDOUT' || /timeout/i.test(e.message) ? `waktu habis (${c.timeoutSec} dtk)`
       : e.code === 'EBLOCKED' ? e.message : /maxContentLength/i.test(e.message) ? 'respons terlalu besar' : 'gagal terhubung: ' + (e.code || e.message);
@@ -1619,8 +1643,10 @@ async function runFlows(conv, contact, msg, prevInboundAt) {
     const flow = byId('flows', pending.flowId), state = pending.input, node = flow?.nodes[state.nodeId];
     const end = (status, error) => { Object.assign(pending, { status, error, finishedAt: now() }); delete pending.vars; delete pending.input; save(); };
     const resume = async () => {
-      const ctx = { conv, contact, text, msgType: msg.type, prevInboundAt: pending.prevInboundAt, at, clock: zonedNow(flowTz(), at),
-        contextId: msg.wamid, vars: pending.vars || {}, answer: { msg, state } };
+      const ctx = {
+        conv, contact, text, msgType: msg.type, prevInboundAt: pending.prevInboundAt, at, clock: zonedNow(flowTz(), at),
+        contextId: msg.wamid, vars: pending.vars || {}, answer: { msg, state }
+      };
       delete pending.input;
       await execFlow(flow, pending, ctx, node.id, false);
       finishFlowRun(flow, pending);
@@ -1649,8 +1675,10 @@ async function runFlows(conv, contact, msg, prevInboundAt) {
   for (const flow of flows) {
     if (flowGate(flow, conv, at)) continue;
     const ctx = { conv, contact, text, msgType: msg.type, prevInboundAt, at, clock: zonedNow(flowTz(), at), contextId: msg.wamid, vars: {} };
-    const run = { id: uid('fr_'), flowId: flow.id, flowName: flow.name, conversationId: conv.id, contactId: contact.id, phone: contact.phone,
-      text: text.slice(0, 300), msgType: msg.type, prevInboundAt, startedAt: at, status: 'running', steps: [], actions: 0, error: null };
+    const run = {
+      id: uid('fr_'), flowId: flow.id, flowName: flow.name, conversationId: conv.id, contactId: contact.id, phone: contact.phone,
+      text: text.slice(0, 300), msgType: msg.type, prevInboundAt, startedAt: at, status: 'running', steps: [], actions: 0, error: null
+    };
     // Tandai sebelum aksi asinkron agar pesan beruntun tidak menjalankan flow (ber-jeda) dua kali
     const prevLog = conv.flowLog?.[flow.id];
     conv.flowLog = { ...conv.flowLog, [flow.id]: at };
@@ -1688,8 +1716,10 @@ setInterval(async () => {
       const flow = byId('flows', run.flowId), conv = byId('conversations', run.conversationId), contact = byId('contacts', run.contactId);
       const state = run.input, node = flow?.nodes[state.nodeId];
       if (!flow?.enabled || !conv || !contact || node?.type !== 'waflow') { Object.assign(run, { status: 'expired', error: 'Formulir tidak diisi sampai batas waktu.', finishedAt: now() }); delete run.vars; delete run.input; save(); continue; }
-      const ctx = { conv, contact, text: run.text, msgType: run.msgType, prevInboundAt: run.prevInboundAt, at: now(), clock: zonedNow(flowTz()), contextId: null,
-        vars: run.vars || {}, answer: { msg: null, state }, timedOut: true };
+      const ctx = {
+        conv, contact, text: run.text, msgType: run.msgType, prevInboundAt: run.prevInboundAt, at: now(), clock: zonedNow(flowTz()), contextId: null,
+        vars: run.vars || {}, answer: { msg: null, state }, timedOut: true
+      };
       delete run.input;
       await execFlow(flow, run, ctx, node.id, false);
       finishFlowRun(flow, run);
@@ -1716,9 +1746,11 @@ async function testFlow(flow, b) {
   const contact = { name: 'Budi', waName: 'Budi', phone: '6281234567890', labels: cleanLabels(b.labels) };
   const conv = { id: 'test', status: 'open', assignedTo: b.assigned ? flowAgents()[0]?.id || 'x' : null, lastInboundAt: at, notes: [] };
   const msgType = FLOW_MSG_TYPES.includes(b.msgType) ? (b.msgType === 'reply' ? 'interactive_reply' : b.msgType) : 'text';
-  const ctx = { conv, contact, text: str(b.text, 1000), msgType, prevInboundAt: b.newContact ? 0 : at - 3600000, at, clock: { day, time }, contextId: null, vars: {},
+  const ctx = {
+    conv, contact, text: str(b.text, 1000), msgType, prevInboundAt: b.newContact ? 0 : at - 3600000, at, clock: { day, time }, contextId: null, vars: {},
     dryAnswers: (Array.isArray(b.answers) ? b.answers : String(b.answers || '').split('\n')).map((x) => str(String(x), 500)).filter(Boolean).slice(0, 10),
-    liveApi: b.liveApi !== false };
+    liveApi: b.liveApi !== false
+  };
   const run = { steps: [], actions: 0, error: null };
   await execFlow({ ...flow, rr: flow.rr || 0 }, run, ctx, flow.root, true);
   // Variabel akhir untuk membantu penyusunan template (objek besar dipotong)
@@ -1794,9 +1826,11 @@ const groupOr404 = (id) => { const g = byId('groups', id); if (!g) throw new Htt
 const metaErrText = (errs) => (errs || []).map((e) => `${e.title || e.message} (${e.code})${e.error_data?.details ? ': ' + e.error_data.details : ''}`).join('; ');
 const samePerson = (p, key) => !!key && (p.waId === key || p.phone === normPhone(key));
 function newGroup(data) {
-  return { id: uid('g_'), groupId: null, requestId: null, subject: '', description: '', joinApprovalMode: 'auto_approve', inviteLink: null,
+  return {
+    id: uid('g_'), groupId: null, requestId: null, subject: '', description: '', joinApprovalMode: 'auto_approve', inviteLink: null,
     status: 'creating', error: null, suspended: false, participants: [], joinRequests: [], invites: [], pending: {}, events: [],
-    photo: null, unread: 0, lastMessageAt: 0, preview: '', createdAt: now(), createdBy: null, external: false, ...data };
+    photo: null, unread: 0, lastMessageAt: 0, preview: '', createdAt: now(), createdBy: null, external: false, ...data
+  };
 }
 function groupEvent(g, type, text) {
   g.events.unshift({ at: now(), type, text: String(text).slice(0, 500) });
@@ -1843,8 +1877,10 @@ function handleGroupWebhook(field, value) {
           || db.groups.filter((x) => x.status === 'creating' && x.subject === ev.subject).pop();
         if (!g) { g = newGroup({ subject: ev.subject || '(Grup tanpa nama)', external: true }); db.groups.push(g); }
         if (errs) { g.status = 'failed'; g.error = errs; groupEvent(g, 'create_failed', 'Gagal membuat grup: ' + errs); break; }
-        Object.assign(g, { groupId: String(ev.group_id), status: 'active', error: null, inviteLink: ev.invite_link || g.inviteLink,
-          joinApprovalMode: ev.join_approval_mode || g.joinApprovalMode, subject: ev.subject || g.subject });
+        Object.assign(g, {
+          groupId: String(ev.group_id), status: 'active', error: null, inviteLink: ev.invite_link || g.inviteLink,
+          joinApprovalMode: ev.join_approval_mode || g.joinApprovalMode, subject: ev.subject || g.subject
+        });
         groupEvent(g, 'created', 'Grup berhasil dibuat oleh Meta.');
         break;
       }
@@ -1936,8 +1972,10 @@ function handleGroupMessage(m, profiles) {
   const from = normPhone(m.from);
   // Pengirim pasti anggota; catat bila belum ada (mis. grup lama sebelum sinkronisasi)
   if (from && !g.participants.some((p) => samePerson(p, from))) g.participants.push({ waId: from, phone: from, joinedAt: 0, via: 'terdeteksi dari pesan' });
-  const msg = { id: uid('m_'), groupId: g.id, direction: 'in', type, content, wamid: m.id, status: 'received', timestamp: Number(m.timestamp) * 1000 || now(),
-    from, fromName: profiles[m.from] || idx.contactByPhone.get(from)?.name || '', contextId: m.context?.id || null };
+  const msg = {
+    id: uid('m_'), groupId: g.id, direction: 'in', type, content, wamid: m.id, status: 'received', timestamp: Number(m.timestamp) * 1000 || now(),
+    from, fromName: profiles[m.from] || idx.contactByPhone.get(from)?.name || '', contextId: m.context?.id || null
+  };
   db.messages.push(msg); idx.wamid.set(msg.wamid, msg);
   g.lastMessageAt = msg.timestamp; g.unread = (g.unread || 0) + 1;
   g.preview = `${msg.fromName || '+' + from}: ${String(previewOf(msg) || '').slice(0, 120)}`;
@@ -2052,9 +2090,11 @@ async function sendCsat(conv, { trigger, user }) {
   else if (!manual && s.cooldownHours && last && at - last.sentAt < s.cooldownHours * 3600000) reason = `Kontak sudah disurvei dalam ${s.cooldownHours} jam terakhir.`;
   else if (!manual && s.onlyIfAgentReplied && lastHumanReplyAt(conv) <= (csatOf(conv)?.sentAt || 0)) reason = 'Belum ada balasan agen sejak survei terakhir.';
   const agent = conv.assignedTo ? byId('users', conv.assignedTo) : null;
-  const survey = { id: uid('cs').replace(/[^A-Za-z0-9]/g, '').slice(0, 14), conversationId: conv.id, contactId: contact.id, phone: contact.phone,
+  const survey = {
+    id: uid('cs').replace(/[^A-Za-z0-9]/g, '').slice(0, 14), conversationId: conv.id, contactId: contact.id, phone: contact.phone,
     agentId: agent?.id || null, agentName: agent?.name || '', scale: s.scale, trigger, by: user?.name || (trigger === 'flow' ? 'Flow' : 'Sistem'),
-    sentAt: at, expiresAt: at + s.expireHours * 3600000, status: reason ? 'skipped' : 'sent', reason, score: null, comment: '', wamid: null };
+    sentAt: at, expiresAt: at + s.expireHours * 3600000, status: reason ? 'skipped' : 'sent', reason, score: null, comment: '', wamid: null
+  };
   if (reason) {
     // Lewati tanpa mencatat untuk pemicu otomatis biasa (tidak menambah noise); catat bila diminta manual
     if (manual) throw new HttpError(400, 'Survei tidak dikirim: ' + reason);
@@ -2140,8 +2180,10 @@ function csatReport({ from, to, agentId }) {
   const answered = rows.filter((x) => x.status === 'answered');
   const pct = (a, b) => (b ? Math.round((a / b) * 1000) / 10 : null);
   const avg = (list) => (list.length ? Math.round((list.reduce((t, x) => t + csatScore5(x.scale, x.score), 0) / list.length) * 100) / 100 : null);
-  const sum = (list) => ({ sent: list.filter((x) => x.status !== 'failed').length, answered: list.filter((x) => x.status === 'answered').length,
-    csat: pct(list.filter((x) => x.satisfied).length, list.filter((x) => x.status === 'answered').length), avg: avg(list.filter((x) => x.status === 'answered')) });
+  const sum = (list) => ({
+    sent: list.filter((x) => x.status !== 'failed').length, answered: list.filter((x) => x.status === 'answered').length,
+    csat: pct(list.filter((x) => x.satisfied).length, list.filter((x) => x.status === 'answered').length), avg: avg(list.filter((x) => x.status === 'answered'))
+  });
   const dist = {};
   for (const x of answered) { const k = `${x.scale}:${x.score}`; dist[k] = (dist[k] || 0) + 1; }
   const agents = {};
@@ -2213,9 +2255,11 @@ function pushSubmission(s) {
 function recordFlowSend(conv, msg) {
   const c = msg.content;
   if (wafByToken(c.flowToken)) return;
-  pushSubmission({ id: uid('fs_'), token: c.flowToken, flowId: c.flowId || null, flowName: c.flowName || 'Flow', conversationId: conv.id, contactId: conv.contactId,
+  pushSubmission({
+    id: uid('fs_'), token: c.flowToken, flowId: c.flowId || null, flowName: c.flowName || 'Flow', conversationId: conv.id, contactId: conv.contactId,
     messageId: msg.id, via: msg.type === 'template' ? 'template' : msg.auto ? 'automation' : 'inbox', mode: c.mode || 'published',
-    sentBy: msg.userName || '', sentAt: msg.timestamp, status: 'sent', response: null, completedAt: 0 });
+    sentBy: msg.userName || '', sentAt: msg.timestamp, status: 'sent', response: null, completedAt: 0
+  });
 }
 function recordFlowSubmission(conv, contact, msg) {
   const c = msg.content;
@@ -2223,8 +2267,10 @@ function recordFlowSubmission(conv, contact, msg) {
   if (!s) {
     // Token tidak dikenal (mis. flow dikirim di luar Kontaq): kaitkan ke flow dari pesan yang dibalas bila ada
     const orig = msg.contextId ? idx.wamid.get(msg.contextId) : null;
-    s = { id: uid('fs_'), token: c.token || uid('tk_'), flowId: orig?.content?.flowId || null, flowName: orig?.content?.flowName || 'Flow tidak dikenal',
-      conversationId: conv.id, contactId: contact.id, messageId: null, via: 'external', mode: 'published', sentBy: '', sentAt: 0, status: 'sent', response: null, completedAt: 0 };
+    s = {
+      id: uid('fs_'), token: c.token || uid('tk_'), flowId: orig?.content?.flowId || null, flowName: orig?.content?.flowName || 'Flow tidak dikenal',
+      conversationId: conv.id, contactId: contact.id, messageId: null, via: 'external', mode: 'published', sentBy: '', sentAt: 0, status: 'sent', response: null, completedAt: 0
+    };
     pushSubmission(s);
   }
   // Jawaban ganda untuk token yang sama: simpan jawaban terakhir
@@ -2249,8 +2295,10 @@ function buildWaFlowMessage(b) {
   const token = newFlowToken();
   const payload = { screen };
   if (b.data && typeof b.data === 'object' && !Array.isArray(b.data) && Object.keys(b.data).length) payload.data = b.data;
-  const interactive = { type: 'flow', body: { text: body },
-    action: { name: 'flow', parameters: { flow_message_version: '3', flow_token: token, flow_id: f.id, flow_cta: cta, mode, flow_action: 'navigate', flow_action_payload: payload } } };
+  const interactive = {
+    type: 'flow', body: { text: body },
+    action: { name: 'flow', parameters: { flow_message_version: '3', flow_token: token, flow_id: f.id, flow_cta: cta, mode, flow_action: 'navigate', flow_action_payload: payload } }
+  };
   const header = str(b.header, 60), footer = str(b.footer, 60);
   if (header) interactive.header = { type: 'text', text: header };
   if (footer) interactive.footer = { text: footer };
@@ -2439,9 +2487,11 @@ const MEDIA_RULES = {
   voice: { max: 16, mimes: ['audio/webm', 'video/webm', 'audio/ogg', 'audio/mp4', 'audio/x-m4a', 'audio/aac'] },
 };
 // Browser kadang mengirim dokumen sebagai application/octet-stream: tentukan MIME dari ekstensi
-const DOC_MIMES = { pdf: 'application/pdf', txt: 'text/plain', csv: 'text/csv', doc: 'application/msword', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+const DOC_MIMES = {
+  pdf: 'application/pdf', txt: 'text/plain', csv: 'text/csv', doc: 'application/msword', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   xls: 'application/vnd.ms-excel', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', ppt: 'application/vnd.ms-powerpoint',
-  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', zip: 'application/zip' };
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', zip: 'application/zip'
+};
 
 /* ── Voice note: WebM/Opus (Chrome/Edge) → OGG/Opus ──
  * Remux tanpa encode ulang: paket Opus dari blok WebM dipindahkan ke halaman Ogg (RFC 7845). Firefox sudah merekam OGG.
@@ -3191,7 +3241,7 @@ app.get('/api/csat/export', requireAdmin, (req, res) => {
   const STATUS = { sent: 'menunggu jawaban', answered: 'dijawab', expired: 'kedaluwarsa', failed: 'gagal', skipped: 'dilewati' };
   const lines = ['dikirim,nomor,kontak,agen,pemicu,status,skala,nilai,puas,komentar,dijawab,keterangan',
     ...rows.map((x) => [iso(x.sentAt), x.phone, byId('contacts', x.contactId)?.name || '', x.agentName, x.trigger, STATUS[x.status] || x.status, x.scale, x.score ?? '',
-      x.status === 'answered' ? (x.satisfied ? 'ya' : 'tidak') : '', x.comment, iso(x.answeredAt), x.reason || ''].map(csvCell).join(','))];
+    x.status === 'answered' ? (x.satisfied ? 'ya' : 'tidak') : '', x.comment, iso(x.answeredAt), x.reason || ''].map(csvCell).join(','))];
   audit(req, 'csat.export', rows.length + ' baris');
   res.set('Content-Disposition', `attachment; filename="csat-${new Date(from).toISOString().slice(0, 10)}.csv"`).type('text/csv').send('﻿' + lines.join('\n'));
 });
@@ -3245,7 +3295,7 @@ app.post('/api/wa-flows/sync', requireAdmin, wrap(async (req, res) => {
   seen.forEach(wafUpsert);
   db.waFlows = db.waFlows.filter((f) => ids.has(f.id)); // flow yang sudah dihapus di Meta (jawaban yang tersimpan tetap ada)
   // Flow JSON dimuat untuk flow yang belum punya salinan lokal (dibutuhkan untuk memilih screen pertama)
-  for (const f of db.waFlows.filter((x) => !x.json).slice(0, 30)) await wafRefresh(f).catch(() => {});
+  for (const f of db.waFlows.filter((x) => !x.json).slice(0, 30)) await wafRefresh(f).catch(() => { });
   audit(req, 'waflow.sync', `${seen.length} flow`); save();
   res.json({ total: seen.length, flows: db.waFlows.map((f) => wafPublic(f)) });
 }));
@@ -3264,7 +3314,7 @@ app.post('/api/wa-flows', requireAdmin, wrap(async (req, res) => {
   // Flow dibuat sebagai DRAFT; error validasi JSON dikembalikan Meta tanpa menggagalkan pembuatan
   const f = wafUpsert({ id: r.id, name, categories: data.categories, status: 'DRAFT', validation_errors: r.validation_errors || [] });
   if (data.flow_json) f.json = data.flow_json;
-  await wafRefresh(f).catch(() => {});
+  await wafRefresh(f).catch(() => { });
   audit(req, 'waflow.create', `${name}${data.clone_flow_id ? ' (salinan)' : ''}`); save();
   res.json(wafPublic(f, true));
 }));
@@ -3289,7 +3339,7 @@ app.put('/api/wa-flows/:id/json', requireAdmin, wrap(async (req, res) => {
   fd.append('file', new Blob([json], { type: 'application/json' }), 'flow.json');
   const r = await graph('post', `${f.id}/assets`, { data: fd });
   f.json = json; f.validationErrors = r.validation_errors || [];
-  await wafRefresh(f).catch(() => {});
+  await wafRefresh(f).catch(() => { });
   f.json = json; // salinan yang baru diunggah, walau unduhan aset belum diperbarui CDN
   audit(req, 'waflow.json', `${f.name}: ${f.validationErrors.length} error validasi`); save();
   res.json(wafPublic(f, true));
@@ -3306,7 +3356,7 @@ app.post('/api/wa-flows/:id/:action(publish|deprecate)', requireAdmin, wrap(asyn
   if (action === 'publish' && f.validationErrors?.length) throw new HttpError(400, 'Perbaiki error validasi Flow JSON sebelum menerbitkan.');
   if (action === 'deprecate' && f.status !== 'PUBLISHED' && f.status !== 'THROTTLED') throw new HttpError(400, 'Hanya flow yang sudah terbit yang dapat dinonaktifkan.');
   await graph('post', `${f.id}/${action}`);
-  await wafRefresh(f).catch(() => {});
+  await wafRefresh(f).catch(() => { });
   audit(req, 'waflow.' + action, f.name); save();
   res.json(wafPublic(f, true));
 }));
@@ -3324,8 +3374,10 @@ app.delete('/api/wa-flows/:id', requireAdmin, wrap(async (req, res) => {
 function wafResponseRows(flowId) {
   return wafSubmissions(flowId).slice().reverse().map((s) => {
     const contact = byId('contacts', s.contactId);
-    return { id: s.id, status: s.status, sentAt: s.sentAt, completedAt: s.completedAt, via: s.via, mode: s.mode, sentBy: s.sentBy,
-      conversationId: s.conversationId, contact: contact ? contactLabel(contact) : '', phone: contact?.phone || '', response: s.response || null };
+    return {
+      id: s.id, status: s.status, sentAt: s.sentAt, completedAt: s.completedAt, via: s.via, mode: s.mode, sentBy: s.sentBy,
+      conversationId: s.conversationId, contact: contact ? contactLabel(contact) : '', phone: contact?.phone || '', response: s.response || null
+    };
   });
 }
 app.get('/api/wa-flows/:id/responses', requireAdmin, (req, res) => {
@@ -3338,7 +3390,7 @@ app.get('/api/wa-flows/:id/responses.csv', requireAdmin, (req, res) => {
   const cell = (v) => csvCell(v && typeof v === 'object' ? JSON.stringify(v) : v);
   const iso = (t) => (t ? new Date(t).toISOString() : '');
   const lines = [['diisi', 'dikirim', 'nomor', 'kontak', 'cara_kirim', ...keys].map(csvCell).join(','),
-    ...rows.map((r) => [iso(r.completedAt), iso(r.sentAt), r.phone, r.contact, r.via, ...keys.map((k) => r.response?.[k])].map(cell).join(','))];
+  ...rows.map((r) => [iso(r.completedAt), iso(r.sentAt), r.phone, r.contact, r.via, ...keys.map((k) => r.response?.[k])].map(cell).join(','))];
   audit(req, 'waflow.export', `${req.params.id}: ${rows.length} baris`);
   res.set('Content-Disposition', `attachment; filename="flow-${req.params.id}.csv"`).type('text/csv').send('﻿' + lines.join('\n'));
 });
@@ -3502,7 +3554,7 @@ app.get('/api/message-log/export.csv', requireAdmin, (req, res) => {
   const head = ['waktu', 'penerima', 'nama_kontak', 'jenis', 'isi_atau_template', 'sumber', 'pengirim', 'campaign', 'message_id', 'http', 'status', 'sent_at', 'delivered_at', 'read_at', 'error', 'kategori_biaya', 'estimasi_biaya'];
   const iso = (t) => (t ? new Date(t).toISOString() : '');
   const lines = [head.join(',')].concat(rows.map((r) => [iso(r.at), r.to, r.contactName, r.type, r.templateName || r.summary, LOG_SOURCES[r.source] || r.source, r.userName, r.campaignName, r.wamid, r.httpStatus,
-    r.status, iso(r.sentAt), iso(r.deliveredAt), iso(r.readAt), r.error, r.pricing?.category || '', r.cost.billable ? (r.cost.known ? r.cost.amount : 'tarif belum diisi') : r.pricing ? 0 : ''].map(csvCell).join(',')));
+  r.status, iso(r.sentAt), iso(r.deliveredAt), iso(r.readAt), r.error, r.pricing?.category || '', r.cost.billable ? (r.cost.known ? r.cost.amount : 'tarif belum diisi') : r.pricing ? 0 : ''].map(csvCell).join(',')));
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="log-pesan-${new Date().toISOString().slice(0, 10)}.csv"`);
   audit(req, 'message_log.export', `${rows.length} baris`);
@@ -4044,9 +4096,11 @@ function campaignSummary(c) {
   const counts = { queued: 0, sent: 0, delivered: 0, read: 0, failed: 0, skipped: 0 };
   c.recipients.forEach((r) => { const k = r.status === 'played' ? 'read' : r.status; counts[k] = (counts[k] || 0) + 1; });
   const { recipients, ...rest } = c;
-  return { ...rest, total: c.series ? c.previewTotal || 0 : recipients.length, counts, scheduleText: scheduleText(c.schedule),
+  return {
+    ...rest, total: c.series ? c.previewTotal || 0 : recipients.length, counts, scheduleText: scheduleText(c.schedule),
     waitingWindow: c.status === 'running' && !inSendWindow(c),
-    ...(c.series ? { runs: db.campaigns.filter((x) => x.parentId === c.id).slice(-30).reverse().map((x) => { const s = campaignSummary(x); return { id: s.id, name: s.name, status: s.status, total: s.total, counts: s.counts, startedAt: s.startedAt }; }) } : {}) };
+    ...(c.series ? { runs: db.campaigns.filter((x) => x.parentId === c.id).slice(-30).reverse().map((x) => { const s = campaignSummary(x); return { id: s.id, name: s.name, status: s.status, total: s.total, counts: s.counts, startedAt: s.startedAt }; }) } : {})
+  };
 }
 // Jalankan jadwal: campaign sekali → mulai; seri berulang → buat campaign anak dengan penerima terbaru
 function runScheduledCampaign(c, manual) {
@@ -4057,9 +4111,11 @@ function runScheduledCampaign(c, manual) {
   if (c.series) {
     if (fail) { c.lastError = `${fmtDateTimeTz(now())}: ${fail}`; }
     else {
-      const child = { id: uid('p_'), parentId: c.id, name: `${c.name} · ${fmtDateTimeTz(now())}`, templateName: c.templateName, language: c.language, values: c.values, labels: c.labels, optInOnly: c.optInOnly,
+      const child = {
+        id: uid('p_'), parentId: c.id, name: `${c.name} · ${fmtDateTimeTz(now())}`, templateName: c.templateName, language: c.language, values: c.values, labels: c.labels, optInOnly: c.optInOnly,
         sendWindow: c.sendWindow, status: 'running', createdAt: now(), startedAt: now(), createdBy: c.createdBy + ' (terjadwal)',
-        recipients: targets.map((x) => ({ contactId: x.id, phone: x.phone, status: 'queued', wamid: null, error: null })) };
+        recipients: targets.map((x) => ({ contactId: x.id, phone: x.phone, status: 'queued', wamid: null, error: null }))
+      };
       db.campaigns.push(child); c.lastError = null; c.runCount = (c.runCount || 0) + 1; c.lastRunAt = now();
       io?.to('admins').emit('campaign:update', campaignSummary(child));
     }
@@ -4067,8 +4123,10 @@ function runScheduledCampaign(c, manual) {
   } else if (fail) {
     Object.assign(c, { status: 'paused', lastError: fail });
   } else {
-    Object.assign(c, { status: 'running', startedAt: now(), lastError: null,
-      recipients: targets.map((x) => ({ contactId: x.id, phone: x.phone, status: 'queued', wamid: null, error: null })) });
+    Object.assign(c, {
+      status: 'running', startedAt: now(), lastError: null,
+      recipients: targets.map((x) => ({ contactId: x.id, phone: x.phone, status: 'queued', wamid: null, error: null }))
+    });
   }
   audit(null, 'campaign.scheduled_run', `${c.name}: ${fail || targets.length + ' penerima'}`);
   if (fail) io?.to('admins').emit('notice', { level: 'error', text: `Broadcast terjadwal "${c.name}" tidak berjalan: ${fail}` });
@@ -4254,8 +4312,10 @@ const remUser = (r) => byId('users', r.assigneeId || r.createdById);
 const canSeeReminder = (user, r) => user.role === 'admin' || r.createdById === user.id || r.assigneeId === user.id;
 function reminderPublic(r) {
   const contact = byId('contacts', r.contactId), conv = byId('conversations', r.conversationId);
-  return { ...r, contactName: contact?.name || contact?.waName || '', phone: contact?.phone || '', assigneeName: remUser(r)?.name || '',
-    scheduleText: r.schedule ? scheduleText(r.schedule) : '', convStatus: conv?.status || null, history: (r.history || []).slice(-20) };
+  return {
+    ...r, contactName: contact?.name || contact?.waName || '', phone: contact?.phone || '', assigneeName: remUser(r)?.name || '',
+    scheduleText: r.schedule ? scheduleText(r.schedule) : '', convStatus: conv?.status || null, history: (r.history || []).slice(-20)
+  };
 }
 function emitReminder(r, event = 'reminder:update') {
   if (!io) return;
@@ -4335,8 +4395,10 @@ async function runReminders() {
       else if (r.status === 'pending') { r.status = res.status; r.finishedAt = now(); }
       save(); emitReminder(r);
       if (res.status !== 'sent') {
-        io?.to('user:' + r.createdById).emit('notice', { level: res.status === 'failed' ? 'error' : 'warn',
-          text: `Pengingat ke ${contactLabel(byId('contacts', r.contactId))} ${res.status === 'failed' ? 'gagal' : 'dilewati'}: ${res.detail}` });
+        io?.to('user:' + r.createdById).emit('notice', {
+          level: res.status === 'failed' ? 'error' : 'warn',
+          text: `Pengingat ke ${contactLabel(byId('contacts', r.contactId))} ${res.status === 'failed' ? 'gagal' : 'dilewati'}: ${res.detail}`
+        });
       }
     }
     // Batasi ukuran: buang pengingat final paling lama
@@ -4351,8 +4413,10 @@ setInterval(() => runReminders().catch((e) => console.error('[reminders]', e.mes
 app.get('/api/reminders', wrap(async (req, res) => {
   let list = db.reminders.filter((r) => canSeeReminder(req.user, r));
   if (req.query.conversationId) list = list.filter((r) => r.conversationId === req.query.conversationId);
-  res.json({ timezone: flowTz(), now: now(), reminders: list.slice(-2000).reverse().map(reminderPublic),
-    users: req.user.role === 'admin' ? db.users.filter((u) => u.active).map((u) => ({ id: u.id, name: u.name })) : [] });
+  res.json({
+    timezone: flowTz(), now: now(), reminders: list.slice(-2000).reverse().map(reminderPublic),
+    users: req.user.role === 'admin' ? db.users.filter((u) => u.active).map((u) => ({ id: u.id, name: u.name })) : []
+  });
 }));
 app.post('/api/reminders', wrap(async (req, res) => {
   const b = req.body || {};
@@ -4507,7 +4571,7 @@ async function attRefreshDirectory(st) {
     return st.directory; // pakai salinan terakhir bila sumber sedang tidak dapat diakses
   }
 }
-const attDirectory = (st, force) => (force || !st.directory.length || now() - st.directoryAt > ATT_DIR_TTL_MS ? attRefreshDirectory(st) : st.directory);
+const attDirectory = async (st, force) => (force || !st.directory.length || now() - st.directoryAt > ATT_DIR_TTL_MS ? attRefreshDirectory(st) : st.directory);
 
 async function attAbsensi(st) {
   const d = await attFetch(st.absensiUrl, 'API presensi');
@@ -4515,8 +4579,10 @@ async function attAbsensi(st) {
   const today = zonedDate(flowTz());
   const tgl = d.data.map((x) => attDate(x.tanggal)).find(Boolean);
   if (tgl && tgl !== today) throw new HttpError(502, `API presensi: data bukan untuk hari ini (${d.data[0].tanggal}).`);
-  return d.data.map((x) => ({ nip: attNip(x.nip), nama: str(x.nama, 200), status: str(x.status, 60), jamMasuk: str(x.jamMasuk, 20), jamPulang: str(x.jamPulang, 20),
-    belum: { datang: !!x.belumAbsenDatang, pulang: !!x.belumAbsenPulang } })).filter((x) => x.nip);
+  return d.data.map((x) => ({
+    nip: attNip(x.nip), nama: str(x.nama, 200), status: str(x.status, 60), jamMasuk: str(x.jamMasuk, 20), jamPulang: str(x.jamPulang, 20),
+    belum: { datang: !!x.belumAbsenDatang, pulang: !!x.belumAbsenPulang }
+  })).filter((x) => x.nip);
 }
 
 // Template pengingat: APPROVED; bahasa kosong = bahasa pertama yang tersedia untuk nama tersebut
@@ -4765,8 +4831,10 @@ app.get('/api/addons/attendance/employees', requireAdmin, wrap(async (req, res) 
     absensiError: abs.status === 'rejected' ? abs.reason.message : '', directoryError: st.directoryError, directoryAt: st.directoryAt, defaultNotify: st.defaultNotify,
     employees: [...people.values()].map((p) => {
       const e = st.employees[p.nip] || {}, a = absBy.get(p.nip);
-      return { ...p, nama: p.nama || a?.nama || p.nip, phoneOverride: e.phone || '', waPhone: attPhone(e.phone) || p.phone, notify: e.notify ?? st.defaultNotify,
-        presensi: a ? { status: a.status, jamMasuk: a.jamMasuk, jamPulang: a.jamPulang, belum: a.belum } : null, sentToday: sent[p.nip] || {} };
+      return {
+        ...p, nama: p.nama || a?.nama || p.nip, phoneOverride: e.phone || '', waPhone: attPhone(e.phone) || p.phone, notify: e.notify ?? st.defaultNotify,
+        presensi: a ? { status: a.status, jamMasuk: a.jamMasuk, jamPulang: a.jamPulang, belum: a.belum } : null, sentToday: sent[p.nip] || {}
+      };
     }).sort((x, y) => x.nama.localeCompare(y.nama, 'id')),
   });
 }));

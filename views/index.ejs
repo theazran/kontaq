@@ -2715,6 +2715,7 @@
     keyword_agent: ['Kata kunci → balas → teruskan ke agen', 'Pesan berisi "harga"/"promo" dibalas otomatis lalu diteruskan ke agen.'],
     after_hours: ['Jam kerja', 'Di jam kerja diteruskan ke agen; di luar jam kerja dibalas pesan otomatis.'],
     welcome: ['Sambutan kontak baru', 'Kontak baru menerima sambutan dengan tombol pilihan.'],
+    court_schedule: ['Cek jadwal sidang PN Bulukumba', 'Tanya tanggal → ambil jadwal dari API PN Bulukumba → kirim daftar perkara pidana & perdata.'],
   };
   const flId = () => 'n' + Math.random().toString(36).slice(2, 10);
   const flMinutes = (m) => (m % 60 ? (m > 60 ? `${Math.floor(m / 60)} jam ${m % 60} menit` : `${m} menit`) : `${m / 60} jam`);
@@ -2749,6 +2750,25 @@
       name = 'Sambutan kontak baru';
       const send = add('send', { text: 'Halo {{name}}, selamat datang! Silakan pilih topik yang Anda butuhkan:', image: null, buttons: ['Info produk', 'Bantuan'] });
       nodes[root].next = add('condition', { kind: 'new_contact', days: 30 }, { yes: send });
+    } else if (kind === 'court_schedule') {
+      // API publik PN Bulukumba: { success, tanggal, pidana: [...], perdata: [...], total: { pidana, perdata, semua } }
+      name = 'Jadwal sidang PN Bulukumba';
+      settings.cancelText = 'Baik, pengecekan jadwal sidang dibatalkan.';
+      const msg = (text, links) => add('send', { text, image: null, buttons: [] }, links);
+      const toAgent = () => add('assign', { mode: 'least_busy', onlyIfUnassigned: true });
+      const item = (pihak) => `*{{no}}. {{item.noPerkara}}*\n🕐 {{item.jamSidang|jam}} · {{item.ruangSidang}}\n📋 {{item.agendaSidang}}\n${pihak}\n⚖️ Hakim: {{item.namaHakim|default:-}}`;
+      const list = (text, path, pihak, next) => add('send', { text, image: null, buttons: [], repeat: { path, item: item(pihak), perMessage: 5, max: 30, more: '…dan {{rest}} perkara lainnya.' } }, next ? { next } : {});
+      const perdata = list('📄 *Perkara perdata* ({{count}}) — {{page}}/{{pages}}', 'hasil.perdata', '👥 {{item.penggugat|default:-}} vs {{item.tergugat|default:-}}');
+      const pidana = list('⚖️ *Perkara pidana* ({{count}}) — {{page}}/{{pages}}', 'hasil.pidana', '👤 {{item.pihak2|default:-}}', perdata);
+      const summary = msg('📅 *Jadwal sidang PN Bulukumba*\n{{tanggal|tanggal}}\nPidana: {{hasil.total.pidana}} · Perdata: {{hasil.total.perdata}}', { next: pidana });
+      const none = msg('Tidak ada jadwal sidang di PN Bulukumba pada *{{tanggal|tanggal}}*.\n\nKetik *sidang* untuk mengecek tanggal lain.');
+      const any = add('condition', { kind: 'variable', path: 'hasil.total.semua', op: 'gt', value: '0' }, { yes: summary, no: none });
+      const apiFail = msg('Maaf, data jadwal sidang sedang tidak dapat diakses. {{hasil.error|default:Silakan coba beberapa saat lagi.}}', { next: toAgent() });
+      const api = add('api', { method: 'GET', url: 'https://api.pnblk.my.id/api.php?tanggalSidang={{tanggal}}', headers: [], body: '', timeoutSec: 15, saveAs: 'hasil', okPath: 'success', okValue: 'true' }, { next: any, fail: apiFail });
+      const badDate = msg('Maaf, tanggal belum dapat dikenali. Petugas kami akan membantu Anda.', { next: toAgent() });
+      const ask = add('ask', { ...FL_ASK_DEFAULTS, text: 'Tanggal sidang yang ingin Anda cek?', var: 'tanggal', input: 'date', days: 3,
+        invalidText: 'Format tanggal belum dikenali. Contoh: 21-10-2026, atau ketik *batal*.' }, { next: api, fail: badDate });
+      nodes[root].next = add('condition', { kind: 'keyword', match: 'contains', keywords: ['jadwal sidang', 'sidang'] }, { yes: ask });
     }
     return { id: null, name, enabled: false, root, nodes, settings };
   }
