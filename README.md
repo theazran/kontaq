@@ -240,7 +240,8 @@ Mengirim template WhatsApp (bawaan `pengingat_absen`) ke pegawai yang **belum pr
   pegawai hanya NIP, nama, jabatan, dan nomor HP yang disimpan (diperbarui tiap jam; salinan terakhir dipakai bila sumber tidak dapat diakses).
   Data presensi yang tanggalnya bukan hari ini ditolak.
 - **Variabel template** dipetakan per posisi; bawaan: judul `{{JENIS}}` (DATANG/PULANG), isi `{{nama}}`, `{{jenis}}` (datang/pulang).
-  Tersedia juga `{{nip}}` dan `{{tanggal}}`.
+  Tersedia juga `{{nip}}`, `{{tanggal}}`, dan `{{cs}}` (nama CS yang ditugaskan di percakapan pegawai, Inbox › Ditugaskan ke). Nilai
+  cadangan bila kosong: `{{cs|default:Tim Kepegawaian}}` — cocok untuk footer, mis. `Dibalas oleh {{cs|default:Tim Kepegawaian}}`.
 - **Jadwal:** beberapa jam kirim per jenis, masing-masing dengan hari (bawaan: datang Sen–Jum 07.45; pulang Sen–Kam 16.05, Jum 16.35),
   plus daftar **hari libur** (tidak dikirim otomatis). Jadwal yang terlewat > 60 menit tidak dikirim; bila API gagal, dicoba lagi tiap 10 menit
   selama masih dalam 60 menit.

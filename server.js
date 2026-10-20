@@ -4504,7 +4504,10 @@ const ATT_RETRY_MS = 10 * 60000;
 const ATT_RUNS_KEEP = 60;
 const ATT_DIR_TTL_MS = 60 * 60000;
 // Variabel yang dapat dipakai di isian template
-const ATT_VARS = { nama: 'Nama pegawai', jenis: 'datang / pulang', JENIS: 'DATANG / PULANG', nip: 'NIP', tanggal: 'Tanggal hari ini' };
+const ATT_VARS = { nama: 'Nama pegawai', jenis: 'datang / pulang', JENIS: 'DATANG / PULANG', nip: 'NIP', tanggal: 'Tanggal hari ini',
+  cs: 'CS yang ditugaskan di percakapan pegawai (kosong bila belum ditugaskan; pakai {{cs|default:Tim Kepegawaian}})' };
+// {{nama}} dst., dengan |default:… sebagai nilai cadangan bila kosong (mis. {{cs|default:Tim Kepegawaian}})
+const ATT_VAR_RE = /\{\{\s*(nama|jenis|JENIS|nip|tanggal|cs)\s*(?:\|default:([^}]*))?\}\}/g;
 const timeRe = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 // Smart routing: bila jendela layanan 24 jam masih terbuka (pegawai membalas/mengirim pesan < 24 jam), kirim teks biasa;
@@ -4624,11 +4627,11 @@ function attButton(st, ctx) {
   const b = st.button || {};
   const mode = ATT_BTN_MODES.includes(b.mode) ? b.mode : b.enabled ? 'link' : 'none';
   const extra = { header: attFill(b.header, ctx).trim().slice(0, 60), footer: attFill(b.footer, ctx).trim().slice(0, 60) };
-  if (mode === 'link' && b.url) return { kind: 'link', text: b.text.slice(0, 20), url: String(b.url).replace(/\{\{\s*(nama|jenis|JENIS|nip|tanggal)\s*\}\}/g, (_, k) => encodeURIComponent(ctx[k] ?? '')), ...extra };
+  if (mode === 'link' && b.url) return { kind: 'link', text: b.text.slice(0, 20), url: String(b.url).replace(ATT_VAR_RE, (_, k, def) => encodeURIComponent(String(ctx[k] || def || '').trim())), ...extra };
   if (mode === 'reply' && b.replies?.length) return { kind: 'reply', replies: b.replies.slice(0, 3).map((x) => attFill(x, ctx).slice(0, 20)), ...extra };
   return null;
 }
-const attFill = (v, ctx) => String(v || '').replace(/\{\{\s*(nama|jenis|JENIS|nip|tanggal)\s*\}\}/g, (_, k) => ctx[k] ?? '');
+const attFill = (v, ctx) => String(v || '').replace(ATT_VAR_RE, (_, k, def) => String(ctx[k] || def || '').trim());
 
 function attRunPublic(r, full) {
   const { items, ...rest } = r;
@@ -4682,8 +4685,10 @@ async function attSend(st, run, { tpl, values, smart }) {
         const existing = idx.contactByPhone.get(it.phone);
         const contact = getOrCreateContact(it.phone, existing ? '' : it.nama);
         if (!existing) contact.labels = ['Pegawai'];
-        const ctx = { nama: it.nama, jenis: run.type, JENIS: run.type.toUpperCase(), nip: it.nip, tanggal };
         const conv = getOrCreateConv(contact);
+        // {{cs}}: nama CS yang ditugaskan di percakapan pegawai ini (Inbox › Ditugaskan ke)
+        const ctx = { nama: it.nama, jenis: run.type, JENIS: run.type.toUpperCase(), nip: it.nip, tanggal,
+          cs: (conv.assignedTo && byId('users', conv.assignedTo)?.name) || '' };
         // Jendela diperiksa tepat sebelum kirim (pegawai bisa saja baru membalas setelah run disiapkan)
         if (smart && windowOpen(conv)) {
           const btn = attButton(st, ctx);
@@ -4899,6 +4904,7 @@ app.get('/api/addons/attendance/employees', requireAdmin, wrap(async (req, res) 
       return {
         ...p, nama: p.nama || a?.nama || p.nip, phoneOverride: e.phone || '', waPhone, notify: e.notify ?? st.defaultNotify,
         windowOpen: !!(conv && windowOpen(conv)), windowExpiresAt: conv?.lastInboundAt ? conv.lastInboundAt + SERVICE_WINDOW_MS : 0,
+        cs: (conv?.assignedTo && byId('users', conv.assignedTo)?.name) || '', conversationId: conv?.id || null,
         presensi: a ? { status: a.status, jamMasuk: a.jamMasuk, jamPulang: a.jamPulang, belum: a.belum } : null, sentToday: sent[p.nip] || {}
       };
     }).sort((x, y) => x.nama.localeCompare(y.nama, 'id')),
