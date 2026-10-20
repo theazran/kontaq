@@ -226,6 +226,28 @@ Buat dari Inbox (ikon jam di atas chat, atau **Pengingat › Buat** di panel inf
   **template cadangan** (bila dipilih) atau melewatinya — status & alasannya tercatat di riwayat pengingat dan di Log pesan (sumber "Pengingat").
   Pengingat pelanggan yang terlambat lebih dari 6 jam (mis. server mati) dilewati, bukan dikirim terlambat.
 
+## Add-on (admin)
+
+Fitur opsional dikelola di **Pengaturan › Add-on**: **Pasang**, aktif/nonaktifkan (pengaturan tetap tersimpan), atau **Hapus**
+(seluruh pengaturan & riwayat add-on dibuang; bisa dipasang lagi). Add-on yang aktif tampil di menu bagian **Add-on**.
+
+### Pengingat absensi
+
+Mengirim template WhatsApp (bawaan `pengingat_absen`) ke pegawai yang **belum presensi datang/pulang**.
+
+- **Sumber data:** presensi hari ini dari `https://ma.pnblk.my.id/api/sikep/absensi-hari-ini` (`belumAbsenDatang` / `belumAbsenPulang`),
+  nomor WhatsApp dari `https://pegawai.pnblk.my.id/data_pegawai.json` (`biodata › Nomor Handphone`), dicocokkan lewat NIP. Dari data
+  pegawai hanya NIP, nama, jabatan, dan nomor HP yang disimpan (diperbarui tiap jam; salinan terakhir dipakai bila sumber tidak dapat diakses).
+  Data presensi yang tanggalnya bukan hari ini ditolak.
+- **Variabel template** dipetakan per posisi; bawaan: judul `{{JENIS}}` (DATANG/PULANG), isi `{{nama}}`, `{{jenis}}` (datang/pulang).
+  Tersedia juga `{{nip}}` dan `{{tanggal}}`.
+- **Jadwal:** beberapa jam kirim per jenis, masing-masing dengan hari (bawaan: datang Sen–Jum 07.45; pulang Sen–Kam 16.05, Jum 16.35),
+  plus daftar **hari libur** (tidak dikirim otomatis). Jadwal yang terlewat > 60 menit tidak dikirim; bila API gagal, dicoba lagi tiap 10 menit
+  selama masih dalam 60 menit.
+- **Per pegawai:** notifikasi on/off (terjadwal hanya ke yang aktif), nomor WhatsApp pengganti, tombol kirim Datang/Pulang.
+- **Kirim manual:** pilih pegawai yang belum presensi (data presensi diambil ulang), lalu kirim. Riwayat tiap pengiriman (terkirim/gagal/dilewati)
+  ada di tab **Riwayat kirim**, dan setiap pesan di Log pesan (sumber "Pengingat absensi"). Kontak baru diberi label `Pegawai`.
+
 ## Pemakaian di HP
 
 Buka Kontaq di browser HP (Chrome/Safari) lewat **HTTPS**. Mikrofon untuk panggilan hanya diizinkan lewat HTTPS.

@@ -108,7 +108,7 @@ const csvCell = (v) => {
 const EMPTY_DB = {
   settings: {}, users: [], contacts: [], conversations: [], messages: [],
   templates: [], templatesSyncedAt: 0, campaigns: [], calls: [], audit: [], avatars: {}, autoReply: null, arMedia: {}, costs: null, sendLog: [],
-  flows: [], flowRuns: [], groups: [], csat: null, waFlows: [], flowSubmissions: [], stickers: [], reminders: [],
+  flows: [], flowRuns: [], groups: [], csat: null, waFlows: [], flowSubmissions: [], stickers: [], reminders: [], addons: {},
 };
 let db;
 try { db = { ...EMPTY_DB, ...JSON.parse(fs.readFileSync(DB_FILE, 'utf8')) }; }
@@ -2614,7 +2614,7 @@ app.get('/', (req, res) => {
     user: publicUser(req.user), needsSetup: db.users.length === 0,
     // Versi aset dari waktu ubah file: browser HP langsung memuat CSS terbaru setelah update
     assetVersion: Math.floor(fs.statSync(path.join(__dirname, 'public', 'style.css')).mtimeMs).toString(36),
-    boot: req.user ? { user: publicUser(req.user), campaignRate: CAMPAIGN_RATE, timezone: flowTz() } : null,
+    boot: req.user ? { user: publicUser(req.user), campaignRate: CAMPAIGN_RATE, timezone: flowTz(), addons: req.user.role === 'admin' ? addonStates() : {} } : null,
   });
 });
 
@@ -3430,7 +3430,7 @@ app.put('/api/costs/settings', requireAdmin, wrap(async (req, res) => {
   res.json(cfg.settings);
 }));
 /* Log pesan API (admin): semua pesan keluar via Cloud API + status pengiriman dari webhook */
-const LOG_SOURCES = { inbox: 'Dashboard', campaign: 'Campaign', auto_reply: 'Auto reply', flow: 'Flow otomatis', group: 'Grup', csat: 'Survei CSAT', reminder: 'Pengingat', external: 'Di luar Kontaq' };
+const LOG_SOURCES = { inbox: 'Dashboard', campaign: 'Campaign', auto_reply: 'Auto reply', flow: 'Flow otomatis', group: 'Grup', csat: 'Survei CSAT', reminder: 'Pengingat', attendance: 'Pengingat absensi', external: 'Di luar Kontaq' };
 function logRow(e) {
   const msg = e.wamid ? idx.wamid.get(e.wamid) : null;
   const contact = e.contactId ? byId('contacts', e.contactId) : idx.contactByPhone.get(e.to);
@@ -4419,6 +4419,396 @@ app.delete('/api/reminders/:id', wrap(async (req, res) => {
   io?.to([...new Set(['admins', 'user:' + r.createdById, 'user:' + (r.assigneeId || r.createdById)])]).emit('reminder:removed', { id: r.id });
   res.json({ ok: true });
 }));
+
+/* ───────────────────────── 7d. Add-on ─────────────────────────
+ * Fitur opsional yang dipasang, dinonaktifkan, atau dihapus dari Pengaturan › Add-on. Data tiap add-on ada di db.addons[id];
+ * menonaktifkan menghentikan add-on tanpa menghapus pengaturan, menghapus membuang seluruh pengaturan & riwayatnya.
+ *
+ * attendance — Pengingat absensi: pada jam yang diatur, ambil presensi hari ini (SIKEP) lalu kirim template WhatsApp ke pegawai
+ *   yang belum presensi datang/pulang. Nomor WA diambil dari data pegawai (dicocokkan lewat NIP) dan dapat diganti per pegawai.
+ *   Notifikasi dapat dimatikan per pegawai. Jadwal yang terlewat > 60 menit (mis. server mati) tidak dikirim.
+ */
+const ADDON_CATALOG = {
+  attendance: { name: 'Pengingat absensi', description: 'Kirim pengingat WhatsApp ke pegawai yang belum presensi datang atau pulang, terjadwal atau manual. Data dari API presensi SIKEP & data pegawai.', icon: 'clock' },
+};
+const addonStates = () => Object.fromEntries(Object.keys(ADDON_CATALOG).map((id) => [id, { installed: !!db.addons[id], enabled: !!db.addons[id]?.enabled }]));
+const emitAddons = () => io?.to('admins').emit('addons:update', addonStates());
+
+const ATT_TYPES = { datang: 'datang', pulang: 'pulang' };
+const ATT_LATE_MS = 60 * 60000;
+const ATT_RETRY_MS = 10 * 60000;
+const ATT_RUNS_KEEP = 60;
+const ATT_DIR_TTL_MS = 60 * 60000;
+// Variabel yang dapat dipakai di isian template
+const ATT_VARS = { nama: 'Nama pegawai', jenis: 'datang / pulang', JENIS: 'DATANG / PULANG', nip: 'NIP', tanggal: 'Tanggal hari ini' };
+const timeRe = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+function attDefaults() {
+  return {
+    installedAt: now(), enabled: true,
+    absensiUrl: 'https://ma.pnblk.my.id/api/sikep/absensi-hari-ini',
+    pegawaiUrl: 'https://pegawai.pnblk.my.id/data_pegawai.json',
+    template: { name: 'pengingat_absen', language: '', header: [], body: [] },
+    schedule: {
+      datang: { enabled: true, slots: [{ days: [1, 2, 3, 4, 5], time: '07:45' }] },
+      pulang: { enabled: true, slots: [{ days: [1, 2, 3, 4], time: '16:05' }, { days: [5], time: '16:35' }] },
+    },
+    defaultNotify: true, skipDates: [],
+    employees: {}, // nip → { notify?, phone? }
+    directory: [], directoryAt: 0, directoryError: '',
+    lastSlot: {}, // "datang@07:45" → YYYY-MM-DD terakhir dijalankan
+    runs: [],
+  };
+}
+const att = () => db.addons.attendance;
+function attOr404() {
+  const st = att();
+  if (!st) throw new HttpError(404, 'Add-on Pengingat absensi belum dipasang.');
+  return st;
+}
+
+const attNip = (v) => String(v || '').match(/\d{18}/)?.[0] || normPhone(v).slice(0, 25);
+function attPhone(v) {
+  let p = normPhone(v);
+  if (p.startsWith('0')) p = '62' + p.slice(1);
+  else if (p.startsWith('8')) p = '62' + p;
+  return validPhone(p) ? p : '';
+}
+// "20 Oktober 2026" → 2026-10-20
+function attDate(v) {
+  const m = String(v || '').trim().toLowerCase().match(/^(\d{1,2})\s+([a-z]+)\s+(\d{4})$/);
+  const mon = m && ID_MONTHS.findIndex((x) => x.toLowerCase() === m[2]) + 1;
+  return mon ? `${m[3]}-${String(mon).padStart(2, '0')}-${m[1].padStart(2, '0')}` : '';
+}
+
+async function attFetch(url, label) {
+  try {
+    const r = await axios.get(url, { timeout: 30000, maxRedirects: 0, maxContentLength: 20 * 1024 * 1024, httpsAgent: FLOW_HTTPS_AGENT, headers: { Accept: 'application/json' }, responseType: 'json' });
+    return typeof r.data === 'string' ? JSON.parse(r.data) : r.data;
+  } catch (e) {
+    throw new HttpError(502, `${label}: ${e.response ? 'HTTP ' + e.response.status : e instanceof SyntaxError ? 'respons bukan JSON' : e.message}`);
+  }
+}
+// Data pegawai: hanya NIP, nama, jabatan, dan nomor HP yang disimpan (data pribadi lain diabaikan)
+async function attRefreshDirectory(st) {
+  try {
+    const d = await attFetch(st.pegawaiUrl, 'Data pegawai');
+    if (!Array.isArray(d)) throw new HttpError(502, 'Data pegawai: format tidak dikenal (harus berupa array).');
+    const list = d.map((p) => {
+      const b = p?.biodata || {};
+      return { nip: attNip(b['NIP/NRP'] || p?.summary?.name), nama: str(b['Nama Lengkap'], 200), jabatan: str(p?.pekerjaan?.jabatan?.[0]?.Jabatan, 200), phone: attPhone(b['Nomor Handphone']) || attPhone(b['Nomor Telepon']) };
+    }).filter((p) => p.nip);
+    if (att() !== st) return st.directory;
+    Object.assign(st, { directory: list, directoryAt: now(), directoryError: '' }); save();
+    return list;
+  } catch (e) {
+    st.directoryError = e.message; save();
+    if (!st.directory.length) throw e;
+    return st.directory; // pakai salinan terakhir bila sumber sedang tidak dapat diakses
+  }
+}
+const attDirectory = (st, force) => (force || !st.directory.length || now() - st.directoryAt > ATT_DIR_TTL_MS ? attRefreshDirectory(st) : st.directory);
+
+async function attAbsensi(st) {
+  const d = await attFetch(st.absensiUrl, 'API presensi');
+  if (!d?.success || !Array.isArray(d.data)) throw new HttpError(502, 'API presensi: respons tidak berhasil atau format tidak dikenal.');
+  const today = zonedDate(flowTz());
+  const tgl = d.data.map((x) => attDate(x.tanggal)).find(Boolean);
+  if (tgl && tgl !== today) throw new HttpError(502, `API presensi: data bukan untuk hari ini (${d.data[0].tanggal}).`);
+  return d.data.map((x) => ({ nip: attNip(x.nip), nama: str(x.nama, 200), status: str(x.status, 60), jamMasuk: str(x.jamMasuk, 20), jamPulang: str(x.jamPulang, 20),
+    belum: { datang: !!x.belumAbsenDatang, pulang: !!x.belumAbsenPulang } })).filter((x) => x.nip);
+}
+
+// Template pengingat: APPROVED; bahasa kosong = bahasa pertama yang tersedia untuk nama tersebut
+function attTemplate(st, strict = true) {
+  const t = st.template;
+  const tpl = db.templates.find((x) => x.name === t.name && (!t.language || x.language === t.language) && x.status === 'APPROVED')
+    || (strict ? null : db.templates.find((x) => x.name === t.name && (!t.language || x.language === t.language)));
+  if (!tpl && strict) throw new HttpError(400, `Template "${t.name}"${t.language ? ' (' + t.language + ')' : ''} belum APPROVED atau belum disinkronkan. Buka menu Template lalu sinkronkan.`);
+  return tpl || null;
+}
+function attTemplateVars(tpl) {
+  const comp = (type) => (tpl?.components || []).find((c) => c.type === type);
+  const header = comp('HEADER');
+  return { header: header?.format === 'TEXT' ? templateVars(header.text) : [], body: templateVars(comp('BODY')?.text) };
+}
+// Isian variabel template; yang kosong memakai bawaan menurut posisi (judul: JENIS; isi: nama, jenis)
+function attTemplateValues(st, tpl) {
+  const v = attTemplateVars(tpl);
+  const defBody = v.body.length >= 3 ? ['{{JENIS}}', '{{nama}}', '{{jenis}}'] : ['{{nama}}', '{{jenis}}'];
+  return {
+    header: v.header.map((_, i) => st.template.header[i] || '{{JENIS}}'),
+    body: v.body.map((_, i) => st.template.body[i] || defBody[i] || '{{nama}}'),
+  };
+}
+const attFill = (v, ctx) => String(v || '').replace(/\{\{\s*(nama|jenis|JENIS|nip|tanggal)\s*\}\}/g, (_, k) => ctx[k] ?? '');
+
+function attRunPublic(r, full) {
+  const { items, ...rest } = r;
+  const count = (s) => items.filter((i) => i.status === s).length;
+  return { ...rest, total: items.length, sent: count('sent'), failed: count('failed'), skipped: count('skipped'), ...(full ? { items } : {}) };
+}
+function attEmitRun(r) { io?.to('admins').emit('attendance:run', attRunPublic(r)); }
+function attPushRun(st, r) {
+  st.runs.push(r);
+  if (st.runs.length > ATT_RUNS_KEEP) st.runs.splice(0, st.runs.length - ATT_RUNS_KEEP);
+  save(); attEmitRun(r);
+}
+
+/* Siapkan pengiriman: validasi template + ambil data presensi & pegawai. Error di sini dikembalikan langsung ke pemanggil.
+ * nips: daftar NIP pilihan (kirim manual) — dikirim meski notifikasinya dimatikan; tanpa nips hanya pegawai yang notifikasinya aktif. */
+async function attPrepare(st, type, nips) {
+  const tpl = attTemplate(st);
+  const values = attTemplateValues(st, tpl);
+  const [rows, dir] = await Promise.all([attAbsensi(st), attDirectory(st)]);
+  const byNip = new Map(dir.map((p) => [p.nip, p]));
+  const want = nips ? new Set(nips) : null;
+  const items = [];
+  for (const a of rows) {
+    if (want && !want.has(a.nip)) continue;
+    const emp = st.employees[a.nip] || {}, p = byNip.get(a.nip) || {};
+    if (!want && !(emp.notify ?? st.defaultNotify)) continue;
+    const item = { nip: a.nip, nama: a.nama || p.nama || a.nip, phone: attPhone(emp.phone) || p.phone || '', status: 'pending', detail: '' };
+    if (!a.belum[type]) Object.assign(item, { status: 'skipped', detail: `Sudah presensi ${type}` });
+    else if (!item.phone) Object.assign(item, { status: 'skipped', detail: 'Nomor WhatsApp tidak ditemukan' });
+    // Pegawai yang sudah presensi tidak dicatat pada pengiriman terjadwal (agar riwayat ringkas)
+    if (want || item.status !== 'skipped' || item.detail.startsWith('Nomor')) items.push(item);
+  }
+  if (want) for (const n of want) if (!rows.some((a) => a.nip === n)) items.push({ nip: n, nama: byNip.get(n)?.nama || n, phone: '', status: 'skipped', detail: 'Tidak ada di data presensi hari ini' });
+  return { tpl, values, items };
+}
+
+let attBusy = false;
+async function attSend(st, run, { tpl, values }) {
+  const who = 'Pengingat absensi' + (run.trigger === 'manual' ? ' · ' + run.userName : '');
+  const tanggal = longDate(zonedDate(flowTz()));
+  try {
+    for (const it of run.items) {
+      if (it.status !== 'pending') continue;
+      if (att() !== st || !st.enabled) { Object.assign(it, { status: 'skipped', detail: 'Add-on dinonaktifkan/dihapus saat pengiriman' }); continue; }
+      try {
+        const existing = idx.contactByPhone.get(it.phone);
+        const contact = getOrCreateContact(it.phone, existing ? '' : it.nama);
+        if (!existing) contact.labels = ['Pegawai'];
+        const ctx = { nama: it.nama, jenis: run.type, JENIS: run.type.toUpperCase(), nip: it.nip, tanggal };
+        const msg = await sendTemplateTo(contact, tpl, { header: values.header.map((v) => attFill(v, ctx)), body: values.body.map((v) => attFill(v, ctx)) },
+          { userName: who, auto: 'attendance' }, { source: 'attendance', userName: who });
+        Object.assign(it, { status: 'sent', detail: '', wamid: msg.wamid, at: now() });
+      } catch (e) {
+        Object.assign(it, { status: 'failed', detail: e.message.slice(0, 300), at: now() });
+      }
+      save(); attEmitRun(run);
+      await new Promise((r) => setTimeout(r, Math.ceil(1000 / CAMPAIGN_RATE)));
+    }
+  } finally {
+    run.status = 'done'; run.finishedAt = now(); attBusy = false;
+    save(); attEmitRun(run);
+    const r = attRunPublic(run);
+    if (r.failed) io?.to('admins').emit('notice', { level: 'warn', text: `Pengingat absensi ${run.type}: ${r.sent} terkirim, ${r.failed} gagal.` });
+  }
+}
+
+async function attStart(st, type, { trigger, user, nips, slot } = {}) {
+  if (attBusy) throw new HttpError(409, 'Pengiriman pengingat absensi lain sedang berjalan. Tunggu hingga selesai.');
+  attBusy = true;
+  const run = { id: uid('ar_'), at: now(), date: zonedDate(flowTz()), type, trigger, slot: slot || '', userName: user?.name || 'Jadwal', status: 'running', items: [], error: '' };
+  let prep;
+  try { prep = await attPrepare(st, type, nips); } catch (e) {
+    attBusy = false;
+    if (trigger === 'auto') { Object.assign(run, { status: 'failed', error: e.message, finishedAt: now() }); attPushRun(st, run); }
+    throw e;
+  }
+  run.items = prep.items;
+  attPushRun(st, run);
+  attSend(st, run, prep).catch((e) => console.error('[attendance]', e.message));
+  return run;
+}
+
+// Penjadwal: cek tiap 30 dtk. Gagal mengambil data → dicoba lagi tiap 10 menit selama masih dalam 60 menit dari jadwal.
+const attRetry = new Map();
+function attTick() {
+  const st = att();
+  if (!st?.enabled || attBusy) return;
+  const tz = flowTz(), today = zonedDate(tz), { day, time } = zonedNow(tz);
+  if (st.skipDates.includes(today)) return;
+  for (const type of Object.keys(ATT_TYPES)) {
+    const sch = st.schedule[type];
+    if (!sch.enabled) continue;
+    for (const slot of sch.slots) {
+      const key = `${type}@${slot.time}`;
+      if (!slot.days.includes(day) || time < slot.time || st.lastSlot[key] === today || (attRetry.get(key) || 0) > now()) continue;
+      if (now() - zonedToUtc(today, slot.time, tz) > ATT_LATE_MS) { st.lastSlot[key] = today; save(); continue; }
+      attStart(st, type, { trigger: 'auto', slot: slot.time }).then(() => { st.lastSlot[key] = today; attRetry.delete(key); save(); }).catch((e) => {
+        attRetry.set(key, now() + ATT_RETRY_MS);
+        console.error('[attendance]', e.message);
+        io?.to('admins').emit('notice', { level: 'error', text: `Pengingat absensi ${type} gagal: ${e.message}` });
+      });
+      return; // satu pengiriman per putaran
+    }
+  }
+}
+setInterval(() => { try { attTick(); } catch (e) { console.error('[attendance]', e.message); } }, 30000);
+
+// Jam kirim yang sudah lewat hari ini tidak langsung dikirim saat add-on dipasang/diaktifkan atau jadwal diubah
+function attMarkPast(st, all = true) {
+  const tz = flowTz(), today = zonedDate(tz), { time } = zonedNow(tz);
+  for (const type of Object.keys(ATT_TYPES)) for (const s of st.schedule[type].slots) {
+    const key = `${type}@${s.time}`;
+    if ((all || !(key in st.lastSlot)) && s.time <= time) st.lastSlot[key] = today;
+  }
+}
+function attCleanConfig(st, b) {
+  const url = (v, label) => {
+    const u = str(v, 500);
+    if (!/^https:\/\/[^\s]+$/.test(u)) throw new HttpError(400, `${label} harus berupa URL HTTPS.`);
+    return u;
+  };
+  const sched = (s, label) => {
+    const slots = (Array.isArray(s?.slots) ? s.slots : []).slice(0, 10).map((x) => ({
+      days: [...new Set((Array.isArray(x?.days) ? x.days : []).map(Number).filter((d) => Number.isInteger(d) && d >= 0 && d <= 6))].sort(),
+      time: str(x?.time, 5),
+    }));
+    slots.forEach((x) => {
+      if (!timeRe.test(x.time)) throw new HttpError(400, `Jadwal ${label}: jam tidak valid (HH:MM).`);
+      if (!x.days.length) throw new HttpError(400, `Jadwal ${label} pukul ${x.time}: pilih minimal satu hari.`);
+    });
+    if (new Set(slots.map((x) => x.time)).size !== slots.length) throw new HttpError(400, `Jadwal ${label}: jam tidak boleh sama.`);
+    if (s?.enabled && !slots.length) throw new HttpError(400, `Jadwal ${label}: tambahkan minimal satu jam kirim.`);
+    return { enabled: !!s?.enabled, slots };
+  };
+  const vals = (a) => (Array.isArray(a) ? a : []).slice(0, 10).map((x) => str(x, 200));
+  const name = str(b.template?.name, 512).toLowerCase();
+  if (!/^[a-z0-9_]+$/.test(name)) throw new HttpError(400, 'Nama template tidak valid.');
+  const skip = [...new Set((Array.isArray(b.skipDates) ? b.skipDates : String(b.skipDates || '').split(/[\s,;]+/)).map((x) => str(x, 10)).filter(Boolean))].sort();
+  if (skip.some((d) => !/^\d{4}-\d{2}-\d{2}$/.test(d) || !ymdDate(d))) throw new HttpError(400, 'Tanggal libur harus berformat YYYY-MM-DD.');
+  const today = zonedDate(flowTz());
+  Object.assign(st, {
+    absensiUrl: url(b.absensiUrl, 'URL API presensi'), pegawaiUrl: url(b.pegawaiUrl, 'URL data pegawai'),
+    template: { name, language: str(b.template?.language, 15), header: vals(b.template?.header), body: vals(b.template?.body) },
+    schedule: { datang: sched(b.schedule?.datang, 'datang'), pulang: sched(b.schedule?.pulang, 'pulang') },
+    defaultNotify: b.defaultNotify !== false,
+    skipDates: skip.filter((d) => d >= addDays(today, -7)).slice(0, 400),
+  });
+  attMarkPast(st, false);
+  const keys = new Set(Object.keys(ATT_TYPES).flatMap((t) => st.schedule[t].slots.map((s) => `${t}@${s.time}`)));
+  for (const k of Object.keys(st.lastSlot)) if (!keys.has(k)) delete st.lastSlot[k];
+}
+
+function attConfigPublic(st) {
+  const tpl = attTemplate(st, false);
+  const { employees, directory, runs, lastSlot, ...cfg } = st;
+  const comp = (t, type) => (t.components || []).find((c) => c.type === type);
+  return {
+    ...cfg, timezone: flowTz(), today: zonedDate(flowTz()), vars: ATT_VARS, busy: attBusy,
+    templateStatus: tpl ? { language: tpl.language, status: tpl.status, category: tpl.category } : null,
+    // Template APPROVED (dan template terpilih apa pun statusnya) beserta variabel & isian bawaannya, untuk pemetaan variabel di UI
+    templates: db.templates.filter((t) => t.status === 'APPROVED' || t.name === st.template.name).map((t) => ({
+      name: t.name, language: t.language, status: t.status, category: t.category,
+      header: comp(t, 'HEADER')?.format === 'TEXT' ? comp(t, 'HEADER').text : '', body: comp(t, 'BODY')?.text || '',
+      vars: attTemplateVars(t), defaults: attTemplateValues({ template: { header: [], body: [] } }, t),
+    })).sort((a, b) => a.name.localeCompare(b.name) || a.language.localeCompare(b.language)),
+    directoryCount: directory.length,
+    runs: runs.slice(-30).reverse().map((r) => attRunPublic(r)),
+  };
+}
+
+/* Add-on (admin) */
+app.get('/api/addons', requireAdmin, (req, res) => {
+  res.json(Object.entries(ADDON_CATALOG).map(([id, a]) => ({ id, ...a, ...addonStates()[id], installedAt: db.addons[id]?.installedAt || null })));
+});
+app.post('/api/addons/:id/install', requireAdmin, (req, res) => {
+  const a = ADDON_CATALOG[req.params.id];
+  if (!a) throw new HttpError(404, 'Add-on tidak ditemukan.');
+  if (db.addons[req.params.id]) throw new HttpError(400, 'Add-on sudah terpasang.');
+  db.addons[req.params.id] = attDefaults();
+  attMarkPast(db.addons[req.params.id]);
+  audit(req, 'addon.install', a.name); save(); emitAddons();
+  res.json(addonStates());
+});
+app.post('/api/addons/:id/:action(enable|disable)', requireAdmin, (req, res) => {
+  const a = ADDON_CATALOG[req.params.id], st = db.addons[req.params.id];
+  if (!a || !st) throw new HttpError(404, 'Add-on belum dipasang.');
+  st.enabled = req.params.action === 'enable';
+  if (st.enabled) attMarkPast(st);
+  audit(req, 'addon.' + req.params.action, a.name); save(); emitAddons();
+  res.json(addonStates());
+});
+app.delete('/api/addons/:id', requireAdmin, (req, res) => {
+  const a = ADDON_CATALOG[req.params.id];
+  if (!a || !db.addons[req.params.id]) throw new HttpError(404, 'Add-on belum dipasang.');
+  delete db.addons[req.params.id];
+  audit(req, 'addon.delete', a.name); save(); emitAddons();
+  res.json(addonStates());
+});
+
+/* Add-on: Pengingat absensi (admin) */
+app.get('/api/addons/attendance/config', requireAdmin, (req, res) => res.json(attConfigPublic(attOr404())));
+app.put('/api/addons/attendance/config', requireAdmin, (req, res) => {
+  const st = attOr404();
+  attCleanConfig(st, req.body || {});
+  audit(req, 'addon.attendance.config', `Template ${st.template.name}`); save();
+  res.json(attConfigPublic(st));
+});
+// Daftar pegawai + presensi hari ini (langsung dari API). Bila API presensi gagal, daftar pegawai tetap dikembalikan.
+app.get('/api/addons/attendance/employees', requireAdmin, wrap(async (req, res) => {
+  const st = attOr404();
+  const [dir, abs] = await Promise.allSettled([attDirectory(st, req.query.refresh === '1'), attAbsensi(st)]);
+  if (dir.status === 'rejected' && abs.status === 'rejected') throw dir.reason;
+  const people = new Map((dir.value || st.directory).map((p) => [p.nip, { ...p, inDirectory: true }]));
+  const rows = abs.value || [];
+  for (const a of rows) if (!people.has(a.nip)) people.set(a.nip, { nip: a.nip, nama: a.nama, jabatan: '', phone: '', inDirectory: false });
+  const today = zonedDate(flowTz());
+  const sent = {};
+  for (const r of st.runs) if (r.date === today) for (const it of r.items) if (it.status === 'sent') (sent[it.nip] = sent[it.nip] || {})[r.type] = it.at || r.at;
+  const absBy = new Map(rows.map((a) => [a.nip, a]));
+  res.json({
+    absensiError: abs.status === 'rejected' ? abs.reason.message : '', directoryError: st.directoryError, directoryAt: st.directoryAt, defaultNotify: st.defaultNotify,
+    employees: [...people.values()].map((p) => {
+      const e = st.employees[p.nip] || {}, a = absBy.get(p.nip);
+      return { ...p, nama: p.nama || a?.nama || p.nip, phoneOverride: e.phone || '', waPhone: attPhone(e.phone) || p.phone, notify: e.notify ?? st.defaultNotify,
+        presensi: a ? { status: a.status, jamMasuk: a.jamMasuk, jamPulang: a.jamPulang, belum: a.belum } : null, sentToday: sent[p.nip] || {} };
+    }).sort((x, y) => x.nama.localeCompare(y.nama, 'id')),
+  });
+}));
+app.put('/api/addons/attendance/employees/:nip', requireAdmin, (req, res) => {
+  const st = attOr404(), nip = attNip(req.params.nip), b = req.body || {};
+  if (!nip) throw new HttpError(400, 'NIP tidak valid.');
+  const e = { ...(st.employees[nip] || {}) };
+  if ('notify' in b) e.notify = !!b.notify;
+  if ('phone' in b) {
+    const raw = str(b.phone, 30);
+    if (raw && !attPhone(raw)) throw new HttpError(400, 'Nomor WhatsApp tidak valid.');
+    e.phone = raw ? attPhone(raw) : '';
+  }
+  if (!e.phone) delete e.phone;
+  st.employees[nip] = e; save();
+  res.json({ nip, notify: e.notify ?? st.defaultNotify, phoneOverride: e.phone || '' });
+});
+// Nyalakan/matikan notifikasi semua pegawai sekaligus
+app.post('/api/addons/attendance/employees/notify-all', requireAdmin, wrap(async (req, res) => {
+  const st = attOr404(), on = !!req.body?.notify;
+  const nips = new Set([...(await attDirectory(st).catch(() => st.directory)).map((p) => p.nip), ...Object.keys(st.employees)]);
+  for (const n of nips) st.employees[n] = { ...(st.employees[n] || {}), notify: on };
+  st.defaultNotify = on;
+  audit(req, 'addon.attendance.notify', on ? 'Semua aktif' : 'Semua nonaktif'); save();
+  res.json({ ok: true });
+}));
+app.post('/api/addons/attendance/send', requireAdmin, wrap(async (req, res) => {
+  const st = attOr404(), b = req.body || {};
+  if (!st.enabled) throw new HttpError(400, 'Add-on sedang dinonaktifkan.');
+  if (!ATT_TYPES[b.type]) throw new HttpError(400, 'Jenis presensi harus datang atau pulang.');
+  if (!meta().accessToken || !meta().phoneNumberId) throw new HttpError(400, 'Koneksi Meta belum dikonfigurasi.');
+  const nips = Array.isArray(b.nips) ? [...new Set(b.nips.map(attNip).filter(Boolean))].slice(0, 1000) : null;
+  if (nips && !nips.length) throw new HttpError(400, 'Pilih minimal satu pegawai.');
+  const run = await attStart(st, b.type, { trigger: 'manual', user: req.user, nips });
+  audit(req, 'addon.attendance.send', `${b.type} · ${run.items.length} pegawai`);
+  res.json(attRunPublic(run, true));
+}));
+app.get('/api/addons/attendance/runs/:id', requireAdmin, (req, res) => {
+  const r = attOr404().runs.find((x) => x.id === req.params.id);
+  if (!r) throw new HttpError(404, 'Riwayat tidak ditemukan.');
+  res.json(attRunPublic(r, true));
+});
 
 /* Error handler */
 app.use('/api', (req, res, next) => next(new HttpError(404, 'Endpoint tidak ditemukan.')));
