@@ -4507,12 +4507,21 @@ const ATT_DIR_TTL_MS = 60 * 60000;
 const ATT_VARS = { nama: 'Nama pegawai', jenis: 'datang / pulang', JENIS: 'DATANG / PULANG', nip: 'NIP', tanggal: 'Tanggal hari ini' };
 const timeRe = /^([01]\d|2[0-3]):[0-5]\d$/;
 
+// Smart routing: bila jendela layanan 24 jam masih terbuka (pegawai membalas/mengirim pesan < 24 jam), kirim teks biasa;
+// selain itu template (wajib di luar jendela menurut kebijakan WhatsApp).
+const ATT_ROUTING = { smart: 'Pintar (teks bila jendela 24 jam terbuka)', template: 'Selalu template' };
+const ATT_DEFAULT_TEXT = '*BELUM PRESENSI {{JENIS}}*\nHalo {{nama}}, jangan lupa melakukan presensi {{jenis}} hari ini. Pastikan presensi tercatat dengan benar. Terima kasih. 😊';
+const attRouting = (st) => (ATT_ROUTING[st.routing] ? st.routing : 'smart');
+const attConvFor = (phone) => { const c = idx.contactByPhone.get(phone); return c ? idx.convByContact.get(c.id) : null; };
+const attWindowOpen = (phone) => { const conv = attConvFor(phone); return !!(conv && windowOpen(conv)); };
 function attDefaults() {
   return {
     installedAt: now(), enabled: true,
     absensiUrl: 'https://ma.pnblk.my.id/api/sikep/absensi-hari-ini',
     pegawaiUrl: 'https://pegawai.pnblk.my.id/data_pegawai.json',
     template: { name: 'pengingat_absen', language: '', header: [], body: [] },
+    routing: 'smart', text: ATT_DEFAULT_TEXT,
+    button: { mode: 'none', text: 'Login SIKEP', url: 'https://sikep.mahkamahagung.go.id/site/login', replies: ['Sudah presensi', 'Izin / Cuti'] }, // tombol link pada pesan teks (interactive cta_url)
     schedule: {
       datang: { enabled: true, slots: [{ days: [1, 2, 3, 4, 5], time: '07:45' }] },
       pulang: { enabled: true, slots: [{ days: [1, 2, 3, 4], time: '16:05' }, { days: [5], time: '16:35' }] },
@@ -4607,12 +4616,24 @@ function attTemplateValues(st, tpl) {
     body: v.body.map((_, i) => st.template.body[i] || defBody[i] || '{{nama}}'),
   };
 }
+// Tombol tambahan (opsional) untuk pesan teks. WhatsApp tidak mengizinkan tombol link dan balasan cepat dalam satu pesan:
+//   link  → interactive cta_url (1 tombol URL; URL boleh memuat {{nip}} dst., di-encode)
+//   reply → interactive button (maks. 3 balasan cepat; ID att_qr_<i>, balasan masuk ke Inbox seperti biasa)
+const ATT_BTN_MODES = ['none', 'link', 'reply'];
+function attButton(st, ctx) {
+  const b = st.button || {};
+  const mode = ATT_BTN_MODES.includes(b.mode) ? b.mode : b.enabled ? 'link' : 'none';
+  const extra = { header: attFill(b.header, ctx).trim().slice(0, 60), footer: attFill(b.footer, ctx).trim().slice(0, 60) };
+  if (mode === 'link' && b.url) return { kind: 'link', text: b.text.slice(0, 20), url: String(b.url).replace(/\{\{\s*(nama|jenis|JENIS|nip|tanggal)\s*\}\}/g, (_, k) => encodeURIComponent(ctx[k] ?? '')), ...extra };
+  if (mode === 'reply' && b.replies?.length) return { kind: 'reply', replies: b.replies.slice(0, 3).map((x) => attFill(x, ctx).slice(0, 20)), ...extra };
+  return null;
+}
 const attFill = (v, ctx) => String(v || '').replace(/\{\{\s*(nama|jenis|JENIS|nip|tanggal)\s*\}\}/g, (_, k) => ctx[k] ?? '');
 
 function attRunPublic(r, full) {
   const { items, ...rest } = r;
   const count = (s) => items.filter((i) => i.status === s).length;
-  return { ...rest, total: items.length, sent: count('sent'), failed: count('failed'), skipped: count('skipped'), ...(full ? { items } : {}) };
+  return { ...rest, total: items.length, sent: count('sent'), viaText: items.filter((i) => i.via === 'text').length, failed: count('failed'), skipped: count('skipped'), ...(full ? { items } : {}) };
 }
 function attEmitRun(r) { io?.to('admins').emit('attendance:run', attRunPublic(r)); }
 function attPushRun(st, r) {
@@ -4624,8 +4645,12 @@ function attPushRun(st, r) {
 /* Siapkan pengiriman: validasi template + ambil data presensi & pegawai. Error di sini dikembalikan langsung ke pemanggil.
  * nips: daftar NIP pilihan (kirim manual) — dikirim meski notifikasinya dimatikan; tanpa nips hanya pegawai yang notifikasinya aktif. */
 async function attPrepare(st, type, nips) {
-  const tpl = attTemplate(st);
-  const values = attTemplateValues(st, tpl);
+  const smart = attRouting(st) === 'smart';
+  // Mode pintar: template hanya diperlukan untuk pegawai yang jendela 24 jamnya tertutup
+  const tpl = smart ? attTemplate(st, false) : attTemplate(st);
+  const usable = tpl?.status === 'APPROVED' ? tpl : null;
+  if (smart && !str(st.text, 4096)) throw new HttpError(400, 'Isi pesan teks (mode pintar) belum diisi.');
+  const values = usable ? attTemplateValues(st, usable) : { header: [], body: [] };
   const [rows, dir] = await Promise.all([attAbsensi(st), attDirectory(st)]);
   const byNip = new Map(dir.map((p) => [p.nip, p]));
   const want = nips ? new Set(nips) : null;
@@ -4637,15 +4662,16 @@ async function attPrepare(st, type, nips) {
     const item = { nip: a.nip, nama: a.nama || p.nama || a.nip, phone: attPhone(emp.phone) || p.phone || '', status: 'pending', detail: '' };
     if (!a.belum[type]) Object.assign(item, { status: 'skipped', detail: `Sudah presensi ${type}` });
     else if (!item.phone) Object.assign(item, { status: 'skipped', detail: 'Nomor WhatsApp tidak ditemukan' });
+    else if (!usable && !(smart && attWindowOpen(item.phone))) Object.assign(item, { status: 'failed', detail: 'Jendela 24 jam tertutup dan template belum APPROVED' });
     // Pegawai yang sudah presensi tidak dicatat pada pengiriman terjadwal (agar riwayat ringkas)
     if (want || item.status !== 'skipped' || item.detail.startsWith('Nomor')) items.push(item);
   }
   if (want) for (const n of want) if (!rows.some((a) => a.nip === n)) items.push({ nip: n, nama: byNip.get(n)?.nama || n, phone: '', status: 'skipped', detail: 'Tidak ada di data presensi hari ini' });
-  return { tpl, values, items };
+  return { tpl: usable, values, items, smart };
 }
 
 let attBusy = false;
-async function attSend(st, run, { tpl, values }) {
+async function attSend(st, run, { tpl, values, smart }) {
   const who = 'Pengingat absensi' + (run.trigger === 'manual' ? ' · ' + run.userName : '');
   const tanggal = longDate(zonedDate(flowTz()));
   try {
@@ -4657,9 +4683,28 @@ async function attSend(st, run, { tpl, values }) {
         const contact = getOrCreateContact(it.phone, existing ? '' : it.nama);
         if (!existing) contact.labels = ['Pegawai'];
         const ctx = { nama: it.nama, jenis: run.type, JENIS: run.type.toUpperCase(), nip: it.nip, tanggal };
-        const msg = await sendTemplateTo(contact, tpl, { header: values.header.map((v) => attFill(v, ctx)), body: values.body.map((v) => attFill(v, ctx)) },
-          { userName: who, auto: 'attendance' }, { source: 'attendance', userName: who });
-        Object.assign(it, { status: 'sent', detail: '', wamid: msg.wamid, at: now() });
+        const conv = getOrCreateConv(contact);
+        // Jendela diperiksa tepat sebelum kirim (pegawai bisa saja baru membalas setelah run disiapkan)
+        if (smart && windowOpen(conv)) {
+          const btn = attButton(st, ctx);
+          // Dengan tombol: pesan interaktif (teks maks. 1024 karakter, label tombol maks. 20)
+          const body = attFill(st.text, ctx).slice(0, btn ? 1024 : 4096);
+          const payload = { messaging_product: 'whatsapp', recipient_type: 'individual', to: contact.phone };
+          const hf = btn ? { ...(btn.header ? { header: { type: 'text', text: btn.header } } : {}), ...(btn.footer ? { footer: { text: btn.footer } } : {}) } : {};
+          if (btn?.kind === 'link') Object.assign(payload, { type: 'interactive', interactive: { type: 'cta_url', ...hf, body: { text: body }, action: { name: 'cta_url', parameters: { display_text: btn.text, url: btn.url } } } });
+          else if (btn?.kind === 'reply') Object.assign(payload, { type: 'interactive', interactive: { type: 'button', ...hf, body: { text: body }, action: { buttons: btn.replies.map((title, i) => ({ type: 'reply', reply: { id: 'att_qr_' + i, title } })) } } });
+          else Object.assign(payload, { type: 'text', text: { body, preview_url: /https?:\/\//.test(body) } });
+          const r = await sendToMeta(payload, { source: 'attendance', contact, conversation: conv, userName: who });
+          const content = !btn ? { body } : btn.kind === 'link' ? { kind: 'cta_url', body, button: btn.text, url: btn.url, header: btn.header, footer: btn.footer }
+            : { kind: 'button', body, buttons: btn.replies, header: btn.header, footer: btn.footer };
+          const msg = addMessage(conv, { direction: 'out', type: btn ? 'interactive' : 'text', content, wamid: r.messages?.[0]?.id, status: 'accepted', userName: who, auto: 'attendance' });
+          Object.assign(it, { status: 'sent', via: 'text', detail: !btn ? '' : btn.kind === 'link' ? 'Teks + tombol link' : 'Teks + balasan cepat', wamid: msg.wamid, at: now() });
+        } else {
+          if (!tpl) throw new HttpError(400, 'Jendela 24 jam tertutup dan template belum APPROVED');
+          const msg = await sendTemplateTo(contact, tpl, { header: values.header.map((v) => attFill(v, ctx)), body: values.body.map((v) => attFill(v, ctx)) },
+            { userName: who, auto: 'attendance' }, { source: 'attendance', userName: who });
+          Object.assign(it, { status: 'sent', via: 'template', detail: smart ? 'Jendela 24 jam tertutup → template' : '', wamid: msg.wamid, at: now() });
+        }
       } catch (e) {
         Object.assign(it, { status: 'failed', detail: e.message.slice(0, 300), at: now() });
       }
@@ -4723,6 +4768,21 @@ function attMarkPast(st, all = true) {
     if ((all || !(key in st.lastSlot)) && s.time <= time) st.lastSlot[key] = today;
   }
 }
+function attCleanButton(b) {
+  const mode = ATT_BTN_MODES.includes(b?.mode) ? b.mode : b?.enabled ? 'link' : 'none';
+  const v = { mode, enabled: mode === 'link', text: str(b?.text, 40) || 'Login SIKEP', url: str(b?.url, 2000), header: str(b?.header, 200), footer: str(b?.footer, 200),
+    replies: (Array.isArray(b?.replies) ? b.replies : []).map((x) => str(x, 40)).filter(Boolean) };
+  if ([...v.text].length > 20) throw new HttpError(400, 'Label tombol maksimal 20 karakter.');
+  if ([...v.header].length > 60) throw new HttpError(400, 'Header maksimal 60 karakter.');
+  if ([...v.footer].length > 60) throw new HttpError(400, 'Footer maksimal 60 karakter.');
+  if (v.url && !/^https:\/\/\S+$/.test(v.url)) throw new HttpError(400, 'URL tombol harus diawali https://');
+  if (mode === 'link' && !v.url) throw new HttpError(400, 'Isi URL tombol link.');
+  if (v.replies.length > 3) throw new HttpError(400, 'Balasan cepat maksimal 3 tombol.');
+  if (v.replies.some((x) => [...x].length > 20)) throw new HttpError(400, 'Label balasan cepat maksimal 20 karakter.');
+  if (new Set(v.replies.map((x) => x.toLowerCase())).size !== v.replies.length) throw new HttpError(400, 'Label balasan cepat tidak boleh sama.');
+  if (mode === 'reply' && !v.replies.length) throw new HttpError(400, 'Isi minimal satu balasan cepat.');
+  return v;
+}
 function attCleanConfig(st, b) {
   const url = (v, label) => {
     const u = str(v, 500);
@@ -4751,6 +4811,9 @@ function attCleanConfig(st, b) {
   Object.assign(st, {
     absensiUrl: url(b.absensiUrl, 'URL API presensi'), pegawaiUrl: url(b.pegawaiUrl, 'URL data pegawai'),
     template: { name, language: str(b.template?.language, 15), header: vals(b.template?.header), body: vals(b.template?.body) },
+    routing: ATT_ROUTING[b.routing] ? b.routing : 'smart',
+    button: attCleanButton(b.button),
+    text: str(b.text, 4096) || ATT_DEFAULT_TEXT,
     schedule: { datang: sched(b.schedule?.datang, 'datang'), pulang: sched(b.schedule?.pulang, 'pulang') },
     defaultNotify: b.defaultNotify !== false,
     skipDates: skip.filter((d) => d >= addDays(today, -7)).slice(0, 400),
@@ -4765,7 +4828,8 @@ function attConfigPublic(st) {
   const { employees, directory, runs, lastSlot, ...cfg } = st;
   const comp = (t, type) => (t.components || []).find((c) => c.type === type);
   return {
-    ...cfg, timezone: flowTz(), today: zonedDate(flowTz()), vars: ATT_VARS, busy: attBusy,
+    ...cfg, routing: attRouting(st), text: st.text || ATT_DEFAULT_TEXT, routingOptions: ATT_ROUTING, button: { mode: st.button?.mode || (st.button?.enabled ? 'link' : 'none'), text: 'Login SIKEP', url: '', header: '', footer: '', ...st.button, replies: st.button?.replies || ['Sudah presensi', 'Izin / Cuti'] },
+    timezone: flowTz(), today: zonedDate(flowTz()), vars: ATT_VARS, busy: attBusy,
     templateStatus: tpl ? { language: tpl.language, status: tpl.status, category: tpl.category } : null,
     // Template APPROVED (dan template terpilih apa pun statusnya) beserta variabel & isian bawaannya, untuk pemetaan variabel di UI
     templates: db.templates.filter((t) => t.status === 'APPROVED' || t.name === st.template.name).map((t) => ({
@@ -4828,11 +4892,13 @@ app.get('/api/addons/attendance/employees', requireAdmin, wrap(async (req, res) 
   for (const r of st.runs) if (r.date === today) for (const it of r.items) if (it.status === 'sent') (sent[it.nip] = sent[it.nip] || {})[r.type] = it.at || r.at;
   const absBy = new Map(rows.map((a) => [a.nip, a]));
   res.json({
-    absensiError: abs.status === 'rejected' ? abs.reason.message : '', directoryError: st.directoryError, directoryAt: st.directoryAt, defaultNotify: st.defaultNotify,
+    routing: attRouting(st), absensiError: abs.status === 'rejected' ? abs.reason.message : '', directoryError: st.directoryError, directoryAt: st.directoryAt, defaultNotify: st.defaultNotify,
     employees: [...people.values()].map((p) => {
       const e = st.employees[p.nip] || {}, a = absBy.get(p.nip);
+      const waPhone = attPhone(e.phone) || p.phone, conv = waPhone ? attConvFor(waPhone) : null;
       return {
-        ...p, nama: p.nama || a?.nama || p.nip, phoneOverride: e.phone || '', waPhone: attPhone(e.phone) || p.phone, notify: e.notify ?? st.defaultNotify,
+        ...p, nama: p.nama || a?.nama || p.nip, phoneOverride: e.phone || '', waPhone, notify: e.notify ?? st.defaultNotify,
+        windowOpen: !!(conv && windowOpen(conv)), windowExpiresAt: conv?.lastInboundAt ? conv.lastInboundAt + SERVICE_WINDOW_MS : 0,
         presensi: a ? { status: a.status, jamMasuk: a.jamMasuk, jamPulang: a.jamPulang, belum: a.belum } : null, sentToday: sent[p.nip] || {}
       };
     }).sort((x, y) => x.nama.localeCompare(y.nama, 'id')),

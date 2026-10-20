@@ -245,6 +245,16 @@ Mengirim template WhatsApp (bawaan `pengingat_absen`) ke pegawai yang **belum pr
   plus daftar **hari libur** (tidak dikirim otomatis). Jadwal yang terlewat > 60 menit tidak dikirim; bila API gagal, dicoba lagi tiap 10 menit
   selama masih dalam 60 menit.
 - **Per pegawai:** notifikasi on/off (terjadwal hanya ke yang aktif), nomor WhatsApp pengganti, tombol kirim Datang/Pulang.
+- **Smart routing (Pengaturan › Cara kirim):** mode *Pintar* (bawaan) mengirim **pesan teks biasa** bila pegawai mengirim/membalas
+  pesan dalam 24 jam terakhir (jendela layanan terbuka; diperiksa tepat sebelum tiap pesan dikirim), selain itu **template**.
+  Mode *Selalu template* menonaktifkannya. Teks dapat diatur dengan variabel yang sama. Tabel pegawai menandai siapa yang jendelanya
+  terbuka, dan detail riwayat menampilkan jalur tiap pesan (Teks/Template). Dalam mode pintar template tetap dibutuhkan untuk
+  pegawai yang jendelanya tertutup; bila template belum APPROVED, hanya pegawai dengan jendela terbuka yang dikirimi.
+  Pesan teks dapat diberi **tombol link** (pesan interaktif CTA URL: label maks. 20 karakter, teks maks. 1024, URL HTTPS dan boleh
+  memuat `{{nip}}`), lengkap dengan **header** dan **footer** teks opsional (masing-masing maks. 60 karakter, boleh memakai variabel).
+  Tombol ini tidak berlaku untuk template — tombol pada template diatur saat mengajukan template ke Meta.
+  Sebagai ganti tombol link, pesan teks juga bisa memakai **balasan cepat** (maks. 3 tombol, label maks. 20 karakter; WhatsApp tidak
+  mengizinkan keduanya dalam satu pesan). Balasan pegawai masuk ke Inbox dan membuka jendela 24 jam.
 - **Kirim manual:** pilih pegawai yang belum presensi (data presensi diambil ulang), lalu kirim. Riwayat tiap pengiriman (terkirim/gagal/dilewati)
   ada di tab **Riwayat kirim**, dan setiap pesan di Log pesan (sumber "Pengingat absensi"). Kontak baru diberi label `Pegawai`.
 

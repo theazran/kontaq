@@ -756,6 +756,7 @@
       case 'interactive': return `${c.arImage ? `<img src="/api/autoreply/media/${c.arImage}" alt="Gambar" loading="lazy" class="mb-1">` : ''}${c.header ? `<div class="font-semibold">${esc(c.header)}</div>` : ''}<div>${waFormat(c.body)}</div>${c.footer ? `<div class="text-[11px] ink-3 mt-0.5">${esc(c.footer)}</div>` : ''}
         ${c.kind === 'call_permission_request' ? `<span class="ib-btn">${ICON.phone.replace('<svg', '<svg width="12" height="12" style="display:inline;vertical-align:-1px"')} Permintaan izin telepon</span>`
           : c.kind === 'flow' ? `<span class="ib-btn">${ICON.form.replace('<svg', '<svg width="12" height="12" style="display:inline;vertical-align:-1px"')} ${esc(c.button)}</span><div class="text-[11px] ink-3 mt-1">WhatsApp Flow · ${esc(c.flowName || '')}${c.mode === 'draft' ? ' (draft)' : ''}</div>`
+          : c.kind === 'cta_url' ? `<a class="ib-btn" href="${esc(c.url)}" target="_blank" rel="noopener noreferrer">${ICON.external.replace('<svg', '<svg width="12" height="12" style="display:inline;vertical-align:-1px"')} ${esc(c.button)}</a>`
           : c.kind === 'button' ? c.buttons.map((b) => `<span class="ib-btn">${esc(b)}</span>`).join('') : `<span class="ib-btn">☰ ${esc(c.button)}</span><div class="text-[11px] ink-3 mt-1">${c.rows.map((r) => esc(r.title)).join(' · ')}</div>`}`;
       case 'call_permission': return `<div class="flex items-center gap-2"><span class="${c.response === 'accept' ? 'accent-ink' : 'danger-ink'}">${ICON.phone.replace('<svg', '<svg width="16" height="16"')}</span><div><div class="font-medium">${c.response === 'accept' ? 'Bersedia ditelepon balik' : 'Menolak ditelepon'}</div>${c.response === 'accept' ? `<div class="text-[11px] ink-3">${c.permanent ? 'Izin permanen' : c.expiresAt ? 'Berlaku sampai ' + esc(fmtDT(c.expiresAt)) : ''}</div>` : ''}</div></div>`;
       case 'interactive_reply': return `<div class="text-[11px] ink-3">Balasan pilihan</div><div class="font-medium">${esc(c.title)}</div>${c.description ? `<div class="text-xs ink-3">${esc(c.description)}</div>` : ''}`;
@@ -5838,6 +5839,8 @@
     return run ? `${names[0]}–${names[names.length - 1]}` : names.join(', ');
   };
   const attSchedText = (s) => (s.enabled && s.slots.length ? s.slots.map((x) => `${attDaysText(x.days)} ${x.time.replace(':', '.')}`).join(' · ') : 'Nonaktif');
+  // Jendela layanan 24 jam: di mode pintar pengingat dikirim sebagai teks biasa (tanpa template)
+  const attWinBadge = (e) => (e.windowOpen ? `<span class="badge badge-green" title="Jendela 24 jam terbuka sampai ${esc(fmtDT(e.windowExpiresAt))}">Teks · s.d. ${esc(fmtTime(e.windowExpiresAt))}</span>` : '');
   const attTime = (v) => (v && v !== '-' ? esc(String(v).slice(0, 5).replace(':', '.')) : '<span class="ink-3">—</span>');
 
   async function viewAttendance(tab) {
@@ -5904,7 +5907,7 @@
         <div class="overflow-x-auto"><table class="tbl"><thead><tr><th>Pegawai</th><th>WhatsApp</th><th>Presensi hari ini</th><th>Diingatkan hari ini</th><th class="text-center">Notifikasi</th><th class="text-right">Kirim</th></tr></thead><tbody>
         ${rows.map((e) => `<tr>
           <td class="min-w-[14rem]"><div class="font-medium">${esc(e.nama)}</div><div class="text-[11px] ink-3">${e.jabatan ? esc(e.jabatan) + ' · ' : ''}<span class="mono">${esc(e.nip)}</span>${e.inDirectory ? '' : ' · <span class="danger-ink">tidak ada di data pegawai</span>'}</div></td>
-          <td class="whitespace-nowrap"><button class="btn btn-ghost btn-sm" data-att-phone="${esc(e.nip)}" title="Ubah nomor WhatsApp">${e.waPhone ? `<span class="mono">+${esc(e.waPhone)}</span>` : '<span class="danger-ink">Belum ada</span>'}${e.phoneOverride ? ' <span class="badge">manual</span>' : ''}<span class="w-3.5 h-3.5 block ink-3">${ICON.edit}</span></button></td>
+          <td class="whitespace-nowrap"><button class="btn btn-ghost btn-sm" data-att-phone="${esc(e.nip)}" title="Ubah nomor WhatsApp">${e.waPhone ? `<span class="mono">+${esc(e.waPhone)}</span>` : '<span class="danger-ink">Belum ada</span>'}${e.phoneOverride ? ' <span class="badge">manual</span>' : ''}<span class="w-3.5 h-3.5 block ink-3">${ICON.edit}</span></button>${attWinBadge(e)}</td>
           <td class="whitespace-nowrap text-xs">${e.presensi ? `<div>${esc(e.presensi.status)}</div><div class="ink-3">Datang ${e.presensi.belum.datang ? '<span class="danger-ink">belum</span>' : attTime(e.presensi.jamMasuk)} · Pulang ${e.presensi.belum.pulang ? '<span class="danger-ink">belum</span>' : attTime(e.presensi.jamPulang)}</div>` : '<span class="ink-3">—</span>'}</td>
           <td class="whitespace-nowrap text-xs">${Object.entries(ATT_TYPE).filter(([k]) => e.sentToday[k]).map(([k, l]) => `<span class="badge badge-green">${l} ${esc(fmtTime(e.sentToday[k]))}</span>`).join(' ') || '<span class="ink-3">—</span>'}</td>
           <td class="text-center"><label class="switch ${e.notify ? 'on' : ''}" title="Notifikasi pengingat"><input type="checkbox" class="sr-only" data-att-notify="${esc(e.nip)}" ${e.notify ? 'checked' : ''} role="switch" aria-label="Notifikasi ${esc(e.nama)}"><span></span></label></td>
@@ -5953,11 +5956,12 @@
     const list = d.employees.filter((e) => e.presensi?.belum[type] && (!only || only.includes(e.nip)));
     const pre = (e) => !!e.waPhone && (only ? true : e.notify);
     const body = list.length ? `<div class="space-y-3">
-      <p class="text-xs ink-3">${only ? '' : 'Terpilih otomatis: pegawai yang belum presensi ' + esc(type) + ', punya nomor WA, dan notifikasinya aktif. '}Pesan memakai template <span class="mono">${esc(S.att.cfg.template.name)}</span>.</p>
+      <p class="text-xs ink-3">${only ? '' : 'Terpilih otomatis: pegawai yang belum presensi ' + esc(type) + ', punya nomor WA, dan notifikasinya aktif. '}${S.att.cfg.routing === 'smart' ? 'Mode pintar: pegawai dengan jendela 24 jam terbuka menerima pesan teks biasa, selain itu template' : 'Pesan memakai template'} <span class="mono">${esc(S.att.cfg.template.name)}</span>.</p>
       ${only ? '' : `<label class="flex items-center gap-2 text-xs"><input type="checkbox" class="check" id="att-sel-all">Pilih semua yang punya nomor</label>`}
       <div class="border rounded-lg bd divide-y max-h-[50vh] overflow-y-auto scroll-thin">${list.map((e) => `<label class="flex items-center gap-3 px-3 py-2 ${e.waPhone ? 'cursor-pointer' : 'opacity-60'}">
         <input type="checkbox" class="check" data-att-pick="${esc(e.nip)}" ${pre(e) ? 'checked' : ''} ${e.waPhone ? '' : 'disabled'}>
         <div class="flex-1 min-w-0"><div class="truncate">${esc(e.nama)}</div><div class="text-[11px] ink-3">${e.waPhone ? '+' + esc(e.waPhone) : 'Tanpa nomor WA'}${e.notify ? '' : ' · notifikasi mati'}</div></div>
+        ${S.att.cfg.routing === 'smart' ? attWinBadge(e) : ''}
         ${e.sentToday[type] ? `<span class="badge badge-amber">Sudah diingatkan ${esc(fmtTime(e.sentToday[type]))}</span>` : ''}
       </label>`).join('')}</div></div>` : `<div class="empty">${only ? 'Pegawai ini sudah presensi ' + esc(type) + '.' : 'Semua pegawai sudah presensi ' + esc(type) + '. 🎉'}</div>`;
     modal(`Kirim pengingat presensi ${type}`, body, { wide: true, footer: list.length ? `<button class="btn" data-act="modal-close">Batal</button><button class="btn btn-primary" id="att-go"></button>` : '<button class="btn" data-act="modal-close">Tutup</button>' });
@@ -5984,12 +5988,12 @@
   async function attRunModal(id) {
     let r; try { r = await api('GET', `/api/addons/attendance/runs/${id}`); } catch (e) { fail(e); return; }
     S.att.openRun = id;
-    const counts = `<span class="badge badge-green">${r.sent} terkirim</span> ${r.failed ? `<span class="badge badge-red">${r.failed} gagal</span>` : ''} ${r.skipped ? `<span class="badge">${r.skipped} dilewati</span>` : ''}`;
+    const counts = `<span class="badge badge-green">${r.sent} terkirim</span> ${r.viaText ? `<span class="badge">${r.viaText} via teks · ${r.sent - r.viaText} via template</span>` : ''} ${r.failed ? `<span class="badge badge-red">${r.failed} gagal</span>` : ''} ${r.skipped ? `<span class="badge">${r.skipped} dilewati</span>` : ''}`;
     modal(`Pengingat presensi ${r.type} · ${fmtDT(r.at)}`, `<div class="space-y-3" data-att-run="${esc(r.id)}">
       <div class="flex flex-wrap items-center gap-2 text-xs">${attRunStatus(r)}<span class="ink-3">${attTrigger(r)}</span><span class="flex-1"></span>${counts}</div>
       ${r.error ? `<p class="text-[13px] danger-ink">${esc(r.error)}</p>` : ''}
-      ${r.items.length ? `<div class="overflow-x-auto"><table class="tbl"><thead><tr><th>Pegawai</th><th>Nomor</th><th>Status</th><th>Keterangan</th></tr></thead><tbody>
-        ${r.items.map((i) => `<tr><td>${esc(i.nama)}</td><td class="mono text-xs whitespace-nowrap">${i.phone ? '+' + esc(i.phone) : '—'}</td><td>${statusBadge(i.status)}</td><td class="text-xs ${i.status === 'failed' ? 'danger-ink' : 'ink-3'}">${esc(i.detail) || (i.at ? esc(fmtTime(i.at)) : '')}</td></tr>`).join('')}
+      ${r.items.length ? `<div class="overflow-x-auto"><table class="tbl"><thead><tr><th>Pegawai</th><th>Nomor</th><th>Status</th><th>Jalur</th><th>Keterangan</th></tr></thead><tbody>
+        ${r.items.map((i) => `<tr><td>${esc(i.nama)}</td><td class="mono text-xs whitespace-nowrap">${i.phone ? '+' + esc(i.phone) : '—'}</td><td>${statusBadge(i.status)}</td><td class="text-xs">${i.via === 'text' ? 'Teks' : i.via === 'template' ? 'Template' : '<span class="ink-3">—</span>'}</td><td class="text-xs ${i.status === 'failed' ? 'danger-ink' : 'ink-3'}">${esc(i.detail) || (i.at ? esc(fmtTime(i.at)) : '')}</td></tr>`).join('')}
       </tbody></table></div>` : `<div class="empty">${r.status === 'failed' ? 'Tidak ada pesan yang dikirim.' : 'Tidak ada pegawai yang perlu diingatkan.'}</div>`}
     </div>`, { wide: true, footer: '<button class="btn" data-act="modal-close">Tutup</button>' });
   }
@@ -6055,6 +6059,26 @@
     };
     el.innerHTML = `<form id="att-form" class="grid lg:grid-cols-5 gap-4">
       <div class="lg:col-span-3 space-y-4">
+        <section class="card"><div class="card-h"><div class="card-t">Cara kirim</div></div><div class="p-4 space-y-3">
+          <div><label class="label">Jalur pengiriman</label><select class="select" name="routing">${Object.entries(c.routingOptions).map(([k, l]) => `<option value="${k}" ${c.routing === k ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>
+            <p class="hint">Pintar: bila pegawai mengirim/membalas pesan ke nomor ini dalam 24 jam terakhir, pengingat dikirim sebagai pesan teks biasa; selain itu memakai template di bawah (WhatsApp mewajibkan template di luar jendela 24 jam).</p></div>
+          <div id="att-text-box"><label class="label">Isi pesan teks</label><textarea class="input text-xs" name="text" rows="5" maxlength="4096">${esc(c.text)}</textarea>
+            <p class="hint">Variabel: ${varHelp}. Format WhatsApp: *tebal*, _miring_.</p>
+            <div class="mt-3 rounded-lg p-3 space-y-3" style="background:var(--surface-2)">
+              <div><label class="label">Tombol tambahan</label><select class="select" name="btnMode">${[['none', 'Tidak ada (teks biasa)'], ['link', 'Tombol link'], ['reply', 'Balasan cepat (maks. 3)']].map(([k, l]) => `<option value="${k}" ${c.button.mode === k ? 'selected' : ''}>${l}</option>`).join('')}</select>
+                <p class="hint">WhatsApp tidak mengizinkan tombol link dan balasan cepat dalam satu pesan — pilih salah satu.</p></div>
+              <div data-btn-for="link" class="grid sm:grid-cols-3 gap-3">
+                <div><label class="label">Label tombol</label><input class="input text-xs" name="btnText" maxlength="20" value="${esc(c.button.text)}" placeholder="Login SIKEP"></div>
+                <div class="sm:col-span-2"><label class="label">URL (https)</label><input class="input mono text-xs" name="btnUrl" value="${esc(c.button.url)}" placeholder="https://sikep.mahkamahagung.go.id/site/login"></div>
+              </div>
+              <div data-btn-for="reply" class="grid sm:grid-cols-3 gap-3">${[0, 1, 2].map((i) => `<div><label class="label">Balasan ${i + 1}${i ? ' (opsional)' : ''}</label><input class="input text-xs" name="btnReply${i}" maxlength="20" value="${esc(c.button.replies[i] || '')}" placeholder="${['Sudah presensi', 'Izin / Cuti', 'Dinas luar'][i]}"></div>`).join('')}</div>
+              <div data-btn-for="link reply" class="grid gap-3">
+                <div><label class="label">Header (opsional, maks. 60)</label><input class="input text-xs" name="btnHeader" maxlength="60" value="${esc(c.button.header || '')}" placeholder="BELUM PRESENSI {{JENIS}}"></div>
+                <div><label class="label">Footer (opsional, maks. 60)</label><input class="input text-xs" name="btnFooter" maxlength="60" value="${esc(c.button.footer || '')}" placeholder="Pengadilan Negeri Bulukumba"></div>
+                <p class="hint">Teks maks. 1024 karakter bila memakai tombol; label tombol maks. 20. Header/footer & URL boleh memakai variabel (URL: {{nip}} dst.). Bila judul dipindah ke header, hapus baris judul dari isi pesan agar tidak dobel. Balasan pegawai masuk ke Inbox (dan membuka jendela 24 jam). Template tidak terpengaruh — tombolnya diatur saat mengajukan template ke Meta.</p>
+              </div>
+            </div></div>
+        </div></section>
         <section class="card"><div class="card-h"><div class="card-t">Template pesan</div></div><div class="p-4 space-y-3">
           <div class="grid sm:grid-cols-3 gap-3">
             <div class="sm:col-span-2"><label class="label">Nama template</label><select class="select" id="att-tpl-name"></select></div>
@@ -6089,6 +6113,10 @@
       </div>
       <div class="lg:col-span-5 flex flex-wrap justify-end gap-2"><a class="btn" href="#/settings/addons">Kelola add-on</a><button class="btn btn-primary" type="submit">Simpan pengaturan</button></div>
     </form>`;
+    const syncRouting = () => $('#att-text-box').classList.toggle('hidden', $('#att-form').routing.value !== 'smart');
+    $('#att-form').routing.addEventListener('change', syncRouting); syncRouting();
+    const syncBtn = () => { const m = $('#att-form').btnMode.value; $$('[data-btn-for]').forEach((x) => x.classList.toggle('hidden', !x.dataset.btnFor.split(' ').includes(m))); };
+    $('#att-form').btnMode.addEventListener('change', syncBtn); syncBtn();
     renderTpl(); renderSched('datang'); renderSched('pulang'); renderSkip();
     $('#att-tpl-name').addEventListener('change', (ev) => { f.template = { name: ev.target.value, language: '', header: [], body: [] }; renderTpl(); });
     $('#att-tpl-lang').addEventListener('change', (ev) => { f.template.language = ev.target.value; renderTpl(); });
@@ -6109,7 +6137,9 @@
       const fd = ev.target;
       S.att.cfg = await api('PUT', '/api/addons/attendance/config', {
         absensiUrl: fd.absensiUrl.value, pegawaiUrl: fd.pegawaiUrl.value, defaultNotify: fd.defaultNotify.checked,
-        template: f.template, schedule: f.schedule, skipDates: f.skipDates,
+        template: f.template, schedule: f.schedule, skipDates: f.skipDates, routing: fd.routing.value, text: fd.text.value,
+        button: { mode: fd.btnMode.value, text: fd.btnText.value, url: fd.btnUrl.value, header: fd.btnHeader.value, footer: fd.btnFooter.value,
+          replies: [0, 1, 2].map((i) => fd['btnReply' + i].value.trim()).filter(Boolean) },
       });
       S.att.emp = null; toast('Pengaturan disimpan.'); viewAttendance('settings');
     }); });
