@@ -4770,8 +4770,10 @@ function attMarkPast(st, all = true) {
 }
 function attCleanButton(b) {
   const mode = ATT_BTN_MODES.includes(b?.mode) ? b.mode : b?.enabled ? 'link' : 'none';
-  const v = { mode, enabled: mode === 'link', text: str(b?.text, 40) || 'Login SIKEP', url: str(b?.url, 2000), header: str(b?.header, 200), footer: str(b?.footer, 200),
-    replies: (Array.isArray(b?.replies) ? b.replies : []).map((x) => str(x, 40)).filter(Boolean) };
+  const v = {
+    mode, enabled: mode === 'link', text: str(b?.text, 40) || 'Login SIKEP', url: str(b?.url, 2000), header: str(b?.header, 200), footer: str(b?.footer, 200),
+    replies: (Array.isArray(b?.replies) ? b.replies : []).map((x) => str(x, 40)).filter(Boolean)
+  };
   if ([...v.text].length > 20) throw new HttpError(400, 'Label tombol maksimal 20 karakter.');
   if ([...v.header].length > 60) throw new HttpError(400, 'Header maksimal 60 karakter.');
   if ([...v.footer].length > 60) throw new HttpError(400, 'Footer maksimal 60 karakter.');
