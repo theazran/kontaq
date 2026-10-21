@@ -729,7 +729,7 @@ function handleMessages(value) {
     const msg = addMessage(conv, { direction: 'in', type, content, wamid: m.id, timestamp: Number(m.timestamp) * 1000 || now(), contextId: m.context?.id || null });
     if (type === 'flow_reply') recordFlowSubmission(conv, contact, msg);
     // Jawaban survei CSAT: jangan buka ulang percakapan yang sudah selesai, jangan beri notifikasi, jangan jalankan flow
-    if (handleCsatReply(conv, contact, msg)) {
+    if (handleCsatReply(conv, contact, msg) || handleAttOptOut(conv, contact, msg)) {
       Object.assign(conv, { status: prevStatus, unread: prevStatus === 'closed' ? prevUnread : conv.unread });
       save(); emitConv(conv, 'conversation:update', serializeConv(conv));
       continue;
@@ -4524,6 +4524,7 @@ function attDefaults() {
     template: { name: 'pengingat_absen', language: '', header: [], body: [] },
     routing: 'smart', text: ATT_DEFAULT_TEXT,
     button: { mode: 'none', text: 'Login SIKEP', url: 'https://sikep.mahkamahagung.go.id/site/login', replies: ['Sudah presensi', 'Izin / Cuti'] }, // tombol link pada pesan teks (interactive cta_url)
+    optOut: attOptOutDefaults(),
     schedule: {
       datang: { enabled: true, slots: [{ days: [1, 2, 3, 4, 5], time: '07:45' }] },
       pulang: { enabled: true, slots: [{ days: [1, 2, 3, 4], time: '16:05' }, { days: [5], time: '16:35' }] },
@@ -4623,13 +4624,80 @@ function attTemplateValues(st, tpl) {
 //   link  → interactive cta_url (1 tombol URL; URL boleh memuat {{nip}} dst., di-encode)
 //   reply → interactive button (maks. 3 balasan cepat; ID att_qr_<i>, balasan masuk ke Inbox seperti biasa)
 const ATT_BTN_MODES = ['none', 'link', 'reply'];
+// Tombol "berhenti" (balasan cepat ID att_stop) ikut ditambahkan bila aktif. Tombol link tidak bisa digabung dengan balasan cepat,
+// jadi pada mode link pegawai diminta mengetik label tombolnya. Mode reply: maks. 2 balasan lain (total 3 tombol).
 function attButton(st, ctx) {
   const b = st.button || {};
   const mode = ATT_BTN_MODES.includes(b.mode) ? b.mode : b.enabled ? 'link' : 'none';
-  const extra = { header: attFill(b.header, ctx).trim().slice(0, 60), footer: attFill(b.footer, ctx).trim().slice(0, 60) };
+  const stop = attOptOut(st).enabled ? attOptOut(st).stopLabel : '';
+  const extra = { header: attFill(b.header, ctx).trim().slice(0, 60), footer: attFill(b.footer, ctx).trim().slice(0, 60), stop };
   if (mode === 'link' && b.url) return { kind: 'link', text: b.text.slice(0, 20), url: String(b.url).replace(/\{\{\s*(nama|jenis|JENIS|nip|tanggal)\s*\}\}/g, (_, k) => encodeURIComponent(ctx[k] ?? '')), ...extra };
-  if (mode === 'reply' && b.replies?.length) return { kind: 'reply', replies: b.replies.slice(0, 3).map((x) => attFill(x, ctx).slice(0, 20)), ...extra };
+  if (mode === 'reply' && b.replies?.length) return { kind: 'reply', replies: b.replies.slice(0, stop ? 2 : 3).map((x) => attFill(x, ctx).slice(0, 20)), ...extra };
+  if (stop) return { kind: 'reply', replies: [], ...extra };
   return null;
+}
+
+/* Pegawai mematikan/mengaktifkan pengingatnya sendiri lewat tombol di pesan pengingat (atau mengetik label tombolnya).
+ * Pesan teks: balasan cepat att_stop / att_resume. Template: tombol Quick Reply yang teksnya sama dengan label (diatur saat mengajukan template).
+ * Ditangani sebelum flow/auto reply; balasan dari nomor yang bukan pegawai diproses seperti pesan biasa. */
+const ATT_OPTOUT_STOP_TEXT = 'Baik, pengingat absensi untuk Anda sudah *dimatikan*. Tekan tombol di bawah bila ingin menerimanya lagi.';
+const ATT_OPTOUT_RESUME_TEXT = 'Pengingat absensi untuk Anda sudah *diaktifkan kembali*. ✅';
+function attOptOutDefaults() {
+  return { enabled: true, stopLabel: 'Matikan pengingat', resumeLabel: 'Aktifkan lagi', stopText: ATT_OPTOUT_STOP_TEXT, resumeText: ATT_OPTOUT_RESUME_TEXT };
+}
+// Instalasi lama (sebelum fitur ini) tidak punya optOut: dianggap nonaktif sampai diaktifkan di Pengaturan
+const attOptOut = (st) => ({ ...attOptOutDefaults(), enabled: false, ...st.optOut });
+function attCleanOptOut(b) {
+  const v = {
+    enabled: !!b?.enabled, stopLabel: str(b?.stopLabel, 40) || 'Matikan pengingat', resumeLabel: str(b?.resumeLabel, 40) || 'Aktifkan lagi',
+    stopText: str(b?.stopText, 1000) || ATT_OPTOUT_STOP_TEXT, resumeText: str(b?.resumeText, 1000) || ATT_OPTOUT_RESUME_TEXT,
+  };
+  if ([...v.stopLabel].length > 20 || [...v.resumeLabel].length > 20) throw new HttpError(400, 'Label tombol berhenti/aktifkan maksimal 20 karakter.');
+  if (v.stopLabel.toLowerCase() === v.resumeLabel.toLowerCase()) throw new HttpError(400, 'Label tombol berhenti dan aktifkan tidak boleh sama.');
+  return v;
+}
+// NIP yang memakai nomor ini (nomor pengganti lebih dulu, lalu nomor dari data pegawai)
+function attNipsByPhone(st, phone) {
+  const nips = new Set();
+  for (const [nip, e] of Object.entries(st.employees)) if (attPhone(e.phone) === phone) nips.add(nip);
+  for (const p of st.directory) if (!attPhone(st.employees[p.nip]?.phone) && p.phone === phone) nips.add(p.nip);
+  return [...nips];
+}
+function attOptOutAction(o, msg) {
+  const c = msg.content || {};
+  const said = [msg.type === 'interactive_reply' ? c.id : '', msg.type === 'button' ? c.payload : '', msg.type === 'button' ? c.text : '', msg.type === 'text' ? c.body : '']
+    .map((x) => String(x || '').trim().toLowerCase()).filter(Boolean);
+  if (said.some((x) => x === 'att_stop' || x === o.stopLabel.toLowerCase())) return 'stop';
+  if (said.some((x) => x === 'att_resume' || x === o.resumeLabel.toLowerCase())) return 'resume';
+  return null;
+}
+function handleAttOptOut(conv, contact, msg) {
+  const st = att();
+  if (!st?.enabled) return false;
+  const o = attOptOut(st), action = o.enabled ? attOptOutAction(o, msg) : null;
+  if (!action) return false;
+  const nips = attNipsByPhone(st, contact.phone);
+  if (!nips.length) return false;
+  for (const nip of nips) {
+    const e = { ...(st.employees[nip] || {}) };
+    if (action === 'stop') Object.assign(e, { notify: false, selfOptOutAt: now() });
+    else { e.notify = true; delete e.selfOptOutAt; }
+    st.employees[nip] = e;
+  }
+  const nama = st.directory.find((p) => p.nip === nips[0])?.nama || contact.name || contact.phone;
+  audit(null, action === 'stop' ? 'addon.attendance.self_optout' : 'addon.attendance.self_optin', `${nama} (${nips.join(', ')}) via WhatsApp`);
+  io?.to('admins').emit('notice', { level: 'info', text: `${nama} ${action === 'stop' ? 'mematikan' : 'mengaktifkan kembali'} pengingat absensi lewat WhatsApp.` });
+  save();
+  // Konfirmasi (jendela 24 jam pasti terbuka karena pegawai baru saja mengirim pesan)
+  const who = 'Pengingat absensi', body = action === 'stop' ? o.stopText : o.resumeText;
+  const payload = action === 'stop'
+    ? { messaging_product: 'whatsapp', recipient_type: 'individual', to: contact.phone, type: 'interactive', interactive: { type: 'button', body: { text: body.slice(0, 1024) }, action: { buttons: [{ type: 'reply', reply: { id: 'att_resume', title: o.resumeLabel } }] } } }
+    : { messaging_product: 'whatsapp', recipient_type: 'individual', to: contact.phone, type: 'text', text: { body } };
+  sendToMeta(payload, { source: 'attendance', contact, conversation: conv, userName: who }).then((r) => {
+    addMessage(conv, { direction: 'out', type: action === 'stop' ? 'interactive' : 'text', content: action === 'stop' ? { kind: 'button', body, buttons: [o.resumeLabel] } : { body }, wamid: r.messages?.[0]?.id, status: 'accepted', userName: who, auto: 'attendance' });
+    save();
+  }).catch((e) => console.warn('[attendance] konfirmasi berhenti gagal:', e.message));
+  return true;
 }
 const attFill = (v, ctx) => String(v || '').replace(/\{\{\s*(nama|jenis|JENIS|nip|tanggal)\s*\}\}/g, (_, k) => ctx[k] ?? '');
 
@@ -4691,17 +4759,19 @@ async function attSend(st, run, { tpl, values, smart }) {
         if (smart && windowOpen(conv)) {
           const btn = attButton(st, ctx);
           // Dengan tombol: pesan interaktif (teks maks. 1024 karakter, label tombol maks. 20)
-          const body = attFill(st.text, ctx).slice(0, btn ? 1024 : 4096);
+          const hint = btn?.kind === 'link' && btn.stop ? `\n\n_Ketik *${btn.stop}* untuk berhenti menerima pengingat ini._` : '';
+          const body = attFill(st.text, ctx).slice(0, btn ? 1024 - hint.length : 4096) + hint;
+          const replyBtns = btn?.kind === 'reply' ? [...btn.replies.map((title, i) => ({ id: 'att_qr_' + i, title })), ...(btn.stop ? [{ id: 'att_stop', title: btn.stop }] : [])] : [];
           const payload = { messaging_product: 'whatsapp', recipient_type: 'individual', to: contact.phone };
           const hf = btn ? { ...(btn.header ? { header: { type: 'text', text: btn.header } } : {}), ...(btn.footer ? { footer: { text: btn.footer } } : {}) } : {};
           if (btn?.kind === 'link') Object.assign(payload, { type: 'interactive', interactive: { type: 'cta_url', ...hf, body: { text: body }, action: { name: 'cta_url', parameters: { display_text: btn.text, url: btn.url } } } });
-          else if (btn?.kind === 'reply') Object.assign(payload, { type: 'interactive', interactive: { type: 'button', ...hf, body: { text: body }, action: { buttons: btn.replies.map((title, i) => ({ type: 'reply', reply: { id: 'att_qr_' + i, title } })) } } });
+          else if (btn?.kind === 'reply') Object.assign(payload, { type: 'interactive', interactive: { type: 'button', ...hf, body: { text: body }, action: { buttons: replyBtns.map((reply) => ({ type: 'reply', reply })) } } });
           else Object.assign(payload, { type: 'text', text: { body, preview_url: /https?:\/\//.test(body) } });
           const r = await sendToMeta(payload, { source: 'attendance', contact, conversation: conv, userName: who });
           const content = !btn ? { body } : btn.kind === 'link' ? { kind: 'cta_url', body, button: btn.text, url: btn.url, header: btn.header, footer: btn.footer }
-            : { kind: 'button', body, buttons: btn.replies, header: btn.header, footer: btn.footer };
+            : { kind: 'button', body, buttons: replyBtns.map((x) => x.title), header: btn.header, footer: btn.footer };
           const msg = addMessage(conv, { direction: 'out', type: btn ? 'interactive' : 'text', content, wamid: r.messages?.[0]?.id, status: 'accepted', userName: who, auto: 'attendance' });
-          Object.assign(it, { status: 'sent', via: 'text', detail: !btn ? '' : btn.kind === 'link' ? 'Teks + tombol link' : 'Teks + balasan cepat', wamid: msg.wamid, at: now() });
+          Object.assign(it, { status: 'sent', via: 'text', detail: !btn ? '' : btn.kind === 'link' ? 'Teks + tombol link' : btn.replies.length ? 'Teks + balasan cepat' : 'Teks + tombol berhenti', wamid: msg.wamid, at: now() });
         } else {
           if (!tpl) throw new HttpError(400, 'Jendela 24 jam tertutup dan template belum APPROVED');
           const msg = await sendTemplateTo(contact, tpl, { header: values.header.map((v) => attFill(v, ctx)), body: values.body.map((v) => attFill(v, ctx)) },
@@ -4818,11 +4888,13 @@ function attCleanConfig(st, b) {
     template: { name, language: str(b.template?.language, 15), header: vals(b.template?.header), body: vals(b.template?.body) },
     routing: ATT_ROUTING[b.routing] ? b.routing : 'smart',
     button: attCleanButton(b.button),
+    optOut: attCleanOptOut(b.optOut),
     text: str(b.text, 4096) || ATT_DEFAULT_TEXT,
     schedule: { datang: sched(b.schedule?.datang, 'datang'), pulang: sched(b.schedule?.pulang, 'pulang') },
     defaultNotify: b.defaultNotify !== false,
     skipDates: skip.filter((d) => d >= addDays(today, -7)).slice(0, 400),
   });
+  if (st.optOut.enabled && st.button.mode === 'reply' && st.button.replies.length > 2) throw new HttpError(400, 'Dengan tombol berhenti aktif, balasan cepat maksimal 2 (WhatsApp membatasi 3 tombol per pesan).');
   attMarkPast(st, false);
   const keys = new Set(Object.keys(ATT_TYPES).flatMap((t) => st.schedule[t].slots.map((s) => `${t}@${s.time}`)));
   for (const k of Object.keys(st.lastSlot)) if (!keys.has(k)) delete st.lastSlot[k];
@@ -4834,7 +4906,7 @@ function attConfigPublic(st) {
   const comp = (t, type) => (t.components || []).find((c) => c.type === type);
   return {
     ...cfg, routing: attRouting(st), text: st.text || ATT_DEFAULT_TEXT, routingOptions: ATT_ROUTING, button: { mode: st.button?.mode || (st.button?.enabled ? 'link' : 'none'), text: 'Login SIKEP', url: '', header: '', footer: '', ...st.button, replies: st.button?.replies || ['Sudah presensi', 'Izin / Cuti'] },
-    timezone: flowTz(), today: zonedDate(flowTz()), vars: ATT_VARS, busy: attBusy,
+    timezone: flowTz(), today: zonedDate(flowTz()), vars: ATT_VARS, busy: attBusy, optOut: attOptOut(st),
     templateStatus: tpl ? { language: tpl.language, status: tpl.status, category: tpl.category } : null,
     // Template APPROVED (dan template terpilih apa pun statusnya) beserta variabel & isian bawaannya, untuk pemetaan variabel di UI
     templates: db.templates.filter((t) => t.status === 'APPROVED' || t.name === st.template.name).map((t) => ({
@@ -5122,7 +5194,7 @@ app.get('/api/addons/attendance/employees', requireAdmin, wrap(async (req, res) 
       const e = st.employees[p.nip] || {}, a = absBy.get(p.nip);
       const waPhone = attPhone(e.phone) || p.phone, conv = waPhone ? attConvFor(waPhone) : null;
       return {
-        ...p, nama: p.nama || a?.nama || p.nip, phoneOverride: e.phone || '', waPhone, notify: e.notify ?? st.defaultNotify,
+        ...p, nama: p.nama || a?.nama || p.nip, phoneOverride: e.phone || '', waPhone, notify: e.notify ?? st.defaultNotify, selfOptOutAt: e.selfOptOutAt || 0,
         windowOpen: !!(conv && windowOpen(conv)), windowExpiresAt: conv?.lastInboundAt ? conv.lastInboundAt + SERVICE_WINDOW_MS : 0,
         presensi: a ? { status: a.status, jamMasuk: a.jamMasuk, jamPulang: a.jamPulang, belum: a.belum } : null, sentToday: sent[p.nip] || {}
       };
@@ -5133,7 +5205,7 @@ app.put('/api/addons/attendance/employees/:nip', requireAdmin, (req, res) => {
   const st = attOr404(), nip = attNip(req.params.nip), b = req.body || {};
   if (!nip) throw new HttpError(400, 'NIP tidak valid.');
   const e = { ...(st.employees[nip] || {}) };
-  if ('notify' in b) e.notify = !!b.notify;
+  if ('notify' in b) { e.notify = !!b.notify; if (e.notify) delete e.selfOptOutAt; }
   if ('phone' in b) {
     const raw = str(b.phone, 30);
     if (raw && !attPhone(raw)) throw new HttpError(400, 'Nomor WhatsApp tidak valid.');
@@ -5147,7 +5219,8 @@ app.put('/api/addons/attendance/employees/:nip', requireAdmin, (req, res) => {
 app.post('/api/addons/attendance/employees/notify-all', requireAdmin, wrap(async (req, res) => {
   const st = attOr404(), on = !!req.body?.notify;
   const nips = new Set([...(await attDirectory(st).catch(() => st.directory)).map((p) => p.nip), ...Object.keys(st.employees)]);
-  for (const n of nips) st.employees[n] = { ...(st.employees[n] || {}), notify: on };
+  // "Semua aktif" tidak menyalakan lagi pegawai yang mematikan pengingatnya sendiri
+  for (const n of nips) if (!(on && st.employees[n]?.selfOptOutAt)) st.employees[n] = { ...(st.employees[n] || {}), notify: on };
   st.defaultNotify = on;
   audit(req, 'addon.attendance.notify', on ? 'Semua aktif' : 'Semua nonaktif'); save();
   res.json({ ok: true });

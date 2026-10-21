@@ -255,6 +255,11 @@ Mengirim template WhatsApp (bawaan `pengingat_absen`) ke pegawai yang **belum pr
   Tombol ini tidak berlaku untuk template — tombol pada template diatur saat mengajukan template ke Meta.
   Sebagai ganti tombol link, pesan teks juga bisa memakai **balasan cepat** (maks. 3 tombol, label maks. 20 karakter; WhatsApp tidak
   mengizinkan keduanya dalam satu pesan). Balasan pegawai masuk ke Inbox dan membuka jendela 24 jam.
+- **Tombol berhenti:** pegawai bisa mematikan pengingatnya sendiri lewat tombol balasan cepat **Matikan pengingat** di pesan teks
+  (dibalas konfirmasi dengan tombol **Aktifkan lagi**); mengetik label tombol juga dikenali. Dengan balasan cepat lain, maksimal 2
+  balasan + tombol berhenti; dengan tombol link, pesan diberi petunjuk "Ketik *Matikan pengingat*…". Untuk template, tambahkan tombol
+  Quick reply dengan teks yang sama saat mengajukan ke Meta. Pegawai yang mematikan sendiri ditandai di tab Pegawai, tercatat di
+  Audit log, dan tidak dinyalakan ulang oleh "Semua aktif". Atur label & teks konfirmasi di **Pengaturan › Tombol berhenti**.
 - **Kirim manual:** pilih pegawai yang belum presensi (data presensi diambil ulang), lalu kirim. Riwayat tiap pengiriman (terkirim/gagal/dilewati)
   ada di tab **Riwayat kirim**, dan setiap pesan di Log pesan (sumber "Pengingat absensi"). Kontak baru diberi label `Pegawai`.
 

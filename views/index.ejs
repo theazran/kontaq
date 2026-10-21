@@ -5912,7 +5912,7 @@
           <td class="whitespace-nowrap"><button class="btn btn-ghost btn-sm" data-att-phone="${esc(e.nip)}" title="Ubah nomor WhatsApp">${e.waPhone ? `<span class="mono">+${esc(e.waPhone)}</span>` : '<span class="danger-ink">Belum ada</span>'}${e.phoneOverride ? ' <span class="badge">manual</span>' : ''}<span class="w-3.5 h-3.5 block ink-3">${ICON.edit}</span></button>${attWinBadge(e)}</td>
           <td class="whitespace-nowrap text-xs">${e.presensi ? `<div>${esc(e.presensi.status)}</div><div class="ink-3">Datang ${e.presensi.belum.datang ? '<span class="danger-ink">belum</span>' : attTime(e.presensi.jamMasuk)} · Pulang ${e.presensi.belum.pulang ? '<span class="danger-ink">belum</span>' : attTime(e.presensi.jamPulang)}</div>` : '<span class="ink-3">—</span>'}</td>
           <td class="whitespace-nowrap text-xs">${Object.entries(ATT_TYPE).filter(([k]) => e.sentToday[k]).map(([k, l]) => `<span class="badge badge-green">${l} ${esc(fmtTime(e.sentToday[k]))}</span>`).join(' ') || '<span class="ink-3">—</span>'}</td>
-          <td class="text-center"><label class="switch ${e.notify ? 'on' : ''}" title="Notifikasi pengingat"><input type="checkbox" class="sr-only" data-att-notify="${esc(e.nip)}" ${e.notify ? 'checked' : ''} role="switch" aria-label="Notifikasi ${esc(e.nama)}"><span></span></label></td>
+          <td class="text-center"><label class="switch ${e.notify ? 'on' : ''}" title="Notifikasi pengingat"><input type="checkbox" class="sr-only" data-att-notify="${esc(e.nip)}" ${e.notify ? 'checked' : ''} role="switch" aria-label="Notifikasi ${esc(e.nama)}"><span></span></label>${!e.notify && e.selfOptOutAt ? `<div class="text-[10px] ink-3 whitespace-nowrap mt-0.5" title="Dimatikan pegawai lewat tombol di WhatsApp">oleh pegawai · ${esc(fmtDate(e.selfOptOutAt))}</div>` : ''}</td>
           <td class="text-right whitespace-nowrap">${Object.entries(ATT_TYPE).map(([k, l]) => `<button class="btn btn-sm" data-att-one="${k}" data-nip="${esc(e.nip)}" ${e.presensi?.belum[k] ? '' : 'disabled'} title="${e.presensi?.belum[k] ? 'Kirim pengingat presensi ' + k : 'Sudah presensi ' + k}">${l}</button>`).join(' ')}</td>
         </tr>`).join('') || `<tr><td colspan="6" class="empty">${list.length ? 'Tidak ada pegawai yang cocok.' : 'Belum ada data pegawai.'}</td></tr>`}
         </tbody></table></div>
@@ -6105,6 +6105,18 @@
         <section class="card"><div class="card-h"><div class="card-t">Pegawai</div></div><div class="p-4 space-y-3">
           <label class="flex items-start gap-3"><span class="switch ${c.defaultNotify ? 'on' : ''}"><input type="checkbox" class="sr-only" name="defaultNotify" ${c.defaultNotify ? 'checked' : ''} role="switch" aria-label="Notifikasi aktif untuk pegawai baru"><span></span></span><span class="text-xs"><span class="font-medium block text-[13px]">Pegawai baru otomatis menerima notifikasi</span><span class="ink-3">Berlaku untuk pegawai yang belum pernah diatur. Atur per pegawai di tab Pegawai.</span></span></label>
         </div></section>
+        <section class="card"><div class="card-h"><div class="card-t">Tombol berhenti</div>
+          <label class="switch ${c.optOut.enabled ? 'on' : ''}"><input type="checkbox" class="sr-only" name="ooOn" ${c.optOut.enabled ? 'checked' : ''} role="switch" aria-label="Aktifkan tombol berhenti"><span></span></label></div>
+          <div class="p-4 space-y-3">
+            <p class="text-xs ink-3">Pegawai dapat mematikan pengingatnya sendiri dengan menekan tombol ini di pesan pengingat, lalu menyalakannya lagi lewat tombol di pesan konfirmasi. Perubahan tercatat di Audit log dan tampil di tab Pegawai.</p>
+            <div class="grid grid-cols-2 gap-3">
+              <div><label class="label" for="att-oo-stop">Label berhenti</label><input class="input text-xs" id="att-oo-stop" name="ooStop" maxlength="20" value="${esc(c.optOut.stopLabel)}"></div>
+              <div><label class="label" for="att-oo-resume">Label aktifkan</label><input class="input text-xs" id="att-oo-resume" name="ooResume" maxlength="20" value="${esc(c.optOut.resumeLabel)}"></div>
+            </div>
+            <div><label class="label" for="att-oo-stoptext">Konfirmasi saat dimatikan</label><textarea class="input text-xs" id="att-oo-stoptext" name="ooStopText" rows="3" maxlength="1000">${esc(c.optOut.stopText)}</textarea></div>
+            <div><label class="label" for="att-oo-resumetext">Konfirmasi saat diaktifkan</label><textarea class="input text-xs" id="att-oo-resumetext" name="ooResumeText" rows="2" maxlength="1000">${esc(c.optOut.resumeText)}</textarea></div>
+            <p class="hint">Pesan teks: tombol ditambahkan otomatis (dengan balasan cepat: maks. 2 balasan lain; dengan tombol link: pegawai diminta mengetik labelnya). <b>Template:</b> tambahkan tombol <i>Quick reply</i> dengan teks persis sama dengan label berhenti saat mengajukan template ke Meta. Mengetik label secara manual juga dikenali.</p>
+          </div></section>
         <section class="card"><div class="card-h"><div class="card-t">Sumber data</div></div><div class="p-4 space-y-3">
           <div><label class="label">URL API presensi hari ini</label><input class="input mono text-xs" name="absensiUrl" value="${esc(c.absensiUrl)}" required></div>
           <div><label class="label">URL data pegawai</label><input class="input mono text-xs" name="pegawaiUrl" value="${esc(c.pegawaiUrl)}" required></div>
@@ -6142,6 +6154,7 @@
         template: f.template, schedule: f.schedule, skipDates: f.skipDates, routing: fd.routing.value, text: fd.text.value,
         button: { mode: fd.btnMode.value, text: fd.btnText.value, url: fd.btnUrl.value, header: fd.btnHeader.value, footer: fd.btnFooter.value,
           replies: [0, 1, 2].map((i) => fd['btnReply' + i].value.trim()).filter(Boolean) },
+        optOut: { enabled: fd.ooOn.checked, stopLabel: fd.ooStop.value, resumeLabel: fd.ooResume.value, stopText: fd.ooStopText.value, resumeText: fd.ooResumeText.value },
       });
       S.att.emp = null; toast('Pengaturan disimpan.'); viewAttendance('settings');
     }); });
