@@ -6235,14 +6235,14 @@
       if (!await confirmBox(on ? 'Nyalakan ucapan ulang tahun otomatis untuk semua pegawai?' : 'Matikan ucapan ulang tahun otomatis untuk semua pegawai?', on ? 'Nyalakan semua' : 'Matikan semua', !on)) return;
       busy(ev.currentTarget, async () => { await api('POST', '/api/addons/birthday/employees/notify-all', { notify: on }); toast('Pengaturan ucapan diperbarui.'); bdEmployees(false); });
     }));
-    $('[data-bd-notify]', el).forEach((i) => i.addEventListener('change', async () => {
+    $$('[data-bd-notify]', el).forEach((i) => i.addEventListener('change', async () => {
       const e = list.find((x) => x.nip === i.dataset.bdNotify);
       i.closest('.switch').classList.toggle('on', i.checked);
       try { const r = await api('PUT', `/api/addons/birthday/employees/${e.nip}`, { notify: i.checked }); e.notify = r.notify; }
       catch (err) { i.checked = !i.checked; i.closest('.switch').classList.toggle('on', i.checked); fail(err); }
     }));
-    $('[data-bd-phone]', el).forEach((b) => b.addEventListener('click', () => bdPhoneModal(list.find((x) => x.nip === b.dataset.bdPhone))));
-    $('[data-bd-one]', el).forEach((b) => b.addEventListener('click', () => bdSendModal([b.dataset.bdOne])));
+    $$('[data-bd-phone]', el).forEach((b) => b.addEventListener('click', () => bdPhoneModal(list.find((x) => x.nip === b.dataset.bdPhone))));
+    $$('[data-bd-one]', el).forEach((b) => b.addEventListener('click', () => bdSendModal([b.dataset.bdOne])));
   }
 
   function bdPhoneModal(e) {
@@ -6277,9 +6277,9 @@
       </label>`).join('')}</div></div>` : '<div class="empty">Tidak ada pegawai yang berulang tahun hari ini.</div>';
     modal('Kirim ucapan ulang tahun', body, { wide: true, footer: list.length ? '<button class="btn" data-act="modal-close">Batal</button><button class="btn btn-primary" id="bd-go"></button>' : '<button class="btn" data-act="modal-close">Tutup</button>' });
     if (!list.length) return;
-    const picks = () => $('[data-bd-pick]').filter((x) => x.checked).map((x) => x.dataset.bdPick);
+    const picks = () => $$('[data-bd-pick]').filter((x) => x.checked).map((x) => x.dataset.bdPick);
     const upd = () => { const k = picks().length; $('#bd-go').innerHTML = `${ICON.send}<span>Kirim ke ${k} pegawai</span>`; $('#bd-go').disabled = !k; };
-    $('[data-bd-pick]').forEach((x) => x.addEventListener('change', upd)); upd();
+    $$('[data-bd-pick]').forEach((x) => x.addEventListener('change', upd)); upd();
     $('#bd-go').addEventListener('click', (ev) => busy(ev.currentTarget, async () => {
       const run = await api('POST', '/api/addons/birthday/send', { nips: picks() });
       toast(`Mengirim ucapan ke ${run.items.filter((i) => i.status === 'pending').length} pegawai…`);
@@ -6317,7 +6317,7 @@
       ${runs.map((r) => `<tr class="cursor-pointer" data-bd-open="${esc(r.id)}"><td class="whitespace-nowrap">${esc(fmtDT(r.at))}</td><td class="text-xs">${bdTrigger(r)}</td><td>${attRunStatus(r)}${r.error ? `<div class="text-[11px] danger-ink max-w-[18rem] truncate" title="${esc(r.error)}">${esc(r.error)}</div>` : ''}</td><td class="text-right">${fmtNum(r.sent)}</td><td class="text-right ${r.failed ? 'danger-ink' : ''}">${fmtNum(r.failed)}</td><td class="text-right">${fmtNum(r.skipped)}</td></tr>`).join('')
         || '<tr><td colspan="6" class="empty">Belum ada pengiriman.</td></tr>'}
     </tbody></table></div><div class="px-3 py-2 border-t bd text-[11px] ink-3">Menampilkan 30 pengiriman terakhir. Hari tanpa pegawai yang berulang tahun tidak dicatat. Status pesan (terkirim/dibaca) ada di Log pesan dengan sumber "Ulang tahun".</div></section>`;
-    $('[data-bd-open]', el).forEach((tr) => tr.addEventListener('click', () => bdRunModal(tr.dataset.bdOpen)));
+    $$('[data-bd-open]', el).forEach((tr) => tr.addEventListener('click', () => bdRunModal(tr.dataset.bdOpen)));
   }
 
   function bdSettings() {
@@ -6335,7 +6335,7 @@
       box.innerHTML = `<div class="rounded-lg p-3 text-xs space-y-1" style="background:var(--surface-2)">${t.header ? `<div class="font-semibold">${esc(t.header)}</div>` : ''}<div class="whitespace-pre-wrap">${esc(t.body)}</div><div class="ink-3 pt-1">${esc(t.language)} · ${esc(t.category || '')} · ${esc(t.status)}</div></div>
         ${t.vars.header.length + t.vars.body.length ? `<div class="grid sm:grid-cols-2 gap-3">${t.vars.header.map((n, i) => field('header', i, n)).join('')}${t.vars.body.map((n, i) => field('body', i, n)).join('')}</div>
         <p class="hint">Kosongkan untuk memakai isian bawaan (abu-abu). Variabel yang tersedia: ${varHelp}</p>` : '<p class="hint">Template ini tidak memiliki variabel.</p>'}`;
-      $('[data-tv]', box).forEach((i) => i.addEventListener('input', () => { f.template[i.dataset.tv][+i.dataset.i] = i.value; }));
+      $$('[data-tv]', box).forEach((i) => i.addEventListener('input', () => { f.template[i.dataset.tv][+i.dataset.i] = i.value; }));
     };
     el.innerHTML = `<form id="bd-form" class="grid lg:grid-cols-5 gap-4">
       <div class="lg:col-span-3 space-y-4">
@@ -6379,7 +6379,7 @@
     renderTpl();
     $('#bd-tpl-name').addEventListener('change', (ev) => { f.template = { name: ev.target.value, language: '', header: [], body: [] }; renderTpl(); });
     $('#bd-tpl-lang').addEventListener('change', (ev) => { f.template.language = ev.target.value; renderTpl(); });
-    $('#bd-form .switch input').forEach((i) => i.addEventListener('change', () => i.closest('.switch').classList.toggle('on', i.checked)));
+    $$('#bd-form .switch input').forEach((i) => i.addEventListener('change', () => i.closest('.switch').classList.toggle('on', i.checked)));
     $('#bd-dir-refresh').addEventListener('click', (ev) => busy(ev.currentTarget, async () => {
       const d = await bdLoadEmployees(true);
       if (d.directoryError) throw new Error(d.directoryError);
