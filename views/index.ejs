@@ -234,6 +234,7 @@
     chevR: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 18 6-6-6-6"/></svg>',
     link: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7 0l2-2a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-2 2a5 5 0 0 0 7 7l1-1"/></svg>',
     userPlus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6M22 11h-6"/></svg>',
+    cake: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-8a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8M4 16s.5-1 2-1 2.5 2 4 2 2.5-2 4-2 2.5 2 4 2 2-1 2-1M2 21h20M7 8v3M12 8v3M17 8v3M7 4h.01M12 4h.01M17 4h.01"/></svg>',
     userX: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="m17 9 5 5m0-5-5 5"/></svg>',
   };
   const tick = (s) => ({
@@ -283,6 +284,7 @@
     { id: 'autoreply', label: 'Auto reply', icon: 'bolt', section: 'automation', admin: true },
     { id: 'flows', label: 'Flow otomatis', icon: 'flow', section: 'automation', admin: true },
     { id: 'attendance', label: 'Pengingat absensi', icon: 'clock', section: 'addons', admin: true, addon: 'attendance' },
+    { id: 'birthday', label: 'Ulang tahun pegawai', icon: 'cake', section: 'addons', admin: true, addon: 'birthday' },
     { id: 'settings', label: 'Pengaturan', icon: 'gear', section: 'system' },
   ];
   // Menu add-on hanya tampil bila add-on terpasang & aktif
@@ -312,7 +314,7 @@
     $('#sidebar').classList.toggle('md:flex', true);
     renderNav();
     const v = $('#view'); v.className = 'flex-1 min-h-0 overflow-y-auto scroll-thin';
-    ({ dashboard: viewDashboard, inbox: () => viewInbox(arg), contacts: viewContacts, templates: viewTemplates, campaigns: viewCampaigns, messagelog: viewMessageLog, autoreply: viewAutoReply, flows: () => viewFlows(arg), groups: () => viewGroups(arg), waflows: () => viewWaFlows(arg), csat: viewCsat, reminders: viewReminders, calls: viewCalls, attendance: () => viewAttendance(arg), settings: () => viewSettings(arg) })[S.view]();
+    ({ dashboard: viewDashboard, inbox: () => viewInbox(arg), contacts: viewContacts, templates: viewTemplates, campaigns: viewCampaigns, messagelog: viewMessageLog, autoreply: viewAutoReply, flows: () => viewFlows(arg), groups: () => viewGroups(arg), waflows: () => viewWaFlows(arg), csat: viewCsat, reminders: viewReminders, calls: viewCalls, attendance: () => viewAttendance(arg), birthday: () => viewBirthday(arg), settings: () => viewSettings(arg) })[S.view]();
   }
   let lastHash = location.hash, skipHash = false;
   window.addEventListener('hashchange', () => {
@@ -6145,6 +6147,254 @@
     }); });
   }
 
+  /* ───────────── Add-on: Ulang tahun pegawai ───────────── */
+  const BD_FILTERS = { upcoming: '30 hari ke depan', today: 'Hari ini', month: 'Bulan ini', all: 'Semua pegawai', off: 'Notifikasi mati', nophone: 'Tanpa nomor WA', nobirth: 'Tanggal lahir tidak terbaca' };
+  const bdDay = (ymd, opt = { day: 'numeric', month: 'short' }) => new Date(ymd + 'T00:00:00').toLocaleDateString('id-ID', opt);
+  const bdWhen = (n) => (!n ? '<span class="ink-3">—</span>'
+    : n.days === 0 ? `<span class="badge badge-green">🎂 Hari ini · ${n.age} th</span>`
+    : `<div>${n.days === 1 ? 'Besok' : esc(n.days + ' hari lagi')}</div><div class="text-[11px] ink-3">${esc(bdDay(n.date, { weekday: 'short', day: 'numeric', month: 'short' }))} · ${n.age} th</div>`);
+
+  async function viewBirthday(tab) {
+    const v = $('#view'), tok = location.hash;
+    const cur = ['employees', 'history', 'settings'].includes(tab) ? tab : 'employees';
+    if (!S.bd) S.bd = { q: '', filter: 'upcoming', emp: null };
+    v.innerHTML = '<div class="p-4 md:p-6"><div class="card p-4 text-xs ink-3">Memuat…</div></div>';
+    let cfg; try { cfg = await api('GET', '/api/addons/birthday/config'); } catch (e) { v.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+    if (location.hash !== tok) return;
+    S.bd.cfg = cfg; S.bd.tab = cur; S.bd.emp = null;
+    const ts = cfg.templateStatus;
+    const warn = (html) => `<div class="card p-3 flex flex-wrap items-center gap-3" style="background:var(--warn-soft);border-color:transparent"><span class="w-4 h-4 block" style="color:var(--warn)">${ICON.info}</span><div class="flex-1 min-w-0 text-[13px]">${html}</div></div>`;
+    v.innerHTML = `<div class="p-4 md:p-6 space-y-4 max-w-6xl">
+      ${!ts ? warn(`Template <b class="mono">${esc(cfg.template.name)}</b> belum ditemukan. ${cfg.routing === 'smart' ? 'Tanpa template, ucapan hanya terkirim ke pegawai yang jendela 24 jamnya terbuka. ' : ''}Buat & ajukan di menu <a class="underline" href="#/templates">Template</a>, lalu sinkronkan setelah disetujui Meta.`)
+        : ts.status !== 'APPROVED' ? warn(`Template <b class="mono">${esc(cfg.template.name)}</b> berstatus <b>${esc(ts.status)}</b>. Ucapan via template baru dapat dikirim setelah APPROVED.`) : ''}
+      <div class="flex flex-wrap items-end gap-3">
+        <nav class="tabs flex-1 min-w-[16rem]">${[['employees', 'Pegawai'], ['history', 'Riwayat kirim'], ['settings', 'Pengaturan']].map(([k, l]) => `<a href="#/birthday/${k}" class="tab ${k === cur ? 'active' : ''}">${l}</a>`).join('')}</nav>
+        <div class="flex gap-2 pb-1"><button class="btn btn-sm" id="bd-send-today">${ICON.send}<span>Kirim ucapan hari ini</span></button></div>
+      </div>
+      <div class="text-xs ink-3 flex flex-wrap gap-x-4 gap-y-1"><span>Jadwal: <b class="ink-2">${cfg.schedule.enabled ? 'Setiap hari ' + esc(cfg.schedule.time.replace(':', '.')) : 'Nonaktif'}</b></span><span>Zona waktu: ${esc(cfg.timezone)}</span>${cfg.schedule.enabled && cfg.doneToday ? '<span class="badge">Jadwal hari ini sudah berjalan</span>' : ''}</div>
+      <div id="bd-body"></div></div>`;
+    $('#bd-send-today').addEventListener('click', () => bdSendModal());
+    ({ employees: bdEmployees, history: bdHistory, settings: bdSettings })[cur]();
+  }
+
+  async function bdLoadEmployees(refresh) {
+    S.bd.emp = await api('GET', '/api/addons/birthday/employees' + (refresh ? '?refresh=1' : ''));
+    return S.bd.emp;
+  }
+  async function bdEmployees(refresh) {
+    const el = $('#bd-body'), tok = location.hash;
+    if (!S.bd.emp || refresh !== undefined) {
+      el.innerHTML = '<div class="card p-4 text-xs ink-3">Mengambil data pegawai…</div>';
+      try { await bdLoadEmployees(refresh); } catch (e) { el.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+      if (location.hash !== tok) return;
+    }
+    const d = S.bd.emp, list = d.employees, month = d.today.slice(5, 7);
+    const n = (f) => list.filter(f).length;
+    const tile = (label, value, sub) => `<div class="card p-4"><div class="text-xs ink-3">${label}</div><div class="text-2xl font-semibold tracking-tight mt-1">${value}</div>${sub ? `<div class="text-[11px] ink-3 mt-0.5">${sub}</div>` : ''}</div>`;
+    const match = (e) => {
+      const q = S.bd.q.toLowerCase();
+      if (q && !`${e.nama} ${e.nip} ${e.jabatan} ${e.waPhone}`.toLowerCase().includes(q)) return false;
+      return { upcoming: e.next && e.next.days <= 30, today: e.next?.days === 0, month: e.birth.slice(5, 7) === month, all: true, off: !e.notify, nophone: !e.waPhone, nobirth: !e.birth }[S.bd.filter];
+    };
+    const rows = list.filter(match);
+    const todays = list.filter((e) => e.next?.days === 0);
+    el.innerHTML = `<div class="space-y-4">
+      ${d.directoryError ? `<div class="card p-3 text-[13px]" style="background:var(--warn-soft);border-color:transparent">Data pegawai tidak dapat diperbarui (${esc(d.directoryError)}). Memakai salinan terakhir${d.directoryAt ? ' ' + esc(fmtDT(d.directoryAt)) : ''}.</div>` : ''}
+      <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        ${tile('Ulang tahun hari ini', fmtNum(todays.length), todays.length ? `${fmtNum(todays.filter((e) => e.sentAt === d.today).length)} sudah diucapkan` : 'tidak ada')}
+        ${tile('7 hari ke depan', fmtNum(n((e) => e.next && e.next.days > 0 && e.next.days <= 7)))}
+        ${tile('Bulan ini', fmtNum(n((e) => e.birth.slice(5, 7) === month)), esc(bdDay(d.today, { month: 'long' })))}
+        ${tile('Pegawai', fmtNum(list.length), `${fmtNum(n((e) => !e.birth))} tanggal lahir tidak terbaca dari NIP`)}
+      </div>
+      <section class="card">
+        <div class="flex flex-wrap items-center gap-2 p-3 border-b bd">
+          <input class="input h-8 text-xs flex-1 min-w-[12rem]" id="bd-q" placeholder="Cari nama, NIP, jabatan, nomor…" value="${esc(S.bd.q)}">
+          <select class="select h-8 text-xs w-52" id="bd-filter" aria-label="Filter">${Object.entries(BD_FILTERS).map(([k, l]) => `<option value="${k}" ${S.bd.filter === k ? 'selected' : ''}>${l}</option>`).join('')}</select>
+          <button class="btn btn-sm" id="bd-all-on" title="Nyalakan ucapan untuk semua pegawai">${ICON.bell}<span>Semua aktif</span></button>
+          <button class="btn btn-sm" id="bd-all-off" title="Matikan ucapan untuk semua pegawai">${ICON.bellOff}<span>Semua mati</span></button>
+          <button class="btn btn-sm btn-icon" id="bd-refresh" title="Muat ulang data pegawai" aria-label="Muat ulang">${ICON.refresh}</button>
+        </div>
+        <div class="overflow-x-auto"><table class="tbl"><thead><tr><th>Pegawai</th><th>Tanggal lahir</th><th>Ulang tahun</th><th>WhatsApp</th><th>Diucapkan</th><th class="text-center">Ucapan</th><th class="text-right">Kirim</th></tr></thead><tbody>
+        ${rows.map((e) => `<tr>
+          <td class="min-w-[14rem]"><div class="font-medium">${esc(e.nama)}</div><div class="text-[11px] ink-3">${e.jabatan ? esc(e.jabatan) + ' · ' : ''}<span class="mono">${esc(e.nip)}</span></div></td>
+          <td class="whitespace-nowrap text-xs">${e.birth ? esc(bdDay(e.birth, { day: 'numeric', month: 'long', year: 'numeric' })) : '<span class="danger-ink" title="8 digit awal NIP bukan tanggal yang valid">Tidak terbaca</span>'}</td>
+          <td class="whitespace-nowrap text-xs">${bdWhen(e.next)}</td>
+          <td class="whitespace-nowrap"><button class="btn btn-ghost btn-sm" data-bd-phone="${esc(e.nip)}" title="Ubah nomor WhatsApp">${e.waPhone ? `<span class="mono">+${esc(e.waPhone)}</span>` : '<span class="danger-ink">Belum ada</span>'}${e.phoneOverride ? ' <span class="badge">manual</span>' : e.attPhone ? ' <span class="badge" title="Nomor pengganti dari Pengingat absensi">absensi</span>' : ''}<span class="w-3.5 h-3.5 block ink-3">${ICON.edit}</span></button></td>
+          <td class="whitespace-nowrap text-xs">${e.sentAt && e.sentAt.slice(0, 4) === d.today.slice(0, 4) ? `<span class="badge badge-green">${esc(bdDay(e.sentAt))}</span>` : '<span class="ink-3">—</span>'}</td>
+          <td class="text-center"><label class="switch ${e.notify ? 'on' : ''}" title="Ucapan otomatis"><input type="checkbox" class="sr-only" data-bd-notify="${esc(e.nip)}" ${e.notify ? 'checked' : ''} role="switch" aria-label="Ucapan otomatis ${esc(e.nama)}"><span></span></label></td>
+          <td class="text-right"><button class="btn btn-sm btn-icon" data-bd-one="${esc(e.nip)}" ${e.waPhone ? '' : 'disabled'} title="Kirim ucapan sekarang" aria-label="Kirim ucapan ke ${esc(e.nama)}">${ICON.send}</button></td>
+        </tr>`).join('') || `<tr><td colspan="7" class="empty">${list.length ? 'Tidak ada pegawai yang cocok.' : 'Belum ada data pegawai.'}</td></tr>`}
+        </tbody></table></div>
+        <div class="px-3 py-2 border-t bd text-[11px] ink-3">Tanggal lahir dibaca dari 8 digit awal NIP. Data pegawai diperbarui ${d.directoryAt ? esc(fmtDT(d.directoryAt)) : '—'}. Ucapan terjadwal hanya dikirim ke pegawai dengan sakelar Ucapan aktif.</div>
+      </section></div>`;
+    let qt;
+    $('#bd-q').addEventListener('input', (ev) => { clearTimeout(qt); qt = setTimeout(() => { S.bd.q = ev.target.value; bdEmployees(); $('#bd-q').focus(); $('#bd-q').setSelectionRange(S.bd.q.length, S.bd.q.length); }, 250); });
+    $('#bd-filter').addEventListener('change', (ev) => { S.bd.filter = ev.target.value; bdEmployees(); });
+    $('#bd-refresh').addEventListener('click', () => bdEmployees(true));
+    [['#bd-all-on', true], ['#bd-all-off', false]].forEach(([id, on]) => $(id).addEventListener('click', async (ev) => {
+      if (!await confirmBox(on ? 'Nyalakan ucapan ulang tahun otomatis untuk semua pegawai?' : 'Matikan ucapan ulang tahun otomatis untuk semua pegawai?', on ? 'Nyalakan semua' : 'Matikan semua', !on)) return;
+      busy(ev.currentTarget, async () => { await api('POST', '/api/addons/birthday/employees/notify-all', { notify: on }); toast('Pengaturan ucapan diperbarui.'); bdEmployees(false); });
+    }));
+    $('[data-bd-notify]', el).forEach((i) => i.addEventListener('change', async () => {
+      const e = list.find((x) => x.nip === i.dataset.bdNotify);
+      i.closest('.switch').classList.toggle('on', i.checked);
+      try { const r = await api('PUT', `/api/addons/birthday/employees/${e.nip}`, { notify: i.checked }); e.notify = r.notify; }
+      catch (err) { i.checked = !i.checked; i.closest('.switch').classList.toggle('on', i.checked); fail(err); }
+    }));
+    $('[data-bd-phone]', el).forEach((b) => b.addEventListener('click', () => bdPhoneModal(list.find((x) => x.nip === b.dataset.bdPhone))));
+    $('[data-bd-one]', el).forEach((b) => b.addEventListener('click', () => bdSendModal([b.dataset.bdOne])));
+  }
+
+  function bdPhoneModal(e) {
+    modal('Nomor WhatsApp pegawai', `<form id="bd-ph" class="space-y-3">
+      <div><div class="font-medium">${esc(e.nama)}</div><div class="text-xs ink-3 mono">${esc(e.nip)}</div></div>
+      <div><label class="label">Nomor dari data pegawai</label><div class="mono text-xs">${e.phone ? '+' + esc(e.phone) : '<span class="ink-3">Tidak ada</span>'}</div></div>
+      ${e.attPhone ? `<div><label class="label">Nomor pengganti di Pengingat absensi</label><div class="mono text-xs">+${esc(e.attPhone)}</div></div>` : ''}
+      <div><label class="label">Nomor WhatsApp pengganti (opsional)</label><input class="input mono" name="phone" inputmode="tel" value="${esc(e.phoneOverride)}" placeholder="08xxxxxxxxxx atau 628xxxxxxxxxx"><p class="hint">Kosongkan untuk memakai nomor ${e.attPhone ? 'pengganti dari Pengingat absensi' : 'dari data pegawai'}.</p></div>
+    </form>`, { footer: '<button class="btn" data-act="modal-close">Batal</button><button class="btn btn-primary" form="bd-ph" type="submit">Simpan</button>' });
+    $('#bd-ph').addEventListener('submit', (ev) => { ev.preventDefault(); busy(ev.submitter, async () => {
+      const r = await api('PUT', `/api/addons/birthday/employees/${e.nip}`, { phone: ev.target.phone.value });
+      e.phoneOverride = r.phoneOverride; e.waPhone = r.phoneOverride || e.attPhone || e.phone;
+      closeModal(); toast('Nomor disimpan.'); bdEmployees();
+    }); });
+  }
+
+  // Kirim manual: tanpa `only` → pegawai yang berulang tahun hari ini; dengan `only` → pegawai tertentu (kapan saja, mis. ucapan susulan)
+  async function bdSendModal(only) {
+    modal('Kirim ucapan ulang tahun', '<div class="text-xs ink-3">Mengambil data pegawai…</div>', { wide: true });
+    let d; try { d = await bdLoadEmployees(); } catch (e) { $('#modal-body').innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+    if (!$('#modal-body')) return;
+    const list = d.employees.filter((e) => (only ? only.includes(e.nip) : e.next?.days === 0));
+    const pre = (e) => !!e.waPhone && (only ? true : e.notify && e.sentAt !== d.today);
+    const smart = S.bd.cfg.routing === 'smart';
+    const body = list.length ? `<div class="space-y-3">
+      <p class="text-xs ink-3">${only ? '' : 'Terpilih otomatis: yang berulang tahun hari ini, punya nomor WA, ucapannya aktif, dan belum diucapkan. '}${smart ? 'Mode pintar: pegawai dengan jendela 24 jam terbuka menerima pesan teks, selain itu template' : 'Pesan memakai template'} <span class="mono">${esc(S.bd.cfg.template.name)}</span>.</p>
+      <div class="border rounded-lg bd divide-y max-h-[50vh] overflow-y-auto scroll-thin">${list.map((e) => `<label class="flex items-center gap-3 px-3 py-2 ${e.waPhone ? 'cursor-pointer' : 'opacity-60'}">
+        <input type="checkbox" class="check" data-bd-pick="${esc(e.nip)}" ${pre(e) ? 'checked' : ''} ${e.waPhone ? '' : 'disabled'}>
+        <div class="flex-1 min-w-0"><div class="truncate">${esc(e.nama)}</div><div class="text-[11px] ink-3">${e.waPhone ? '+' + esc(e.waPhone) : 'Tanpa nomor WA'}${e.notify ? '' : ' · ucapan otomatis mati'}${e.next && e.next.days ? ' · ulang tahun ' + esc(bdDay(e.next.date)) : ''}</div></div>
+        ${smart && e.windowOpen ? `<span class="badge badge-green" title="Jendela 24 jam terbuka sampai ${esc(fmtDT(e.windowExpiresAt))}">Teks</span>` : ''}
+        ${e.sentAt === d.today ? '<span class="badge badge-amber">Sudah diucapkan hari ini</span>' : ''}
+      </label>`).join('')}</div></div>` : '<div class="empty">Tidak ada pegawai yang berulang tahun hari ini.</div>';
+    modal('Kirim ucapan ulang tahun', body, { wide: true, footer: list.length ? '<button class="btn" data-act="modal-close">Batal</button><button class="btn btn-primary" id="bd-go"></button>' : '<button class="btn" data-act="modal-close">Tutup</button>' });
+    if (!list.length) return;
+    const picks = () => $('[data-bd-pick]').filter((x) => x.checked).map((x) => x.dataset.bdPick);
+    const upd = () => { const k = picks().length; $('#bd-go').innerHTML = `${ICON.send}<span>Kirim ke ${k} pegawai</span>`; $('#bd-go').disabled = !k; };
+    $('[data-bd-pick]').forEach((x) => x.addEventListener('change', upd)); upd();
+    $('#bd-go').addEventListener('click', (ev) => busy(ev.currentTarget, async () => {
+      const run = await api('POST', '/api/addons/birthday/send', { nips: picks() });
+      toast(`Mengirim ucapan ke ${run.items.filter((i) => i.status === 'pending').length} pegawai…`);
+      bdRunModal(run.id);
+    }));
+  }
+
+  const bdTrigger = (r) => (r.trigger === 'auto' ? 'Terjadwal' : `Manual · ${esc(r.userName)}`);
+  async function bdRunModal(id) {
+    let r; try { r = await api('GET', `/api/addons/birthday/runs/${id}`); } catch (e) { fail(e); return; }
+    const counts = `<span class="badge badge-green">${r.sent} terkirim</span> ${r.viaText ? `<span class="badge">${r.viaText} via teks · ${r.sent - r.viaText} via template</span>` : ''} ${r.failed ? `<span class="badge badge-red">${r.failed} gagal</span>` : ''} ${r.skipped ? `<span class="badge">${r.skipped} dilewati</span>` : ''}`;
+    modal(`Ucapan ulang tahun · ${fmtDT(r.at)}`, `<div class="space-y-3" data-bd-run="${esc(r.id)}">
+      <div class="flex flex-wrap items-center gap-2 text-xs">${attRunStatus(r)}<span class="ink-3">${bdTrigger(r)}</span><span class="flex-1"></span>${counts}</div>
+      ${r.error ? `<p class="text-[13px] danger-ink">${esc(r.error)}</p>` : ''}
+      ${r.items.length ? `<div class="overflow-x-auto"><table class="tbl"><thead><tr><th>Pegawai</th><th>Nomor</th><th>Status</th><th>Jalur</th><th>Keterangan</th></tr></thead><tbody>
+        ${r.items.map((i) => `<tr><td>${esc(i.nama)}${i.usia ? ` <span class="ink-3 text-xs">· ${esc(i.usia)} th</span>` : ''}</td><td class="mono text-xs whitespace-nowrap">${i.phone ? '+' + esc(i.phone) : '—'}</td><td>${statusBadge(i.status)}</td><td class="text-xs">${i.via === 'text' ? 'Teks' : i.via === 'template' ? 'Template' : '<span class="ink-3">—</span>'}</td><td class="text-xs ${i.status === 'failed' ? 'danger-ink' : 'ink-3'}">${esc(i.detail) || (i.at ? esc(fmtTime(i.at)) : '')}</td></tr>`).join('')}
+      </tbody></table></div>` : '<div class="empty">Tidak ada pesan yang dikirim.</div>'}
+    </div>`, { wide: true, footer: '<button class="btn" data-act="modal-close">Tutup</button>' });
+  }
+  let bdRunTimer;
+  function bdRunUpdate(r) {
+    if (S.view !== 'birthday' || !S.bd?.cfg) return;
+    const runs = S.bd.cfg.runs, i = runs.findIndex((x) => x.id === r.id);
+    if (i >= 0) runs[i] = r; else runs.unshift(r);
+    clearTimeout(bdRunTimer);
+    bdRunTimer = setTimeout(() => {
+      if ($(`[data-bd-run="${r.id}"]`)) bdRunModal(r.id);
+      if (S.bd.tab === 'history' && $('#bd-body')) bdHistory();
+      if (r.status === 'done' && S.bd.tab === 'employees' && $('#bd-body') && !$('#modal-root').innerHTML) bdEmployees(false);
+    }, 400);
+  }
+  function bdHistory() {
+    const el = $('#bd-body'), runs = S.bd.cfg.runs;
+    el.innerHTML = `<section class="card"><div class="overflow-x-auto"><table class="tbl"><thead><tr><th>Waktu</th><th>Pemicu</th><th>Status</th><th class="text-right">Terkirim</th><th class="text-right">Gagal</th><th class="text-right">Dilewati</th></tr></thead><tbody>
+      ${runs.map((r) => `<tr class="cursor-pointer" data-bd-open="${esc(r.id)}"><td class="whitespace-nowrap">${esc(fmtDT(r.at))}</td><td class="text-xs">${bdTrigger(r)}</td><td>${attRunStatus(r)}${r.error ? `<div class="text-[11px] danger-ink max-w-[18rem] truncate" title="${esc(r.error)}">${esc(r.error)}</div>` : ''}</td><td class="text-right">${fmtNum(r.sent)}</td><td class="text-right ${r.failed ? 'danger-ink' : ''}">${fmtNum(r.failed)}</td><td class="text-right">${fmtNum(r.skipped)}</td></tr>`).join('')
+        || '<tr><td colspan="6" class="empty">Belum ada pengiriman.</td></tr>'}
+    </tbody></table></div><div class="px-3 py-2 border-t bd text-[11px] ink-3">Menampilkan 30 pengiriman terakhir. Hari tanpa pegawai yang berulang tahun tidak dicatat. Status pesan (terkirim/dibaca) ada di Log pesan dengan sumber "Ulang tahun".</div></section>`;
+    $('[data-bd-open]', el).forEach((tr) => tr.addEventListener('click', () => bdRunModal(tr.dataset.bdOpen)));
+  }
+
+  function bdSettings() {
+    const el = $('#bd-body'), c = S.bd.cfg;
+    const f = { template: { ...c.template, header: [...c.template.header], body: [...c.template.body] } };
+    const tplOf = () => c.templates.find((t) => t.name === f.template.name && (!f.template.language || t.language === f.template.language)) || null;
+    const varHelp = Object.entries(c.vars).map(([k, l]) => `<span class="kbd" title="${esc(l)}">{{${k}}}</span>`).join(' ');
+    const renderTpl = () => {
+      const t = tplOf(), box = $('#bd-tpl-vars');
+      const names = [...new Set(c.templates.map((x) => x.name))];
+      $('#bd-tpl-lang').innerHTML = `<option value="">Otomatis</option>${c.templates.filter((x) => x.name === f.template.name).map((x) => `<option value="${esc(x.language)}" ${x.language === f.template.language ? 'selected' : ''}>${esc(x.language)}${x.status !== 'APPROVED' ? ' (' + esc(x.status) + ')' : ''}</option>`).join('')}`;
+      $('#bd-tpl-name').innerHTML = (names.includes(f.template.name) ? names : [f.template.name, ...names]).map((x) => `<option ${x === f.template.name ? 'selected' : ''}>${esc(x)}</option>`).join('');
+      if (!t) { box.innerHTML = '<p class="text-xs danger-ink">Template ini belum ada di daftar template (belum disetujui atau belum disinkronkan).</p>'; return; }
+      const field = (part, i, name) => `<div><label class="label">${part === 'header' ? 'Judul' : 'Isi'} · <span class="mono">{{${esc(name)}}}</span></label><input class="input text-xs mono" data-tv="${part}" data-i="${i}" value="${esc(f.template[part][i] || '')}" placeholder="${esc(t.defaults[part][i])}"></div>`;
+      box.innerHTML = `<div class="rounded-lg p-3 text-xs space-y-1" style="background:var(--surface-2)">${t.header ? `<div class="font-semibold">${esc(t.header)}</div>` : ''}<div class="whitespace-pre-wrap">${esc(t.body)}</div><div class="ink-3 pt-1">${esc(t.language)} · ${esc(t.category || '')} · ${esc(t.status)}</div></div>
+        ${t.vars.header.length + t.vars.body.length ? `<div class="grid sm:grid-cols-2 gap-3">${t.vars.header.map((n, i) => field('header', i, n)).join('')}${t.vars.body.map((n, i) => field('body', i, n)).join('')}</div>
+        <p class="hint">Kosongkan untuk memakai isian bawaan (abu-abu). Variabel yang tersedia: ${varHelp}</p>` : '<p class="hint">Template ini tidak memiliki variabel.</p>'}`;
+      $('[data-tv]', box).forEach((i) => i.addEventListener('input', () => { f.template[i.dataset.tv][+i.dataset.i] = i.value; }));
+    };
+    el.innerHTML = `<form id="bd-form" class="grid lg:grid-cols-5 gap-4">
+      <div class="lg:col-span-3 space-y-4">
+        <section class="card"><div class="card-h"><div class="card-t">Jadwal kirim otomatis</div>
+          <label class="switch ${c.schedule.enabled ? 'on' : ''}"><input type="checkbox" class="sr-only" name="schedOn" ${c.schedule.enabled ? 'checked' : ''} role="switch" aria-label="Aktifkan jadwal"><span></span></label></div>
+          <div class="p-4 space-y-2">
+            <div class="flex flex-wrap items-center gap-3"><label class="text-xs" for="bd-time">Setiap hari pukul</label><input type="time" class="input h-8 text-xs w-28" id="bd-time" name="time" value="${esc(c.schedule.time)}" required></div>
+            <p class="hint">Dikirim ke pegawai yang berulang tahun hari itu, termasuk akhir pekan & hari libur. Jam mengikuti zona waktu ${esc(c.timezone)}. Bila server mati pada jam tersebut, ucapan dikirim saat server menyala lagi di hari yang sama.</p>
+          </div></section>
+        <section class="card"><div class="card-h"><div class="card-t">Cara kirim</div></div><div class="p-4 space-y-3">
+          <div><label class="label">Jalur pengiriman</label><select class="select" name="routing">${Object.entries(c.routingOptions).map(([k, l]) => `<option value="${k}" ${c.routing === k ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>
+            <p class="hint">Pintar: bila pegawai mengirim/membalas pesan ke nomor ini dalam 24 jam terakhir, ucapan dikirim sebagai pesan teks biasa; selain itu memakai template di bawah (WhatsApp mewajibkan template di luar jendela 24 jam).</p></div>
+          <div id="bd-text-box"><label class="label">Isi pesan teks</label><textarea class="input text-xs" name="text" rows="5" maxlength="4096">${esc(c.text)}</textarea>
+            <p class="hint">Variabel: ${varHelp}. Format WhatsApp: *tebal*, _miring_.</p></div>
+        </div></section>
+        <section class="card"><div class="card-h"><div class="card-t">Template pesan</div></div><div class="p-4 space-y-3">
+          <div class="grid sm:grid-cols-3 gap-3">
+            <div class="sm:col-span-2"><label class="label" for="bd-tpl-name">Nama template</label><select class="select" id="bd-tpl-name"></select></div>
+            <div><label class="label" for="bd-tpl-lang">Bahasa</label><select class="select" id="bd-tpl-lang"></select></div>
+          </div>
+          <div id="bd-tpl-vars" class="space-y-3"></div>
+          <p class="hint">Contoh isi template: <i>Selamat ulang tahun yang ke-{{2}}, {{1}}! Semoga sehat selalu dan semakin sukses.</i> Meta biasanya menggolongkan ucapan ulang tahun sebagai kategori Marketing.</p>
+        </div></section>
+      </div>
+      <div class="lg:col-span-2 space-y-4">
+        <section class="card"><div class="card-h"><div class="card-t">Pegawai</div></div><div class="p-4 space-y-3">
+          <label class="flex items-start gap-3"><span class="switch ${c.defaultNotify ? 'on' : ''}"><input type="checkbox" class="sr-only" name="defaultNotify" ${c.defaultNotify ? 'checked' : ''} role="switch" aria-label="Ucapan aktif untuk pegawai baru"><span></span></span><span class="text-xs"><span class="font-medium block text-[13px]">Pegawai baru otomatis menerima ucapan</span><span class="ink-3">Berlaku untuk pegawai yang belum pernah diatur. Atur per pegawai di tab Pegawai.</span></span></label>
+        </div></section>
+        <section class="card"><div class="card-h"><div class="card-t">Sumber data</div></div><div class="p-4 space-y-3">
+          <div><label class="label" for="bd-url">URL data pegawai</label><input class="input mono text-xs" id="bd-url" name="pegawaiUrl" value="${esc(c.pegawaiUrl)}" required></div>
+          <p class="hint">${fmtNum(c.directoryCount)} pegawai tersimpan${c.directoryAt ? ', diperbarui ' + esc(fmtDT(c.directoryAt)) : ''}. Hanya NIP, nama, jabatan, dan nomor HP yang disimpan; tanggal lahir dihitung dari NIP.</p>
+          ${c.directoryError ? `<p class="text-xs danger-ink">${esc(c.directoryError)}</p>` : ''}
+          <button type="button" class="btn btn-sm w-full" id="bd-dir-refresh">${ICON.refresh}<span>Muat ulang data pegawai</span></button>
+        </div></section>
+      </div>
+      <div class="lg:col-span-5 flex flex-wrap justify-end gap-2"><a class="btn" href="#/settings/addons">Kelola add-on</a><button class="btn btn-primary" type="submit">Simpan pengaturan</button></div>
+    </form>`;
+    const fm = $('#bd-form');
+    const syncRouting = () => $('#bd-text-box').classList.toggle('hidden', fm.routing.value !== 'smart');
+    fm.routing.addEventListener('change', syncRouting); syncRouting();
+    renderTpl();
+    $('#bd-tpl-name').addEventListener('change', (ev) => { f.template = { name: ev.target.value, language: '', header: [], body: [] }; renderTpl(); });
+    $('#bd-tpl-lang').addEventListener('change', (ev) => { f.template.language = ev.target.value; renderTpl(); });
+    $('#bd-form .switch input').forEach((i) => i.addEventListener('change', () => i.closest('.switch').classList.toggle('on', i.checked)));
+    $('#bd-dir-refresh').addEventListener('click', (ev) => busy(ev.currentTarget, async () => {
+      const d = await bdLoadEmployees(true);
+      if (d.directoryError) throw new Error(d.directoryError);
+      toast(`Data pegawai diperbarui (${d.employees.length} pegawai).`);
+      viewBirthday('settings');
+    }));
+    fm.addEventListener('submit', (ev) => { ev.preventDefault(); busy(ev.submitter, async () => {
+      S.bd.cfg = await api('PUT', '/api/addons/birthday/config', {
+        pegawaiUrl: fm.pegawaiUrl.value, defaultNotify: fm.defaultNotify.checked, schedule: { enabled: fm.schedOn.checked, time: fm.time.value },
+        routing: fm.routing.value, text: fm.text.value, template: f.template,
+      });
+      S.bd.emp = null; toast('Pengaturan disimpan.'); viewBirthday('settings');
+    }); });
+  }
+
   function viewSettings(tab) {
     const tabs = [S.isAdmin && ['meta', 'Koneksi Meta'], S.isAdmin && ['team', 'Tim CS'], S.isAdmin && ['gateway', 'Gateway WA'], S.isAdmin && ['addons', 'Add-on'], ['security', 'Notifikasi & keamanan'], S.isAdmin && ['audit', 'Audit log']].filter(Boolean);
     const cur = tabs.some((t) => t[0] === tab) ? tab : tabs[0][0];
@@ -6391,9 +6641,10 @@
   socket.on('notice', (n) => toast(n.text, n.level === 'error'));
   socket.on('addons:update', (a) => {
     S.addons = a;
-    if (S.view === 'attendance' && !a.attendance?.enabled) route(); else renderNav();
+    if (['attendance', 'birthday'].includes(S.view) && !a[S.view]?.enabled) route(); else renderNav();
   });
   socket.on('attendance:run', attRunUpdate);
+  socket.on('birthday:run', bdRunUpdate);
   socket.on('call:incoming', showIncomingCall);
   socket.on('call:answer', applyAnswer);
   socket.on('call:update', (c) => {

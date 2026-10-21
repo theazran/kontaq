@@ -258,6 +258,20 @@ Mengirim template WhatsApp (bawaan `pengingat_absen`) ke pegawai yang **belum pr
 - **Kirim manual:** pilih pegawai yang belum presensi (data presensi diambil ulang), lalu kirim. Riwayat tiap pengiriman (terkirim/gagal/dilewati)
   ada di tab **Riwayat kirim**, dan setiap pesan di Log pesan (sumber "Pengingat absensi"). Kontak baru diberi label `Pegawai`.
 
+### Ulang tahun pegawai
+
+Kirim ucapan selamat ulang tahun via WhatsApp ke pegawai setiap hari pada jam yang diatur (bawaan 07.30, termasuk akhir pekan).
+
+- **Tanggal lahir** dibaca dari 8 digit awal NIP (YYYYMMDD). Lahir 29 Februari diucapkan 28 Februari pada tahun bukan kabisat.
+- **Data pegawai** (nama, jabatan, nomor) diambil dari URL data pegawai yang sama dengan Pengingat absensi, tetapi add-on ini
+  berdiri sendiri. Nomor pengganti diatur per pegawai; bila kosong, nomor pengganti dari Pengingat absensi (jika terpasang) dipakai.
+- **Jalur kirim** sama dengan Pengingat absensi: mode pintar mengirim teks biasa bila jendela 24 jam terbuka, selain itu template
+  (bawaan `ucapan_ulang_tahun`, variabel `{{nama}}`, `{{usia}}`, `{{jabatan}}`, `{{nip}}`, `{{tanggal}}`).
+- Ucapan otomatis bisa dimatikan per pegawai. Jadwal yang terlewat karena server mati dijalankan saat server menyala lagi di hari
+  yang sama. Memasang add-on atau mengubah jam setelah jam kirim tidak langsung mengirim — gunakan **Kirim ucapan hari ini**.
+- Tab **Pegawai** menampilkan ulang tahun mendatang (hari ini, 7 hari, bulan ini); tiap pegawai bisa dikirimi ucapan manual kapan saja
+  (mis. ucapan susulan). Riwayat ada di tab **Riwayat kirim** dan Log pesan (sumber "Ulang tahun").
+
 ## Pemakaian di HP
 
 Buka Kontaq di browser HP (Chrome/Safari) lewat **HTTPS**. Mikrofon untuk panggilan hanya diizinkan lewat HTTPS.

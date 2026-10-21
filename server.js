@@ -3482,7 +3482,7 @@ app.put('/api/costs/settings', requireAdmin, wrap(async (req, res) => {
   res.json(cfg.settings);
 }));
 /* Log pesan API (admin): semua pesan keluar via Cloud API + status pengiriman dari webhook */
-const LOG_SOURCES = { inbox: 'Dashboard', campaign: 'Campaign', auto_reply: 'Auto reply', flow: 'Flow otomatis', group: 'Grup', csat: 'Survei CSAT', reminder: 'Pengingat', attendance: 'Pengingat absensi', external: 'Di luar Kontaq' };
+const LOG_SOURCES = { inbox: 'Dashboard', campaign: 'Campaign', auto_reply: 'Auto reply', flow: 'Flow otomatis', group: 'Grup', csat: 'Survei CSAT', reminder: 'Pengingat', attendance: 'Pengingat absensi', birthday: 'Ulang tahun', external: 'Di luar Kontaq' };
 function logRow(e) {
   const msg = e.wamid ? idx.wamid.get(e.wamid) : null;
   const contact = e.contactId ? byId('contacts', e.contactId) : idx.contactByPhone.get(e.to);
@@ -4488,12 +4488,14 @@ app.delete('/api/reminders/:id', wrap(async (req, res) => {
  * Fitur opsional yang dipasang, dinonaktifkan, atau dihapus dari Pengaturan › Add-on. Data tiap add-on ada di db.addons[id];
  * menonaktifkan menghentikan add-on tanpa menghapus pengaturan, menghapus membuang seluruh pengaturan & riwayatnya.
  *
+ * birthday — Ulang tahun pegawai: lihat bagian 7e.
  * attendance — Pengingat absensi: pada jam yang diatur, ambil presensi hari ini (SIKEP) lalu kirim template WhatsApp ke pegawai
  *   yang belum presensi datang/pulang. Nomor WA diambil dari data pegawai (dicocokkan lewat NIP) dan dapat diganti per pegawai.
  *   Notifikasi dapat dimatikan per pegawai. Jadwal yang terlewat > 60 menit (mis. server mati) tidak dikirim.
  */
 const ADDON_CATALOG = {
   attendance: { name: 'Pengingat absensi', description: 'Kirim pengingat WhatsApp ke pegawai yang belum presensi datang atau pulang, terjadwal atau manual. Data dari API presensi SIKEP & data pegawai.', icon: 'clock' },
+  birthday: { name: 'Ulang tahun pegawai', description: 'Kirim ucapan selamat ulang tahun via WhatsApp ke pegawai setiap pagi. Tanggal lahir dibaca dari NIP, nama & nomor dari data pegawai.', icon: 'cake' },
 };
 const addonStates = () => Object.fromEntries(Object.keys(ADDON_CATALOG).map((id) => [id, { installed: !!db.addons[id], enabled: !!db.addons[id]?.enabled }]));
 const emitAddons = () => io?.to('admins').emit('addons:update', addonStates());
@@ -4562,8 +4564,9 @@ async function attFetch(url, label) {
     throw new HttpError(502, `${label}: ${e.response ? 'HTTP ' + e.response.status : e instanceof SyntaxError ? 'respons bukan JSON' : e.message}`);
   }
 }
-// Data pegawai: hanya NIP, nama, jabatan, dan nomor HP yang disimpan (data pribadi lain diabaikan)
-async function attRefreshDirectory(st) {
+// Data pegawai: hanya NIP, nama, jabatan, dan nomor HP yang disimpan (data pribadi lain diabaikan).
+// Dipakai Pengingat absensi & Ulang tahun pegawai; owner = getter add-on pemilik st (hasil dibuang bila add-on dihapus saat mengambil).
+async function refreshPegawai(st, owner) {
   try {
     const d = await attFetch(st.pegawaiUrl, 'Data pegawai');
     if (!Array.isArray(d)) throw new HttpError(502, 'Data pegawai: format tidak dikenal (harus berupa array).');
@@ -4571,7 +4574,7 @@ async function attRefreshDirectory(st) {
       const b = p?.biodata || {};
       return { nip: attNip(b['NIP/NRP'] || p?.summary?.name), nama: str(b['Nama Lengkap'], 200), jabatan: str(p?.pekerjaan?.jabatan?.[0]?.Jabatan, 200), phone: attPhone(b['Nomor Handphone']) || attPhone(b['Nomor Telepon']) };
     }).filter((p) => p.nip);
-    if (att() !== st) return st.directory;
+    if (owner() !== st) return st.directory;
     Object.assign(st, { directory: list, directoryAt: now(), directoryError: '' }); save();
     return list;
   } catch (e) {
@@ -4580,7 +4583,7 @@ async function attRefreshDirectory(st) {
     return st.directory; // pakai salinan terakhir bila sumber sedang tidak dapat diakses
   }
 }
-const attDirectory = async (st, force) => (force || !st.directory.length || now() - st.directoryAt > ATT_DIR_TTL_MS ? attRefreshDirectory(st) : st.directory);
+const attDirectory = async (st, force) => (force || !st.directory.length || now() - st.directoryAt > ATT_DIR_TTL_MS ? refreshPegawai(st, att) : st.directory);
 
 async function attAbsensi(st) {
   const d = await attFetch(st.absensiUrl, 'API presensi');
@@ -4844,7 +4847,228 @@ function attConfigPublic(st) {
   };
 }
 
+/* ───────────────────────── 7e. Add-on: Ulang tahun pegawai ─────────────────────────
+ * Tiap hari pada jam yang diatur, kirim ucapan WhatsApp ke pegawai yang berulang tahun hari ini. Tanggal lahir dibaca dari NIP
+ * (8 digit pertama = YYYYMMDD); nama & nomor dari data pegawai (sumber sama dengan Pengingat absensi, diambil sendiri).
+ * Nomor pengganti diatur per pegawai; bila kosong, nomor pengganti di Pengingat absensi (jika terpasang) ikut dipakai.
+ * Lahir 29 Februari diucapkan 28 Februari pada tahun bukan kabisat. Jalur kirim sama dengan Pengingat absensi: teks biasa
+ * bila jendela 24 jam terbuka (mode pintar), selain itu template. Pengiriman otomatis sekali per pegawai per hari.
+ */
+const BD_VARS = { nama: 'Nama pegawai', usia: 'Usia (tahun)', jabatan: 'Jabatan', nip: 'NIP', tanggal: 'Tanggal hari ini' };
+const BD_DEFAULT_TEXT = '*SELAMAT ULANG TAHUN* 🎉\nHalo {{nama}}, selamat ulang tahun yang ke-{{usia}}! Semoga selalu sehat, bahagia, dan semakin sukses dalam tugas. 🎂';
+const BD_RUNS_KEEP = 60;
+const BD_RETRY_MS = 10 * 60000;
+function bdDefaults() {
+  return {
+    installedAt: now(), enabled: true,
+    pegawaiUrl: 'https://pegawai.pnblk.my.id/data_pegawai.json',
+    schedule: { enabled: true, time: '07:30' },
+    routing: 'smart', text: BD_DEFAULT_TEXT,
+    template: { name: 'ucapan_ulang_tahun', language: '', header: [], body: [] },
+    defaultNotify: true,
+    employees: {}, // nip → { notify?, phone? }
+    directory: [], directoryAt: 0, directoryError: '',
+    lastDate: '', // YYYY-MM-DD jadwal terakhir dijalankan
+    sent: {}, // nip → YYYY-MM-DD ucapan terakhir terkirim
+    runs: [],
+  };
+}
+const bd = () => db.addons.birthday;
+function bdOr404() {
+  const st = bd();
+  if (!st) throw new HttpError(404, 'Add-on Ulang tahun pegawai belum dipasang.');
+  return st;
+}
+// NIP PNS: 8 digit pertama = tanggal lahir (YYYYMMDD)
+function nipBirth(nip) {
+  const m = /^(\d{4})(\d{2})(\d{2})\d{10}$/.exec(nip || '');
+  if (!m) return null;
+  const [y, mo, d] = [+m[1], +m[2], +m[3]], dt = new Date(Date.UTC(y, mo - 1, d));
+  if (y < 1940 || dt.getUTCMonth() !== mo - 1 || dt.getUTCDate() !== d) return null;
+  return { y, m: mo, d, ymd: `${m[1]}-${m[2]}-${m[3]}` };
+}
+const isLeap = (y) => (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
+const bdOn = (b, year) => `${year}-${String(b.m).padStart(2, '0')}-${String(b.m === 2 && b.d === 29 && !isLeap(year) ? 28 : b.d).padStart(2, '0')}`;
+// Ulang tahun berikutnya (hari ini atau setelahnya)
+function bdNext(b, today) {
+  const y = +today.slice(0, 4);
+  let on = bdOn(b, y);
+  if (on < today) on = bdOn(b, y + 1);
+  return { date: on, age: +on.slice(0, 4) - b.y, days: Math.round((ymdDate(on) - ymdDate(today)) / 86400000) };
+}
+const bdRouting = (st) => (ATT_ROUTING[st.routing] ? st.routing : 'smart');
+const bdFill = (v, ctx) => String(v || '').replace(/\{\{\s*(nama|usia|jabatan|nip|tanggal)\s*\}\}/g, (_, k) => ctx[k] ?? '');
+// Isian variabel template; yang kosong memakai bawaan menurut posisi (judul: nama; isi: nama, usia, jabatan)
+function bdTemplateValues(st, tpl) {
+  const v = attTemplateVars(tpl), def = ['{{nama}}', '{{usia}}', '{{jabatan}}'];
+  return { header: v.header.map((_, i) => st.template.header[i] || '{{nama}}'), body: v.body.map((_, i) => st.template.body[i] || def[i] || '{{nama}}') };
+}
+const bdDirectory = async (st, force) => (force || !st.directory.length || now() - st.directoryAt > ATT_DIR_TTL_MS ? refreshPegawai(st, bd) : st.directory);
+function bdPeople(st, dir, today) {
+  const attEmp = att()?.employees || {};
+  return dir.map((p) => {
+    const b = nipBirth(p.nip), e = st.employees[p.nip] || {};
+    const own = attPhone(e.phone), fromAtt = attPhone(attEmp[p.nip]?.phone);
+    return {
+      ...p, birth: b?.ymd || '', next: b ? bdNext(b, today) : null, phoneOverride: own || '', attPhone: fromAtt || '',
+      waPhone: own || fromAtt || p.phone, notify: e.notify ?? st.defaultNotify, sentAt: st.sent[p.nip] || '',
+    };
+  });
+}
+
+function bdRunPublic(r, full) {
+  const { items, ...rest } = r;
+  const count = (s) => items.filter((i) => i.status === s).length;
+  return { ...rest, total: items.length, sent: count('sent'), viaText: items.filter((i) => i.via === 'text').length, failed: count('failed'), skipped: count('skipped'), ...(full ? { items } : {}) };
+}
+const bdEmitRun = (r) => io?.to('admins').emit('birthday:run', bdRunPublic(r));
+function bdPushRun(st, r) {
+  st.runs.push(r);
+  if (st.runs.length > BD_RUNS_KEEP) st.runs.splice(0, st.runs.length - BD_RUNS_KEEP);
+  save(); bdEmitRun(r);
+}
+
+/* Siapkan pengiriman. Tanpa nips: pegawai yang berulang tahun hari ini, notifikasi aktif, belum diucapkan hari ini.
+ * nips: pilihan manual — dikirim meski notifikasinya mati, bukan hari ulang tahunnya, atau sudah diucapkan. */
+async function bdPrepare(st, nips) {
+  const smart = bdRouting(st) === 'smart';
+  const tpl = smart ? attTemplate(st, false) : attTemplate(st);
+  const usable = tpl?.status === 'APPROVED' ? tpl : null;
+  if (smart && !str(st.text, 4096)) throw new HttpError(400, 'Isi pesan teks (mode pintar) belum diisi.');
+  const today = zonedDate(flowTz());
+  const people = bdPeople(st, await bdDirectory(st), today);
+  const want = nips ? new Set(nips) : null;
+  const items = [];
+  for (const p of people) {
+    if (want ? !want.has(p.nip) : !(p.next?.days === 0 && p.notify && p.sentAt !== today)) continue;
+    const item = { nip: p.nip, nama: p.nama || p.nip, jabatan: p.jabatan, usia: p.next ? (p.next.days === 0 ? p.next.age : p.next.age - 1) : '', phone: p.waPhone || '', status: 'pending', detail: '' };
+    if (!item.phone) Object.assign(item, { status: 'skipped', detail: 'Nomor WhatsApp tidak ditemukan' });
+    else if (!usable && !(smart && attWindowOpen(item.phone))) Object.assign(item, { status: 'failed', detail: 'Jendela 24 jam tertutup dan template belum APPROVED' });
+    items.push(item);
+  }
+  if (want) for (const n of want) if (!people.some((p) => p.nip === n)) items.push({ nip: n, nama: n, phone: '', status: 'skipped', detail: 'Tidak ada di data pegawai' });
+  return { tpl: usable, values: usable ? bdTemplateValues(st, usable) : { header: [], body: [] }, items, smart };
+}
+
+let bdBusy = false;
+async function bdSend(st, run, { tpl, values, smart }) {
+  const who = 'Ulang tahun' + (run.trigger === 'manual' ? ' · ' + run.userName : '');
+  const today = zonedDate(flowTz()), tanggal = longDate(today);
+  try {
+    for (const it of run.items) {
+      if (it.status !== 'pending') continue;
+      if (bd() !== st || !st.enabled) { Object.assign(it, { status: 'skipped', detail: 'Add-on dinonaktifkan/dihapus saat pengiriman' }); continue; }
+      try {
+        const existing = idx.contactByPhone.get(it.phone);
+        const contact = getOrCreateContact(it.phone, existing ? '' : it.nama);
+        if (!existing) contact.labels = ['Pegawai'];
+        const ctx = { nama: it.nama, usia: String(it.usia), jabatan: it.jabatan || '', nip: it.nip, tanggal };
+        const conv = getOrCreateConv(contact);
+        if (smart && windowOpen(conv)) {
+          const body = bdFill(st.text, ctx).slice(0, 4096);
+          const r = await sendToMeta({ messaging_product: 'whatsapp', recipient_type: 'individual', to: contact.phone, type: 'text', text: { body, preview_url: /https?:\/\//.test(body) } },
+            { source: 'birthday', contact, conversation: conv, userName: who });
+          const msg = addMessage(conv, { direction: 'out', type: 'text', content: { body }, wamid: r.messages?.[0]?.id, status: 'accepted', userName: who, auto: 'birthday' });
+          Object.assign(it, { status: 'sent', via: 'text', wamid: msg.wamid, at: now() });
+        } else {
+          if (!tpl) throw new HttpError(400, 'Jendela 24 jam tertutup dan template belum APPROVED');
+          const msg = await sendTemplateTo(contact, tpl, { header: values.header.map((v) => bdFill(v, ctx)), body: values.body.map((v) => bdFill(v, ctx)) },
+            { userName: who, auto: 'birthday' }, { source: 'birthday', userName: who });
+          Object.assign(it, { status: 'sent', via: 'template', detail: smart ? 'Jendela 24 jam tertutup → template' : '', wamid: msg.wamid, at: now() });
+        }
+        st.sent[it.nip] = today;
+      } catch (e) {
+        Object.assign(it, { status: 'failed', detail: e.message.slice(0, 300), at: now() });
+      }
+      save(); bdEmitRun(run);
+      await new Promise((r) => setTimeout(r, Math.ceil(1000 / CAMPAIGN_RATE)));
+    }
+  } finally {
+    run.status = 'done'; run.finishedAt = now(); bdBusy = false;
+    save(); bdEmitRun(run);
+    const r = bdRunPublic(run);
+    if (r.failed) io?.to('admins').emit('notice', { level: 'warn', text: `Ucapan ulang tahun: ${r.sent} terkirim, ${r.failed} gagal.` });
+  }
+}
+
+async function bdStart(st, { trigger, user, nips } = {}) {
+  if (bdBusy) throw new HttpError(409, 'Pengiriman ucapan ulang tahun lain sedang berjalan. Tunggu hingga selesai.');
+  bdBusy = true;
+  const run = { id: uid('br_'), at: now(), date: zonedDate(flowTz()), trigger, userName: user?.name || 'Jadwal', status: 'running', items: [], error: '' };
+  let prep;
+  try { prep = await bdPrepare(st, nips); } catch (e) {
+    bdBusy = false;
+    if (trigger === 'auto') { Object.assign(run, { status: 'failed', error: e.message, finishedAt: now() }); bdPushRun(st, run); }
+    throw e;
+  }
+  // Jadwal tanpa pegawai yang berulang tahun tidak dicatat di riwayat
+  if (trigger === 'auto' && !prep.items.length) { bdBusy = false; return null; }
+  run.items = prep.items;
+  bdPushRun(st, run);
+  bdSend(st, run, prep).catch((e) => console.error('[birthday]', e.message));
+  return run;
+}
+
+// Penjadwal: cek tiap 30 dtk; jadwal yang terlewat (mis. server mati) tetap dijalankan selama masih hari yang sama.
+// Gagal mengambil data pegawai → dicoba lagi tiap 10 menit.
+let bdRetryAt = 0;
+setInterval(() => {
+  const st = bd();
+  if (!st?.enabled || !st.schedule.enabled || bdBusy || bdRetryAt > now()) return;
+  const today = zonedDate(flowTz());
+  if (st.lastDate === today || zonedNow(flowTz()).time < st.schedule.time) return;
+  bdStart(st, { trigger: 'auto' }).then(() => { st.lastDate = today; bdRetryAt = 0; save(); }).catch((e) => {
+    bdRetryAt = now() + BD_RETRY_MS;
+    console.error('[birthday]', e.message);
+    io?.to('admins').emit('notice', { level: 'error', text: `Ucapan ulang tahun gagal: ${e.message}` });
+  });
+}, 30000);
+// Jam kirim yang sudah lewat hari ini tidak langsung dijalankan saat add-on dipasang/diaktifkan atau jam diubah (kirim manual tetap bisa)
+function bdMarkPast(st) {
+  if (st.schedule.time <= zonedNow(flowTz()).time) st.lastDate = zonedDate(flowTz());
+}
+
+function bdCleanConfig(st, b) {
+  const u = str(b.pegawaiUrl, 500);
+  if (!/^https:\/\/[^\s]+$/.test(u)) throw new HttpError(400, 'URL data pegawai harus berupa URL HTTPS.');
+  const time = str(b.schedule?.time, 5);
+  if (!timeRe.test(time)) throw new HttpError(400, 'Jam kirim tidak valid (HH:MM).');
+  const name = str(b.template?.name, 512).toLowerCase();
+  if (!/^[a-z0-9_]+$/.test(name)) throw new HttpError(400, 'Nama template tidak valid.');
+  const vals = (a) => (Array.isArray(a) ? a : []).slice(0, 10).map((x) => str(x, 200));
+  const timeChanged = time !== st.schedule.time;
+  Object.assign(st, {
+    pegawaiUrl: u, schedule: { enabled: !!b.schedule?.enabled, time },
+    routing: ATT_ROUTING[b.routing] ? b.routing : 'smart', text: str(b.text, 4096) || BD_DEFAULT_TEXT,
+    template: { name, language: str(b.template?.language, 15), header: vals(b.template?.header), body: vals(b.template?.body) },
+    defaultNotify: b.defaultNotify !== false,
+  });
+  if (timeChanged && st.lastDate !== zonedDate(flowTz())) bdMarkPast(st);
+}
+function bdConfigPublic(st) {
+  const tpl = attTemplate(st, false);
+  const { employees, directory, runs, sent, ...cfg } = st;
+  const comp = (t, type) => (t.components || []).find((c) => c.type === type);
+  const today = zonedDate(flowTz());
+  return {
+    ...cfg, routing: bdRouting(st), routingOptions: ATT_ROUTING, timezone: flowTz(), today, vars: BD_VARS, busy: bdBusy,
+    doneToday: st.lastDate === today,
+    templateStatus: tpl ? { language: tpl.language, status: tpl.status, category: tpl.category } : null,
+    templates: db.templates.filter((t) => t.status === 'APPROVED' || t.name === st.template.name).map((t) => ({
+      name: t.name, language: t.language, status: t.status, category: t.category,
+      header: comp(t, 'HEADER')?.format === 'TEXT' ? comp(t, 'HEADER').text : '', body: comp(t, 'BODY')?.text || '',
+      vars: attTemplateVars(t), defaults: bdTemplateValues({ template: { header: [], body: [] } }, t),
+    })).sort((a, b) => a.name.localeCompare(b.name) || a.language.localeCompare(b.language)),
+    directoryCount: directory.length,
+    runs: runs.slice(-30).reverse().map((r) => bdRunPublic(r)),
+  };
+}
+
 /* Add-on (admin) */
+const ADDON_INIT = {
+  attendance: () => { const st = attDefaults(); attMarkPast(st); return st; },
+  birthday: () => { const st = bdDefaults(); bdMarkPast(st); return st; },
+};
 app.get('/api/addons', requireAdmin, (req, res) => {
   res.json(Object.entries(ADDON_CATALOG).map(([id, a]) => ({ id, ...a, ...addonStates()[id], installedAt: db.addons[id]?.installedAt || null })));
 });
@@ -4852,8 +5076,7 @@ app.post('/api/addons/:id/install', requireAdmin, (req, res) => {
   const a = ADDON_CATALOG[req.params.id];
   if (!a) throw new HttpError(404, 'Add-on tidak ditemukan.');
   if (db.addons[req.params.id]) throw new HttpError(400, 'Add-on sudah terpasang.');
-  db.addons[req.params.id] = attDefaults();
-  attMarkPast(db.addons[req.params.id]);
+  db.addons[req.params.id] = ADDON_INIT[req.params.id]();
   audit(req, 'addon.install', a.name); save(); emitAddons();
   res.json(addonStates());
 });
@@ -4861,7 +5084,7 @@ app.post('/api/addons/:id/:action(enable|disable)', requireAdmin, (req, res) => 
   const a = ADDON_CATALOG[req.params.id], st = db.addons[req.params.id];
   if (!a || !st) throw new HttpError(404, 'Add-on belum dipasang.');
   st.enabled = req.params.action === 'enable';
-  if (st.enabled) attMarkPast(st);
+  if (st.enabled) (req.params.id === 'birthday' ? bdMarkPast : attMarkPast)(st);
   audit(req, 'addon.' + req.params.action, a.name); save(); emitAddons();
   res.json(addonStates());
 });
@@ -4944,6 +5167,62 @@ app.get('/api/addons/attendance/runs/:id', requireAdmin, (req, res) => {
   const r = attOr404().runs.find((x) => x.id === req.params.id);
   if (!r) throw new HttpError(404, 'Riwayat tidak ditemukan.');
   res.json(attRunPublic(r, true));
+});
+
+/* Add-on: Ulang tahun pegawai (admin) */
+app.get('/api/addons/birthday/config', requireAdmin, (req, res) => res.json(bdConfigPublic(bdOr404())));
+app.put('/api/addons/birthday/config', requireAdmin, (req, res) => {
+  const st = bdOr404();
+  bdCleanConfig(st, req.body || {});
+  audit(req, 'addon.birthday.config', `Jam ${st.schedule.time} · template ${st.template.name}`); save();
+  res.json(bdConfigPublic(st));
+});
+app.get('/api/addons/birthday/employees', requireAdmin, wrap(async (req, res) => {
+  const st = bdOr404(), today = zonedDate(flowTz());
+  const dir = await bdDirectory(st, req.query.refresh === '1');
+  res.json({
+    today, directoryError: st.directoryError, directoryAt: st.directoryAt, defaultNotify: st.defaultNotify,
+    employees: bdPeople(st, dir, today).map((p) => {
+      const conv = p.waPhone ? attConvFor(p.waPhone) : null;
+      return { ...p, windowOpen: !!(conv && windowOpen(conv)), windowExpiresAt: conv?.lastInboundAt ? conv.lastInboundAt + SERVICE_WINDOW_MS : 0 };
+    }).sort((x, y) => (x.next?.days ?? 999) - (y.next?.days ?? 999) || x.nama.localeCompare(y.nama, 'id')),
+  });
+}));
+app.put('/api/addons/birthday/employees/:nip', requireAdmin, (req, res) => {
+  const st = bdOr404(), nip = attNip(req.params.nip), b = req.body || {};
+  if (!nip) throw new HttpError(400, 'NIP tidak valid.');
+  const e = { ...(st.employees[nip] || {}) };
+  if ('notify' in b) e.notify = !!b.notify;
+  if ('phone' in b) {
+    const raw = str(b.phone, 30);
+    if (raw && !attPhone(raw)) throw new HttpError(400, 'Nomor WhatsApp tidak valid.');
+    e.phone = raw ? attPhone(raw) : '';
+  }
+  if (!e.phone) delete e.phone;
+  st.employees[nip] = e; save();
+  res.json({ nip, notify: e.notify ?? st.defaultNotify, phoneOverride: e.phone || '' });
+});
+app.post('/api/addons/birthday/employees/notify-all', requireAdmin, wrap(async (req, res) => {
+  const st = bdOr404(), on = !!req.body?.notify;
+  const nips = new Set([...(await bdDirectory(st).catch(() => st.directory)).map((p) => p.nip), ...Object.keys(st.employees)]);
+  for (const n of nips) st.employees[n] = { ...(st.employees[n] || {}), notify: on };
+  st.defaultNotify = on;
+  audit(req, 'addon.birthday.notify', on ? 'Semua aktif' : 'Semua nonaktif'); save();
+  res.json({ ok: true });
+}));
+app.post('/api/addons/birthday/send', requireAdmin, wrap(async (req, res) => {
+  const st = bdOr404(), b = req.body || {};
+  if (!meta().accessToken || !meta().phoneNumberId) throw new HttpError(400, 'Koneksi Meta belum dikonfigurasi.');
+  const nips = Array.isArray(b.nips) ? [...new Set(b.nips.map(attNip).filter(Boolean))].slice(0, 1000) : [];
+  if (!nips.length) throw new HttpError(400, 'Pilih minimal satu pegawai.');
+  const run = await bdStart(st, { trigger: 'manual', user: req.user, nips });
+  audit(req, 'addon.birthday.send', `${run.items.length} pegawai`);
+  res.json(bdRunPublic(run, true));
+}));
+app.get('/api/addons/birthday/runs/:id', requireAdmin, (req, res) => {
+  const r = bdOr404().runs.find((x) => x.id === req.params.id);
+  if (!r) throw new HttpError(404, 'Riwayat tidak ditemukan.');
+  res.json(bdRunPublic(r, true));
 });
 
 /* Error handler */
