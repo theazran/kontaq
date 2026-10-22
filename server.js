@@ -108,7 +108,7 @@ const csvCell = (v) => {
 const EMPTY_DB = {
   settings: {}, users: [], contacts: [], conversations: [], messages: [],
   templates: [], templatesSyncedAt: 0, campaigns: [], calls: [], audit: [], avatars: {}, autoReply: null, arMedia: {}, costs: null, sendLog: [],
-  flows: [], flowRuns: [], groups: [], csat: null, waFlows: [], flowSubmissions: [], stickers: [], reminders: [], addons: {},
+  flows: [], flowRuns: [], groups: [], csat: null, waFlows: [], flowSubmissions: [], stickers: [], reminders: [], addons: {}, callDesk: null, callAppts: [],
 };
 let db;
 try { db = { ...EMPTY_DB, ...JSON.parse(fs.readFileSync(DB_FILE, 'utf8')) }; }
@@ -729,7 +729,7 @@ function handleMessages(value) {
     const msg = addMessage(conv, { direction: 'in', type, content, wamid: m.id, timestamp: Number(m.timestamp) * 1000 || now(), contextId: m.context?.id || null });
     if (type === 'flow_reply') recordFlowSubmission(conv, contact, msg);
     // Jawaban survei CSAT: jangan buka ulang percakapan yang sudah selesai, jangan beri notifikasi, jangan jalankan flow
-    if (handleCsatReply(conv, contact, msg) || handleAttOptOut(conv, contact, msg)) {
+    if (handleCsatReply(conv, contact, msg) || handleCalldeskReply(conv, contact, msg) || handleAttOptOut(conv, contact, msg)) {
       Object.assign(conv, { status: prevStatus, unread: prevStatus === 'closed' ? prevUnread : conv.unread });
       save(); emitConv(conv, 'conversation:update', serializeConv(conv));
       continue;
@@ -2278,6 +2278,7 @@ function recordFlowSubmission(conv, contact, msg) {
   msg.content.flowName = s.flowName; msg.content.flowId = s.flowId;
   save();
   io?.to('admins').emit('waflow:submission', { flowId: s.flowId, id: s.id });
+  cdOnSubmit(conv, contact, s).catch((e) => console.warn('[calldesk]', e.message));
 }
 
 // Pesan interaktif "flow". b: { flowId, body, cta, header?, footer?, screen?, mode?, data? }
@@ -2295,6 +2296,7 @@ function buildWaFlowMessage(b) {
   const token = newFlowToken();
   const payload = { screen };
   if (b.data && typeof b.data === 'object' && !Array.isArray(b.data) && Object.keys(b.data).length) payload.data = b.data;
+  else if (db.callDesk?.waFlowId === f.id) payload.data = cdFormData(); // formulir Layanan petugas: tujuan, slot & tanggal terbaru
   const interactive = {
     type: 'flow', body: { text: body },
     action: { name: 'flow', parameters: { flow_message_version: '3', flow_token: token, flow_id: f.id, flow_cta: cta, mode, flow_action: 'navigate', flow_action_payload: payload } }
@@ -2927,7 +2929,7 @@ const recentRuns = (pred, n) => db.flowRuns.filter(pred).slice(-n).reverse().map
 app.get('/api/flows', requireAdmin, (req, res) => {
   const z = zonedNow(flowTz());
   res.json({
-    flows: db.flows.slice().sort((a, b) => a.order - b.order).map(flowSummary),
+    flows: db.flows.slice().sort((a, b) => a.order - b.order).map(flowSummary), calldeskFlowId: db.callDesk?.waFlowId || null,
     runs: recentRuns(() => true, 30), timezone: flowTz(), now: z, labels: contactLabels(),
     autoReplyEnabled: !!arCfg().enabled, hours: arCfg().away.hours,
     waFlows: db.waFlows.map((f) => ({ id: f.id, name: f.name, status: f.status, screens: wafScreens(f.json) })),
@@ -3482,7 +3484,7 @@ app.put('/api/costs/settings', requireAdmin, wrap(async (req, res) => {
   res.json(cfg.settings);
 }));
 /* Log pesan API (admin): semua pesan keluar via Cloud API + status pengiriman dari webhook */
-const LOG_SOURCES = { inbox: 'Dashboard', campaign: 'Campaign', auto_reply: 'Auto reply', flow: 'Flow otomatis', group: 'Grup', csat: 'Survei CSAT', reminder: 'Pengingat', attendance: 'Pengingat absensi', birthday: 'Ulang tahun', external: 'Di luar Kontaq' };
+const LOG_SOURCES = { inbox: 'Dashboard', campaign: 'Campaign', auto_reply: 'Auto reply', flow: 'Flow otomatis', group: 'Grup', csat: 'Survei CSAT', reminder: 'Pengingat', attendance: 'Pengingat absensi', birthday: 'Ulang tahun', calldesk: 'Layanan petugas', external: 'Di luar Kontaq' };
 function logRow(e) {
   const msg = e.wamid ? idx.wamid.get(e.wamid) : null;
   const contact = e.contactId ? byId('contacts', e.contactId) : idx.contactByPhone.get(e.to);
@@ -4296,6 +4298,463 @@ app.post('/api/calls/:id/:action(accept|reject|terminate)', wrap(async (req, res
   audit(req, 'call.' + a, call.phone); save();
   io?.emit('call:update', publicCall(call));
   res.json(publicCall(call));
+}));
+
+/* ───────────────────────── 7b. Layanan petugas (janji panggilan suara / video) ─────────────────────────
+ * Pelanggan mengisi formulir WhatsApp Flow (nama, tujuan, keperluan, jenis panggilan, sekarang/jadwal). Kontaq memeriksa jam
+ * layanan & kuota slot, menunjuk petugas sesuai tujuan, lalu:
+ *   video — membuat ruang Jitsi (nama ruang acak, sulit ditebak) dan mengirim tombol link (pesan CTA URL);
+ *   suara — petugas menelepon lewat Calling API dari Kontaq (meminta izin telepon bila belum ada).
+ * "Sekarang" hanya di jam layanan dan bila ada petugas tujuan yang sedang online; selain itu pelanggan ditawari slot terdekat.
+ * Daftar tujuan, slot jam, dan rentang tanggal dikirim sebagai data awal pesan formulir, sehingga Flow JSON tidak perlu diubah
+ * saat pengaturan berubah dan tanggalnya tidak basi.
+ */
+const CD_KINDS = { voice: 'Panggilan suara', video: 'Panggilan video' };
+const CD_STATUS = { waiting: 'Menunggu petugas', pending_slot: 'Memilih jadwal', scheduled: 'Terjadwal', in_progress: 'Berlangsung', done: 'Selesai', no_show: 'Tidak hadir', cancelled: 'Dibatalkan' };
+const CD_OPEN = ['waiting', 'pending_slot', 'scheduled', 'in_progress'];
+const CD_SLOT_MIN = [10, 15, 20, 30, 45, 60, 90, 120];
+const CD_USER = 'Layanan petugas';
+const cdSlug = (s) => String(s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 30) || 'tujuan';
+function cdDefaults() {
+  return {
+    enabled: true, jitsiDomain: 'meet.jit.si', roomPrefix: 'Kontaq', callNow: true,
+    days: [1, 2, 3, 4, 5], start: '08:00', end: '15:00', slotMinutes: 30, perAgent: 1, daysAhead: 14, holidays: [],
+    customerReminderMin: 15, agentReminderMin: 10, waFlowId: null, reminderTemplate: null, seq: 0,
+    departments: ['PTSP', 'Kepaniteraan Pidana', 'Kepaniteraan Perdata', 'Kepaniteraan Hukum', 'Pengaduan Layanan'].map((name) => ({ id: cdSlug(name), name, agentIds: [], enabled: true })),
+  };
+}
+const cdCfg = () => (db.callDesk = db.callDesk || cdDefaults());
+const hmMin = (t) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3, 5));
+const minHm = (m) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+function cdSlots(c = cdCfg()) {
+  const out = [];
+  for (let m = hmMin(c.start); m + c.slotMinutes <= hmMin(c.end); m += c.slotMinutes) out.push(minHm(m));
+  return out;
+}
+const cdWorkday = (ymd, c = cdCfg()) => c.days.includes(ymdDate(ymd).getUTCDay()) && !c.holidays.includes(ymd);
+function cdOpenNow(c = cdCfg()) {
+  const z = zonedNow(flowTz()), today = zonedDate(flowTz());
+  return cdWorkday(today, c) && z.time >= c.start && z.time < c.end;
+}
+const cdDept = (id) => cdCfg().departments.find((d) => d.id === id);
+// Petugas tujuan; bila belum dipetakan, semua pengguna aktif
+function cdAgents(dept) {
+  const mapped = (dept?.agentIds || []).map((id) => byId('users', id)).filter((u) => u?.active);
+  return mapped.length ? mapped : db.users.filter((u) => u.active);
+}
+const cdAt = (a) => a.startAt && ['scheduled', 'in_progress'].includes(a.status);
+const cdTaken = (deptId, startAt, except) => db.callAppts.filter((a) => a.id !== except && a.departmentId === deptId && a.startAt === startAt && cdAt(a));
+const cdCapacity = (dept) => cdAgents(dept).length * cdCfg().perAgent;
+const cdFree = (dept, startAt, except) => cdTaken(dept.id, startAt, except).length < cdCapacity(dept);
+function cdPickAgent(dept, startAt, except, onlyOnline) {
+  const c = cdCfg(), taken = startAt ? cdTaken(dept.id, startAt, except) : [];
+  const load = (u) => db.callAppts.filter((a) => a.agentId === u.id && CD_OPEN.includes(a.status)).length;
+  return cdAgents(dept).filter((u) => taken.filter((a) => a.agentId === u.id).length < c.perAgent && (!onlyOnline || userOnline(u.id)))
+    .sort((a, b) => load(a) - load(b))[0] || null;
+}
+// Slot kosong berikutnya (maks. n), minimal 10 menit dari sekarang
+function cdNextSlots(dept, n = 9) {
+  const c = cdCfg(), tz = flowTz(), today = zonedDate(tz), out = [];
+  for (let d = today; d <= addDays(today, c.daysAhead) && out.length < n; d = addDays(d, 1)) {
+    if (!cdWorkday(d, c)) continue;
+    for (const hm of cdSlots(c)) {
+      const t = zonedToUtc(d, hm, tz);
+      if (t > now() + 10 * 60000 && cdFree(dept, t)) { out.push(t); if (out.length >= n) break; }
+    }
+  }
+  return out;
+}
+// Data awal formulir (dikirim bersama pesan flow)
+function cdFormData() {
+  const c = cdCfg(), tz = flowTz(), today = zonedDate(tz), nowT = zonedNow(tz).time, slots = cdSlots(c);
+  const max = addDays(today, c.daysAhead);
+  let min = today;
+  if (!cdWorkday(today, c) || !slots.some((s) => s > nowT)) {
+    min = max;
+    for (let d = addDays(today, 1); d <= max; d = addDays(d, 1)) if (cdWorkday(d, c)) { min = d; break; }
+  }
+  const unavailable = [];
+  for (let d = today; d <= max; d = addDays(d, 1)) if (!cdWorkday(d, c)) unavailable.push(d);
+  return {
+    departments: c.departments.filter((d) => d.enabled).map((d) => ({ id: d.id, title: d.name })),
+    kinds: [{ id: 'voice', title: 'Panggilan suara', description: 'Petugas menelepon Anda lewat WhatsApp' }, { id: 'video', title: 'Panggilan video', description: 'Lewat Jitsi Meet, link dikirim otomatis' }],
+    whens: [...(c.callNow && cdOpenNow(c) ? [{ id: 'sekarang', title: 'Sekarang', description: 'Bila petugas sedang tersedia' }] : []), { id: 'jadwal', title: 'Pilih jadwal', description: 'Tanggal & jam di jam layanan' }],
+    slots: slots.map((s) => ({ id: s, title: s.replace(':', '.') })),
+    min_date: min, max_date: max, unavailable_dates: unavailable,
+  };
+}
+// Flow JSON formulir: dua layar; tanggal & jam hanya tampil bila memilih "Pilih jadwal" (komponen If)
+function cdFlowJson() {
+  const list = { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, title: { type: 'string' } } }, __example__: [{ id: 'a', title: 'A' }] };
+  const strv = (x) => ({ type: 'string', __example__: x });
+  const dates = { min_date: strv('2026-01-02'), max_date: strv('2026-01-16'), unavailable_dates: { type: 'array', items: { type: 'string' }, __example__: [] } };
+  return {
+    version: '7.3',
+    screens: [
+      { id: 'DATA_PEMOHON', title: 'Bicara dengan petugas',
+        data: { departments: list, kinds: list, whens: list, slots: list, ...dates },
+        layout: { type: 'SingleColumnLayout', children: [
+          { type: 'TextSubheading', text: 'Isi data berikut agar petugas dapat membantu Anda.' },
+          { type: 'TextInput', name: 'nama', label: 'Nama lengkap', 'input-type': 'text', required: true },
+          { type: 'TextInput', name: 'identitas', label: 'No. HP / NIK', 'input-type': 'text', required: false, 'helper-text': 'Opsional, membantu petugas menemukan data Anda' },
+          { type: 'Dropdown', name: 'tujuan', label: 'Tujuan', required: true, 'data-source': '${data.departments}' },
+          { type: 'TextArea', name: 'keperluan', label: 'Keperluan', required: true, 'max-length': '500' },
+          { type: 'RadioButtonsGroup', name: 'jenis', label: 'Jenis panggilan', required: true, 'data-source': '${data.kinds}' },
+          { type: 'Footer', label: 'Lanjut', 'on-click-action': { name: 'navigate', next: { type: 'screen', name: 'JADWAL' }, payload: {
+            nama: '${form.nama}', identitas: '${form.identitas}', tujuan: '${form.tujuan}', keperluan: '${form.keperluan}', jenis: '${form.jenis}',
+            whens: '${data.whens}', slots: '${data.slots}', min_date: '${data.min_date}', max_date: '${data.max_date}', unavailable_dates: '${data.unavailable_dates}' } } },
+        ] } },
+      { id: 'JADWAL', title: 'Waktu panggilan', terminal: true, success: true,
+        data: { nama: strv('Budi'), identitas: strv(''), tujuan: strv('ptsp'), keperluan: strv('Konsultasi'), jenis: strv('video'), whens: list, slots: list, ...dates },
+        layout: { type: 'SingleColumnLayout', children: [
+          { type: 'TextBody', text: 'Halo ${data.nama}, kapan Anda ingin dihubungi petugas?' },
+          { type: 'RadioButtonsGroup', name: 'waktu', label: 'Waktu', required: true, 'data-source': '${data.whens}' },
+          { type: 'If', condition: "${form.waktu} == 'jadwal'", then: [
+            { type: 'DatePicker', name: 'tanggal', label: 'Tanggal', required: true, 'min-date': '${data.min_date}', 'max-date': '${data.max_date}', 'unavailable-dates': '${data.unavailable_dates}' },
+            { type: 'Dropdown', name: 'jam', label: 'Jam', required: true, 'data-source': '${data.slots}' },
+          ] },
+          { type: 'TextCaption', text: 'Jadwal mengikuti jam layanan. Bila slot sudah penuh, kami tawarkan waktu lain.' },
+          { type: 'Footer', label: 'Kirim permintaan', 'on-click-action': { name: 'complete', payload: {
+            nama: '${data.nama}', identitas: '${data.identitas}', tujuan: '${data.tujuan}', keperluan: '${data.keperluan}', jenis: '${data.jenis}',
+            waktu: '${form.waktu}', tanggal: '${form.tanggal}', jam: '${form.jam}' } } },
+        ] } },
+    ],
+  };
+}
+const cdWhen = (t) => new Intl.DateTimeFormat('id-ID', { timeZone: flowTz(), weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date(t));
+const cdShort = (t) => new Intl.DateTimeFormat('id-ID', { timeZone: flowTz(), weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }).format(new Date(t)).slice(0, 24);
+const cdTzLabel = () => ({ 'Asia/Jakarta': 'WIB', 'Asia/Makassar': 'WITA', 'Asia/Jayapura': 'WIT' }[flowTz()] || '');
+const cdRoomUrl = (a) => (a.room ? `https://${cdCfg().jitsiDomain}/${a.room}` : '');
+function cdPublic(a) {
+  const agent = a.agentId ? byId('users', a.agentId) : null, contact = byId('contacts', a.contactId);
+  return { ...a, agentName: agent?.name || '', roomUrl: cdRoomUrl(a), phone: contact?.phone || '', contactName: contact?.name || contact?.waName || a.name, callPermission: contact?.callPermission || null,
+    statusLabel: CD_STATUS[a.status], kindLabel: CD_KINDS[a.kind] };
+}
+function cdEmit(a, event = 'calldesk:update') {
+  if (!io) return;
+  io.to([...new Set(['admins', a.agentId ? 'user:' + a.agentId : 'agents'])]).emit(event, cdPublic(a));
+}
+const cdLog = (a, text) => { a.history = [...(a.history || []), { at: now(), text: String(text).slice(0, 300) }].slice(-40); };
+
+// Pengiriman ke pelanggan (dicatat seperti pesan otomatis lain; sumber "Layanan petugas" di Log pesan)
+async function cdSend(conv, contact, interactiveOrText, record) {
+  const payload = typeof interactiveOrText === 'string'
+    ? { messaging_product: 'whatsapp', recipient_type: 'individual', to: contact.phone, type: 'text', text: { body: interactiveOrText, preview_url: false } }
+    : { messaging_product: 'whatsapp', recipient_type: 'individual', to: contact.phone, type: 'interactive', interactive: interactiveOrText };
+  const r = await sendToMeta(payload, { source: 'calldesk', contact, conversation: conv, userName: CD_USER });
+  return addMessage(conv, { direction: 'out', ...(typeof interactiveOrText === 'string' ? { type: 'text', content: { body: interactiveOrText } } : { type: 'interactive', content: record }),
+    wamid: r.messages?.[0]?.id, status: 'accepted', userName: CD_USER, auto: 'calldesk' });
+}
+const cdText = (conv, contact, text) => cdSend(conv, contact, text);
+function cdCta(conv, contact, body, button, url, footer) {
+  const it = { type: 'cta_url', body: { text: body.slice(0, 1024) }, action: { name: 'cta_url', parameters: { display_text: button.slice(0, 20), url } } };
+  if (footer) it.footer = { text: footer.slice(0, 60) };
+  return cdSend(conv, contact, it, { kind: 'cta_url', body: it.body.text, footer: footer || '', button: button.slice(0, 20), url });
+}
+function cdList(conv, contact, body, rows) {
+  const it = { type: 'list', body: { text: body.slice(0, 1024) }, action: { button: 'Pilih jadwal', sections: [{ title: 'Jadwal tersedia', rows }] } };
+  return cdSend(conv, contact, it, { kind: 'list', header: '', body: it.body.text, footer: '', button: 'Pilih jadwal', rows: rows.map((r) => ({ id: r.id, title: r.title, description: r.description || '' })) });
+}
+function cdAskPermission(conv, contact) {
+  const body = 'Izinkan petugas kami menelepon Anda melalui WhatsApp pada jadwal tersebut.';
+  return cdSend(conv, contact, { type: 'call_permission_request', action: { name: 'call_permission_request' }, body: { text: body } }, { kind: 'call_permission_request', body });
+}
+const cdPermitted = (k) => k?.callPermission?.status === 'accept' && (k.callPermission.permanent || !k.callPermission.expiresAt || k.callPermission.expiresAt > now());
+// Pesan ke pelanggan di luar alur formulir (jadwal ulang, batal, pengingat): teks/tombol bila jendela 24 jam terbuka, selain itu template pengingat
+async function cdNotify(a, text, { withLink } = {}) {
+  const conv = byId('conversations', a.conversationId), contact = byId('contacts', a.contactId);
+  if (!conv || !contact) return 'percakapan tidak ditemukan';
+  try {
+    if (windowOpen(conv)) {
+      if (withLink && a.kind === 'video' && a.room) await cdCta(conv, contact, text, 'Buka ruang video', cdRoomUrl(a), `Kode ${a.code}`);
+      else await cdText(conv, contact, text);
+      return null;
+    }
+    const t = cdCfg().reminderTemplate, tpl = t && findTemplate(t.name, t.language);
+    if (!tpl || tpl.status !== 'APPROVED') return 'jendela 24 jam tertutup dan template pengingat belum diatur';
+    const vals = [a.name, a.startAt ? cdWhen(a.startAt) + ' ' + cdTzLabel() : '-', a.departmentName, a.code];
+    const btns = (tpl.components || []).find((x) => x.type === 'BUTTONS')?.buttons || [];
+    await sendTemplateTo(contact, tpl, { body: vals.concat(vals), buttonUrl: btns.map(() => a.room || a.code) }, { userName: CD_USER, auto: 'calldesk' }, { source: 'calldesk', userName: CD_USER });
+    return null;
+  } catch (e) { return e.message; }
+}
+// Pengingat untuk petugas memakai fitur Pengingat (notifikasi Kontaq + WA pribadi)
+function cdAgentReminder(a) {
+  const old = a.reminderId && byId('reminders', a.reminderId);
+  if (old && ['pending', 'due'].includes(old.status)) { old.status = 'cancelled'; old.finishedAt = now(); remHistory(old, 'cancelled', 'Janji panggilan diubah'); emitReminder(old); }
+  a.reminderId = null;
+  if (a.status !== 'scheduled' || !a.startAt) return;
+  const assignee = (a.agentId && byId('users', a.agentId)) || db.users.find((u) => u.active && u.role === 'admin');
+  if (!assignee) return;
+  const r = { id: uid('rm_'), kind: 'self', conversationId: a.conversationId, contactId: a.contactId, createdById: assignee.id, createdByName: CD_USER, createdAt: now(),
+    status: 'pending', history: [], dueAt: Math.max(now() + 60000, a.startAt - cdCfg().agentReminderMin * 60000), reopen: true, assigneeId: assignee.id,
+    note: `${a.kind === 'video' ? '🎥' : '📞'} ${a.code} · ${CD_KINDS[a.kind]} dengan ${a.name} (${a.departmentName}) pukul ${cdShort(a.startAt).split(' ').pop()}` };
+  remHistory(r, 'pending', 'Dibuat otomatis oleh Layanan petugas');
+  db.reminders.push(r); a.reminderId = r.id; emitReminder(r);
+}
+function cdAssignConv(a) {
+  const conv = byId('conversations', a.conversationId);
+  if (!conv || !a.agentId || conv.assignedTo) return;
+  conv.assignedTo = a.agentId; if (conv.status === 'closed') conv.status = 'open';
+  emitConv(conv, 'conversation:update', serializeConv(conv));
+}
+function cdNote(a, text) {
+  const conv = byId('conversations', a.conversationId); if (!conv) return;
+  conv.notes = conv.notes || [];
+  conv.notes.push({ id: uid('n_'), text, userId: null, userName: CD_USER, at: now() });
+  emitConv(conv, 'conversation:update', serializeConv(conv));
+}
+const cdRoom = (code) => `${cdCfg().roomPrefix}-${code}-${crypto.randomBytes(6).toString('base64url').replace(/[^A-Za-z0-9]/g, 'x')}`;
+
+async function cdBook(a, startAt, conv, contact) {
+  const dept = cdDept(a.departmentId) || { id: a.departmentId, agentIds: [] };
+  const agent = cdPickAgent(dept, startAt, a.id);
+  Object.assign(a, { startAt, agentId: agent?.id || null, status: 'scheduled', remindedAt: 0 });
+  if (a.kind === 'video' && !a.room) a.room = cdRoom(a.code);
+  cdLog(a, `Dijadwalkan ${cdWhen(startAt)}${agent ? ' · petugas ' + agent.name : ''}`);
+  cdAssignConv(a); cdAgentReminder(a); save(); cdEmit(a);
+  const head = `✅ *Jadwal ${a.kind === 'video' ? 'video call' : 'panggilan telepon'} terkonfirmasi*\n${cdWhen(startAt)} ${cdTzLabel()}\nTujuan: ${a.departmentName}${agent ? `\nPetugas: ${agent.name}` : ''}\nKode: ${a.code}`;
+  if (a.kind === 'video') {
+    await cdCta(conv, contact, `${head}\n\nKlik tombol di bawah pada jadwal tersebut. Pengingat dikirim ${cdCfg().customerReminderMin} menit sebelumnya.`, 'Buka ruang video', cdRoomUrl(a), 'Jitsi Meet · tanpa perlu akun');
+  } else {
+    await cdText(conv, contact, `${head}\n\nPetugas akan menelepon Anda melalui WhatsApp pada jadwal tersebut.`);
+    if (!cdPermitted(contact)) await cdAskPermission(conv, contact);
+  }
+}
+async function cdStartNow(a, agent, conv, contact) {
+  Object.assign(a, { startAt: now(), agentId: agent.id, status: 'waiting' });
+  if (a.kind === 'video') a.room = cdRoom(a.code);
+  cdLog(a, `Permintaan sekarang → ${agent.name}`);
+  cdAssignConv(a); save(); cdEmit(a, 'calldesk:now'); cdEmit(a);
+  notifyUsers('call', [agent], `🔔 *Permintaan ${a.kind === 'video' ? 'video call' : 'telepon'} sekarang*\n${a.name} · ${a.departmentName}\n${a.purpose.slice(0, 200)}${appLink('#/calls') ? '\n' + appLink('#/calls') : ''}`);
+  if (a.kind === 'video') await cdCta(conv, contact, `🎥 Petugas ${agent.name} (${a.departmentName}) akan bergabung dalam beberapa menit.\nKode: ${a.code}`, 'Buka ruang video', cdRoomUrl(a), 'Jitsi Meet · tanpa perlu akun');
+  else {
+    await cdText(conv, contact, `📞 Petugas ${agent.name} (${a.departmentName}) akan segera menelepon Anda melalui WhatsApp.\nKode: ${a.code}`);
+    if (!cdPermitted(contact)) await cdAskPermission(conv, contact);
+  }
+}
+async function cdOfferSlots(a, intro, conv, contact) {
+  const dept = cdDept(a.departmentId) || { id: a.departmentId, agentIds: [] };
+  const slots = cdNextSlots(dept, 9);
+  Object.assign(a, { status: 'pending_slot', offered: slots, offeredAt: now() });
+  save(); cdEmit(a);
+  if (!slots.length) {
+    cdLog(a, 'Tidak ada slot kosong; diteruskan ke petugas');
+    const agent = cdPickAgent(dept, null); if (agent) { a.agentId = agent.id; cdAssignConv(a); }
+    save();
+    return cdText(conv, contact, `${intro}\n\nBelum ada jadwal kosong dalam ${cdCfg().daysAhead} hari ke depan. Petugas kami akan menghubungi Anda.`);
+  }
+  cdLog(a, `Ditawari ${slots.length} slot`);
+  const rows = slots.map((t) => ({ id: `cd_${a.id}_${t}`, title: cdShort(t) }));
+  rows.push({ id: `cd_${a.id}_x`, title: 'Batalkan permintaan' });
+  return cdList(conv, contact, `${intro}\n\nWaktu dalam ${cdTzLabel() || flowTz()}.`, rows);
+}
+// Jawaban formulir layanan petugas (dipanggil dari recordFlowSubmission)
+async function cdOnSubmit(conv, contact, s) {
+  const c = cdCfg();
+  if (!c.waFlowId || s.flowId !== c.waFlowId) return;
+  const r = s.response || {};
+  const dept = c.departments.find((d) => d.id === r.tujuan) || c.departments.find((d) => d.enabled);
+  if (!dept) return;
+  c.seq = (c.seq || 0) + 1;
+  const a = { id: uid('ap_'), code: 'JP-' + String(c.seq).padStart(4, '0'), conversationId: conv.id, contactId: contact.id, submissionId: s.id,
+    name: str(r.nama, 80) || contact.name || contact.waName || 'Pelanggan', identity: str(r.identitas, 60), departmentId: dept.id, departmentName: dept.name,
+    purpose: str(r.keperluan, 500), kind: r.jenis === 'voice' ? 'voice' : 'video', when: r.waktu === 'sekarang' ? 'now' : 'scheduled',
+    startAt: null, agentId: null, room: null, status: 'pending_slot', createdAt: now(), history: [] };
+  db.callAppts.push(a);
+  if (!contact.name && a.name) { contact.name = a.name; contact.updatedAt = now(); }
+  cdLog(a, `Formulir diisi: ${CD_KINDS[a.kind]}, ${a.when === 'now' ? 'sekarang' : `${r.tanggal || '?'} ${r.jam || ''}`}`);
+  cdNote(a, `📋 ${a.code} · ${CD_KINDS[a.kind]}\nNama: ${a.name}${a.identity ? `\nNo. HP/NIK: ${a.identity}` : ''}\nTujuan: ${a.departmentName}\nKeperluan: ${a.purpose}`);
+  save();
+  try {
+    if (a.when === 'now') {
+      const agent = c.callNow && cdOpenNow(c) ? cdPickAgent(dept, null, null, true) : null;
+      if (agent) return await cdStartNow(a, agent, conv, contact);
+      return await cdOfferSlots(a, cdOpenNow(c) ? `Maaf, saat ini belum ada petugas ${dept.name} yang tersedia. Silakan pilih jadwal:` : 'Saat ini di luar jam layanan. Silakan pilih jadwal:', conv, contact);
+    }
+    const ymd = str(r.tanggal, 10), hm = str(r.jam, 5), slots = cdSlots(c);
+    const valid = /^\d{4}-\d{2}-\d{2}$/.test(ymd) && ymdDate(ymd) && slots.includes(hm) && cdWorkday(ymd, c) && ymd <= addDays(zonedDate(flowTz()), c.daysAhead);
+    const startAt = valid ? zonedToUtc(ymd, hm, flowTz()) : 0;
+    if (!valid || startAt < now() + 5 * 60000) return await cdOfferSlots(a, 'Jadwal yang dipilih tidak tersedia. Silakan pilih jadwal lain:', conv, contact);
+    if (!cdFree(dept, startAt)) return await cdOfferSlots(a, `Jadwal ${cdWhen(startAt)} sudah penuh. Silakan pilih jadwal lain:`, conv, contact);
+    await cdBook(a, startAt, conv, contact);
+  } catch (e) {
+    cdLog(a, 'Gagal mengirim balasan: ' + e.message); save(); cdEmit(a);
+    console.warn('[calldesk]', e.message);
+  }
+}
+// Balasan pilihan slot (cd_<id>_<waktu>|x). true = pesan ditangani (flow & auto reply tidak dijalankan)
+function handleCalldeskReply(conv, contact, msg) {
+  const m = msg.type === 'interactive_reply' && /^cd_(ap_[A-Za-z0-9_-]{12})_(\d+|x)$/.exec(msg.content.id || '');
+  if (!m) return false;
+  const a = db.callAppts.find((x) => x.id === m[1] && x.conversationId === conv.id);
+  if (!a) return false;
+  (async () => {
+    if (a.status !== 'pending_slot') return cdText(conv, contact, `Permintaan ${a.code} sudah diproses (${CD_STATUS[a.status].toLowerCase()}).`);
+    if (m[2] === 'x') {
+      a.status = 'cancelled'; cdLog(a, 'Dibatalkan pelanggan'); save(); cdEmit(a);
+      return cdText(conv, contact, `Permintaan ${a.code} dibatalkan. Ketik *petugas* bila ingin membuat permintaan baru.`);
+    }
+    const t = Number(m[2]), dept = cdDept(a.departmentId) || { id: a.departmentId, agentIds: [] };
+    if (!(a.offered || []).includes(t) || t < now() + 5 * 60000) return cdOfferSlots(a, 'Jadwal tersebut sudah lewat. Silakan pilih jadwal lain:', conv, contact);
+    if (!cdFree(dept, t, a.id)) return cdOfferSlots(a, 'Maaf, jadwal tersebut baru saja terisi. Silakan pilih jadwal lain:', conv, contact);
+    return cdBook(a, t, conv, contact);
+  })().catch((e) => { cdLog(a, 'Gagal: ' + e.message); save(); });
+  return true;
+}
+// Pengingat ke pelanggan & kedaluwarsa permintaan
+setInterval(async () => {
+  const c = db.callDesk; if (!c) return;
+  for (const a of db.callAppts) {
+    if (a.status === 'scheduled' && !a.remindedAt && a.startAt - c.customerReminderMin * 60000 <= now() && a.startAt + 10 * 60000 > now()) {
+      a.remindedAt = now();
+      const err = await cdNotify(a, `⏰ *Pengingat ${a.kind === 'video' ? 'video call' : 'panggilan telepon'}*\n${cdWhen(a.startAt)} ${cdTzLabel()} · ${a.departmentName}\nKode: ${a.code}${a.kind === 'video' ? '\n\nKlik tombol di bawah untuk masuk ke ruang video.' : '\n\nPetugas akan menelepon Anda melalui WhatsApp.'}`, { withLink: true });
+      cdLog(a, err ? 'Pengingat pelanggan tidak terkirim: ' + err : 'Pengingat terkirim ke pelanggan'); save(); cdEmit(a);
+    }
+    if (a.status === 'pending_slot' && a.offeredAt && now() - a.offeredAt > 24 * 3600000) { a.status = 'cancelled'; cdLog(a, 'Kedaluwarsa: jadwal tidak dipilih dalam 24 jam'); save(); cdEmit(a); }
+  }
+}, 30000);
+
+function cdValidate(b, prev) {
+  const n = (v, lo, hi, label) => { const x = Number(v); if (!Number.isInteger(x) || x < lo || x > hi) throw new HttpError(400, `${label} harus bilangan bulat ${lo}–${hi}.`); return x; };
+  const hm = (v, label) => { if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(v || '')) throw new HttpError(400, `${label} tidak valid (HH:MM).`); return v; };
+  const c = { ...prev };
+  c.enabled = b.enabled !== false;
+  c.jitsiDomain = String(b.jitsiDomain || '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+  if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(c.jitsiDomain)) throw new HttpError(400, 'Domain Jitsi tidak valid (contoh: meet.jit.si).');
+  c.roomPrefix = String(b.roomPrefix || '').trim();
+  if (!/^[A-Za-z0-9]{1,20}$/.test(c.roomPrefix)) throw new HttpError(400, 'Awalan nama ruang hanya huruf & angka (maks. 20).');
+  c.callNow = b.callNow !== false;
+  c.days = [...new Set((Array.isArray(b.days) ? b.days : []).map(Number).filter((d) => Number.isInteger(d) && d >= 0 && d <= 6))].sort();
+  if (!c.days.length) throw new HttpError(400, 'Pilih minimal satu hari layanan.');
+  c.start = hm(b.start, 'Jam mulai'); c.end = hm(b.end, 'Jam selesai');
+  c.slotMinutes = CD_SLOT_MIN.includes(Number(b.slotMinutes)) ? Number(b.slotMinutes) : (() => { throw new HttpError(400, 'Durasi slot tidak valid.'); })();
+  if (hmMin(c.end) - hmMin(c.start) < c.slotMinutes) throw new HttpError(400, 'Jam layanan harus lebih panjang dari satu slot.');
+  c.perAgent = n(b.perAgent, 1, 10, 'Kuota per petugas per slot');
+  c.daysAhead = n(b.daysAhead, 1, 60, 'Batas hari pemesanan');
+  c.customerReminderMin = n(b.customerReminderMin, 0, 240, 'Pengingat pelanggan (menit)');
+  c.agentReminderMin = n(b.agentReminderMin, 0, 240, 'Pengingat petugas (menit)');
+  c.holidays = [...new Set((Array.isArray(b.holidays) ? b.holidays : String(b.holidays || '').split(/[\s,]+/)).map((x) => String(x).trim()).filter(Boolean))].sort();
+  if (c.holidays.some((d) => !/^\d{4}-\d{2}-\d{2}$/.test(d) || !ymdDate(d))) throw new HttpError(400, 'Hari libur harus berformat YYYY-MM-DD.');
+  const used = new Set();
+  c.departments = (Array.isArray(b.departments) ? b.departments : []).slice(0, 20).map((d) => {
+    const name = str(d?.name, 30);
+    if (!name) throw new HttpError(400, 'Nama tujuan wajib diisi (maks. 30 karakter).');
+    let id = prev.departments?.some((x) => x.id === d.id) ? d.id : cdSlug(name);
+    let i = 2; const base = id; while (used.has(id)) id = `${base}_${i++}`;
+    used.add(id);
+    const agentIds = [...new Set((Array.isArray(d.agentIds) ? d.agentIds : []).map(String))].filter((x) => byId('users', x));
+    return { id, name, agentIds, enabled: d.enabled !== false };
+  });
+  if (!c.departments.some((d) => d.enabled)) throw new HttpError(400, 'Aktifkan minimal satu tujuan.');
+  if (b.reminderTemplate?.name) {
+    const t = findTemplate(str(b.reminderTemplate.name, 512), str(b.reminderTemplate.language, 15));
+    if (!t || t.status !== 'APPROVED') throw new HttpError(400, 'Template pengingat harus berstatus APPROVED.');
+    c.reminderTemplate = { name: t.name, language: t.language };
+  } else c.reminderTemplate = null;
+  return c;
+}
+function cdSettingsPublic() {
+  const c = cdCfg(), f = c.waFlowId ? wafById(c.waFlowId) : null;
+  return { ...c, slots: cdSlots(c), timezone: flowTz(), openNow: cdOpenNow(c), form: f ? { id: f.id, name: f.name, status: f.status, validationErrors: f.validationErrors || [] } : null,
+    users: db.users.filter((u) => u.active).map((u) => ({ id: u.id, name: u.name, role: u.role })) };
+}
+app.get('/api/calldesk', wrap(async (req, res) => {
+  const from = Number(req.query.from) || now() - 86400000 * 7, to = Number(req.query.to) || now() + 86400000 * 60;
+  const rows = db.callAppts.filter((a) => {
+    const conv = byId('conversations', a.conversationId);
+    if (!conv || !canSeeConv(req.user, conv)) return false;
+    return CD_OPEN.includes(a.status) || ((a.startAt || a.createdAt) >= from && (a.startAt || a.createdAt) <= to);
+  }).slice(-1000).map(cdPublic);
+  const c = cdCfg();
+  res.json({ timezone: flowTz(), now: now(), appointments: rows, enabled: c.enabled, slots: cdSlots(c), departments: c.departments.map((d) => ({ id: d.id, name: d.name })),
+    ...(req.user.role === 'admin' ? { settings: cdSettingsPublic() } : {}) });
+}));
+app.put('/api/calldesk/settings', requireAdmin, wrap(async (req, res) => {
+  const prev = cdCfg();
+  db.callDesk = cdValidate(req.body || {}, prev);
+  audit(req, 'calldesk.settings', `${db.callDesk.departments.length} tujuan, ${db.callDesk.start}–${db.callDesk.end}`); save();
+  res.json(cdSettingsPublic());
+}));
+// Buat / perbarui formulir di WABA (Flow JSON dikelola Kontaq)
+app.post('/api/calldesk/form', requireAdmin, wrap(async (req, res) => {
+  const c = cdCfg(), json = JSON.stringify(cdFlowJson(), null, 2), cur = c.waFlowId ? wafById(c.waFlowId) : null;
+  if (cur && cur.status === 'DRAFT') {
+    const fd = new FormData();
+    fd.append('name', 'flow.json'); fd.append('asset_type', 'FLOW_JSON'); fd.append('file', new Blob([json], { type: 'application/json' }), 'flow.json');
+    const r = await graph('post', `${cur.id}/assets`, { data: fd });
+    cur.json = json; cur.validationErrors = r.validation_errors || [];
+  } else if (!cur || ['DEPRECATED', 'BLOCKED'].includes(cur.status) || req.body?.recreate) {
+    const name = 'Layanan petugas – janji panggilan' + (cur ? ` (${new Date().toISOString().slice(0, 10)})` : '');
+    const r = await graph('post', `${needWaba()}/flows`, { data: { name, categories: ['APPOINTMENT_BOOKING'], flow_json: json } });
+    const f = wafUpsert({ id: r.id, name, categories: ['APPOINTMENT_BOOKING'], status: 'DRAFT', validation_errors: r.validation_errors || [] });
+    f.json = json; c.waFlowId = f.id;
+  } else throw new HttpError(400, 'Formulir sudah terbit dan tidak dapat diubah. Pengaturan tujuan, jam, dan slot tetap berlaku tanpa mengubah formulir.');
+  const f = wafById(c.waFlowId);
+  await wafRefresh(f).catch(() => {}); f.json = json;
+  audit(req, 'calldesk.form', `${f.id}: ${f.validationErrors.length} error validasi`); save();
+  res.json(cdSettingsPublic());
+}));
+app.post('/api/calldesk/form/publish', requireAdmin, wrap(async (req, res) => {
+  const f = cdCfg().waFlowId && wafById(cdCfg().waFlowId);
+  if (!f) throw new HttpError(400, 'Buat formulir terlebih dahulu.');
+  if (f.status !== 'DRAFT') throw new HttpError(400, 'Formulir sudah terbit.');
+  if (f.validationErrors?.length) throw new HttpError(400, 'Formulir masih memiliki error validasi dari Meta.');
+  await graph('post', `${f.id}/publish`);
+  await wafRefresh(f).catch(() => {});
+  audit(req, 'calldesk.form_publish', f.id); save();
+  res.json(cdSettingsPublic());
+}));
+app.get('/api/calldesk/slots', wrap(async (req, res) => {
+  const dept = cdDept(str(req.query.department, 40));
+  if (!dept) throw new HttpError(404, 'Tujuan tidak ditemukan.');
+  const ymd = str(req.query.date, 10), except = str(req.query.except, 40);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd) || !ymdDate(ymd)) throw new HttpError(400, 'Tanggal tidak valid.');
+  const open = cdWorkday(ymd);
+  res.json({ workday: open, slots: cdSlots().map((hm) => { const t = zonedToUtc(ymd, hm, flowTz()); return { time: hm, startAt: t, free: open && t > now() && cdFree(dept, t, except), taken: cdTaken(dept.id, t, except).length, capacity: cdCapacity(dept) }; }) });
+}));
+app.post('/api/calldesk/appointments/:id/:action(start|done|no_show|cancel|reschedule|claim|link)', wrap(async (req, res) => {
+  const a = byId('callAppts', req.params.id), conv = a && byId('conversations', a.conversationId);
+  if (!a || !conv || !canSeeConv(req.user, conv)) throw new HttpError(404, 'Janji panggilan tidak ditemukan.');
+  const act = req.params.action, open = CD_OPEN.includes(a.status);
+  let warn = null;
+  if (act === 'claim') {
+    if (!open) throw new HttpError(400, 'Janji panggilan sudah selesai.');
+    a.agentId = req.user.id; cdLog(a, `Diambil oleh ${req.user.name}`);
+    if (!conv.assignedTo) { conv.assignedTo = req.user.id; emitConv(conv, 'conversation:update', serializeConv(conv)); }
+    cdAgentReminder(a);
+  } else if (act === 'start') {
+    if (!['waiting', 'scheduled'].includes(a.status)) throw new HttpError(400, 'Janji panggilan tidak dapat dimulai dari status ini.');
+    a.status = 'in_progress'; a.startedAt = now(); if (!a.agentId) a.agentId = req.user.id; cdLog(a, `Dimulai oleh ${req.user.name}`); cdAgentReminder(a);
+  } else if (act === 'done' || act === 'no_show') {
+    if (!open) throw new HttpError(400, 'Janji panggilan sudah selesai.');
+    a.status = act; a.finishedAt = now(); cdLog(a, `${CD_STATUS[act]} — ${req.user.name}`); cdAgentReminder(a);
+  } else if (act === 'cancel') {
+    if (!open) throw new HttpError(400, 'Janji panggilan sudah selesai.');
+    a.status = 'cancelled'; a.finishedAt = now(); cdLog(a, `Dibatalkan oleh ${req.user.name}`); cdAgentReminder(a);
+    const reason = str(req.body?.reason, 300);
+    warn = await cdNotify(a, `Mohon maaf, ${a.kind === 'video' ? 'video call' : 'panggilan telepon'} ${a.code}${a.startAt ? ` (${cdWhen(a.startAt)})` : ''} dibatalkan oleh petugas.${reason ? `\nAlasan: ${reason}` : ''}\n\nKetik *petugas* untuk membuat jadwal baru.`);
+  } else if (act === 'reschedule') {
+    if (!open) throw new HttpError(400, 'Janji panggilan sudah selesai.');
+    const ymd = str(req.body?.date, 10), hm = str(req.body?.time, 5), dept = cdDept(a.departmentId) || { id: a.departmentId, agentIds: [] };
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd) || !cdSlots().includes(hm)) throw new HttpError(400, 'Pilih tanggal dan jam slot yang valid.');
+    const t = zonedToUtc(ymd, hm, flowTz());
+    if (t < now()) throw new HttpError(400, 'Waktu sudah lewat.');
+    if (!cdFree(dept, t, a.id)) throw new HttpError(400, 'Slot tersebut sudah penuh.');
+    Object.assign(a, { startAt: t, status: 'scheduled', remindedAt: 0 });
+    if (a.kind === 'video' && !a.room) a.room = cdRoom(a.code);
+    if (!a.agentId || cdTaken(dept.id, t, a.id).filter((x) => x.agentId === a.agentId).length >= cdCfg().perAgent) a.agentId = cdPickAgent(dept, t, a.id)?.id || req.user.id;
+    cdLog(a, `Dijadwalkan ulang ke ${cdWhen(t)} oleh ${req.user.name}`); cdAgentReminder(a);
+    warn = await cdNotify(a, `📅 *Jadwal ${a.kind === 'video' ? 'video call' : 'panggilan telepon'} diubah*\n${cdWhen(t)} ${cdTzLabel()} · ${a.departmentName}\nKode: ${a.code}`, { withLink: true });
+  } else if (act === 'link') {
+    if (a.kind !== 'video' || !open) throw new HttpError(400, 'Hanya untuk video call yang masih aktif.');
+    if (!a.room) a.room = cdRoom(a.code);
+    warn = await cdNotify(a, `🎥 Ruang video untuk ${a.code} sudah siap. Klik tombol di bawah untuk bergabung.`, { withLink: true });
+    cdLog(a, warn ? 'Link tidak terkirim: ' + warn : `Link dikirim ulang oleh ${req.user.name}`);
+  }
+  if (warn && act !== 'link') cdLog(a, 'Pelanggan belum diberi tahu: ' + warn);
+  audit(req, 'calldesk.' + act, a.code); save(); cdEmit(a);
+  res.json({ ...cdPublic(a), warning: warn });
 }));
 
 /* ───────────────────────── 7c. Pengingat ─────────────────────────
