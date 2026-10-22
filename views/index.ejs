@@ -3680,8 +3680,8 @@
   };
   const WFB_DAYS = [['Mon', 'Sen'], ['Tue', 'Sel'], ['Wed', 'Rab'], ['Thu', 'Kam'], ['Fri', 'Jum'], ['Sat', 'Sab'], ['Sun', 'Min']];
   const WFB_INTERNAL = new Set(['options', 'link', 'sensitive', 'nameAuto']);
-  const WFB_STR_NUM = new Set(['min-chars', 'max-chars', 'max-length']); // Flow JSON: string
-  const WFB_INT = new Set(['min-selected-items', 'max-selected-items', 'min-days', 'max-days', 'height', 'width']);
+  // Meta menolak nilai string untuk properti angka ("Expected property 'max-length' to be of type 'integer'")
+  const WFB_INT = new Set(['min-chars', 'max-chars', 'max-length', 'min-selected-items', 'max-selected-items', 'min-days', 'max-days', 'height', 'width']);
   const WFB_DROP_FALSE = new Set(['required', 'strikethrough', 'markdown']);
   const isField = (c) => !!WFB_COMP[c.type]?.f;
   const fieldKind = (c) => (WFB_COMP[c.type].f === 'calendar' ? (isRange(c.p) ? 'range' : 'string') : WFB_COMP[c.type].f);
@@ -3720,8 +3720,9 @@
           sc.footer = f; continue;
         }
         if (!WFB_COMP[ch.type] || typeof ch['data-source'] === 'string') {
-          if (typeof ch['data-source'] === 'string') unsupported.add('data-source dinamis');
-          sc.children.push({ uid: wuid('c'), type: 'Raw', p: { json: ch } }); continue;
+          const dyn = typeof ch['data-source'] === 'string';
+          if (dyn) unsupported.add('data-source dinamis');
+          sc.children.push({ uid: wuid('c'), type: 'Raw', p: { json: ch, reason: dyn ? `memakai pilihan dinamis ${ch['data-source']}` : ch.type === 'If' ? 'menampilkan komponen bersyarat (If)' : '' } }); continue;
         }
         const { type, 'data-source': ds, 'on-click-action': act, ...p } = ch;
         if (ds) p.options = ds.map((o) => ({ ...o, uid: wuid('o'), id: String(o.id ?? ''), title: String(o.title ?? ''), description: o.description || '', idAuto: false }));
@@ -3797,7 +3798,7 @@
         if (k === 'include-days') { if (Array.isArray(v) && v.length && v.length < 7) o[k] = v; continue; }
         if (k === 'init-value' && Array.isArray(v) && !v.length) continue;
         if (c.type === 'RichText' && k === 'text') { o.text = String(v).split('\n'); continue; }
-        o[k] = WFB_STR_NUM.has(k) ? String(v) : WFB_INT.has(k) ? Math.round(Number(v)) : v;
+        o[k] = WFB_INT.has(k) && v !== '' && Number.isFinite(Number(v)) ? Math.round(Number(v)) : v;
       }
       if (c.p.options) o['data-source'] = c.p.options.map(({ uid, idAuto, ...x }) => Object.fromEntries(Object.entries(x).filter(([, v]) => v !== '' && v != null)));
       if (c.p.link) o['on-click-action'] = act(s, c.p.link);
@@ -3851,7 +3852,7 @@
       const own = new Set(s.children.filter(isField).map((c) => c.p.name));
       for (const c of s.children) {
         const def = WFB_COMP[c.type], p = c.p;
-        if (c.type === 'Raw') { err(`Komponen ${p.json?.type || '?'} tidak didukung editor visual dan disalin apa adanya.`, s, c, 'warn'); continue; }
+        if (c.type === 'Raw') { err(p.reason ? `${p.json?.type || 'Komponen'} ${p.reason} — tidak diubah editor visual, disalin apa adanya (normal untuk formulir yang dikelola Kontaq).` : `Komponen ${p.json?.type || '?'} tidak didukung editor visual dan disalin apa adanya.`, s, c, 'warn'); continue; }
         if (def.min && !vge(v, def.min)) err(`${def.n} membutuhkan Flow JSON ${def.min} atau lebih baru.`, s, c);
         for (const d of def.props) {
           if (d.show && !d.show(p)) continue;

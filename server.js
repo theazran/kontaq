@@ -4398,7 +4398,7 @@ function cdFlowJson() {
           { type: 'TextInput', name: 'nama', label: 'Nama lengkap', 'input-type': 'text', required: true },
           { type: 'TextInput', name: 'identitas', label: 'No. HP / NIK', 'input-type': 'text', required: false, 'helper-text': 'Opsional, membantu petugas menemukan data Anda' },
           { type: 'Dropdown', name: 'tujuan', label: 'Tujuan', required: true, 'data-source': '${data.departments}' },
-          { type: 'TextArea', name: 'keperluan', label: 'Keperluan', required: true, 'max-length': '500' },
+          { type: 'TextArea', name: 'keperluan', label: 'Keperluan', required: true, 'max-length': 500 },
           { type: 'RadioButtonsGroup', name: 'jenis', label: 'Jenis panggilan', required: true, 'data-source': '${data.kinds}' },
           { type: 'Footer', label: 'Lanjut', 'on-click-action': { name: 'navigate', next: { type: 'screen', name: 'JADWAL' }, payload: {
             nama: '${form.nama}', identitas: '${form.identitas}', tujuan: '${form.tujuan}', keperluan: '${form.keperluan}', jenis: '${form.jenis}',
