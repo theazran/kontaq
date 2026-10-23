@@ -605,28 +605,3 @@ button.wfb-vrow:hover { border-color: var(--border-strong); background: var(--su
 .wfp-done-ic { width: 2.5rem; height: 2.5rem; border-radius: 999px; background: var(--accent-soft); color: var(--accent-ink); display: grid; place-items: center; margin: 0 auto .5rem; }
 .wfp-done-ic svg { width: 20px; height: 20px; }
 .wfp-payload { text-align: left; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; background: var(--surface-2); border-radius: .375rem; padding: .5rem; margin-bottom: .75rem; white-space: pre-wrap; word-break: break-all; max-height: 12rem; overflow-y: auto; }
-
-/* Layanan petugas (janji panggilan) */
-.cd-list { padding: .5rem; display: flex; flex-direction: column; gap: .375rem; }
-.cd-row { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; padding: .625rem .75rem; border: 1px solid var(--border); border-radius: .5rem; background: var(--surface); }
-.cd-row.is-now { border-color: var(--accent); background: var(--accent-soft); }
-.cd-when { width: 5.5rem; flex: none; }
-.cd-mini { padding: .5rem .625rem; border: 1px solid var(--border); border-radius: .5rem; }
-.cd-menu { right: 0; top: calc(100% + .25rem); min-width: 13rem; padding: .25rem; display: flex; flex-direction: column; z-index: 40; }
-.cd-menu button { text-align: left; font-size: .8125rem; padding: .4375rem .625rem; border-radius: .375rem; }
-.cd-menu button:hover { background: var(--surface-2); }
-.cd-slots { display: grid; grid-template-columns: repeat(auto-fill, minmax(4.5rem, 1fr)); gap: .375rem; }
-.cd-slot { display: flex; flex-direction: column; align-items: center; padding: .375rem; border: 1px solid var(--border-strong); border-radius: .375rem; font-size: .8125rem; font-weight: 500; }
-.cd-slot span { font-size: .625rem; color: var(--ink-3); font-weight: 400; }
-.cd-slot:hover:not(:disabled) { border-color: var(--accent); }
-.cd-slot.on { background: var(--ink); color: var(--surface); border-color: var(--ink); }
-.cd-slot.on span { color: inherit; opacity: .7; }
-.cd-slot:disabled { opacity: .4; cursor: not-allowed; text-decoration: line-through; }
-.cd-dep { padding: .625rem; border: 1px solid var(--border); border-radius: .5rem; }
-.cd-agent { cursor: pointer; }
-.cd-agent input { position: absolute; opacity: 0; pointer-events: none; }
-.cd-agent span { display: inline-block; font-size: .75rem; padding: .1875rem .625rem; border: 1px solid var(--border-strong); border-radius: 999px; }
-.cd-agent input:checked + span { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-ink); font-weight: 500; }
-.cd-agent input:focus-visible + span { outline: 2px solid var(--accent); }
-.rem-due.cd-now { border-left-color: var(--accent); }
-.rem-due.cd-now .accent-ink svg { width: 16px; height: 16px; }

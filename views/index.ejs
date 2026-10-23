@@ -1632,7 +1632,6 @@
       </div>
       <div class="p-4 border-b bd"><div class="text-xs font-semibold mb-2">Profil pelanggan</div><div id="info-stats" class="text-xs space-y-1.5"><div class="ink-3">Memuat…</div></div></div>
       <div class="p-4 border-b bd" id="info-csat">${csatInfoHtml(c)}</div>
-      <div id="info-cd">${cdInfoHtml(c)}</div>
       <div class="p-4 border-b bd" id="info-rem">${remInfoHtml(c)}</div>
       <form id="f-contact" class="p-4 space-y-3 border-b bd">
         <div class="sm:hidden grid grid-cols-2 gap-2">
@@ -2720,7 +2719,6 @@
     after_hours: ['Jam kerja', 'Di jam kerja diteruskan ke agen; di luar jam kerja dibalas pesan otomatis.'],
     welcome: ['Sambutan kontak baru', 'Kontak baru menerima sambutan dengan tombol pilihan.'],
     court_schedule: ['Cek jadwal sidang PN Bulukumba', 'Tanya tanggal → ambil jadwal dari API PN Bulukumba → kirim daftar perkara pidana & perdata.'],
-    service_menu: ['Menu layanan (halo / petugas / video call)', 'Menu pilihan: bicara dengan petugas (formulir panggilan suara/video), cek jadwal sidang, informasi layanan, pengaduan. Buat formulir di Pengaturan › Layanan petugas dulu.'],
   };
   const flId = () => 'n' + Math.random().toString(36).slice(2, 10);
   const flMinutes = (m) => (m % 60 ? (m > 60 ? `${Math.floor(m / 60)} jam ${m % 60} menit` : `${m} menit`) : `${m / 60} jam`);
@@ -2739,8 +2737,6 @@
     const settings = { pauseIfHumanMin: 30, cooldownMin: 0, activeFrom: '', activeUntil: '', cancelWords: ['batal'], cancelText: 'Baik, permintaan dibatalkan.' };
     const root = flId(), nodes = { [root]: { id: root, type: 'trigger', cfg: {}, next: null } };
     const add = (type, cfg, links = {}) => { const id = flId(); nodes[id] = { id, type, cfg, ...Object.fromEntries(flPorts(type).map((p) => [p, null])), ...links }; return id; };
-    const msg = (text, links) => add('send', { text, image: null, buttons: [] }, links);
-    const toAgent = () => add('assign', { mode: 'least_busy', onlyIfUnassigned: true });
     let name = 'Flow baru';
     if (kind === 'keyword_agent') {
       name = 'Info harga → teruskan ke agen';
@@ -2758,27 +2754,11 @@
       const send = add('send', { text: 'Halo {{name}}, selamat datang! Silakan pilih topik yang Anda butuhkan:', image: null, buttons: ['Info produk', 'Bantuan'] });
       nodes[root].next = add('condition', { kind: 'new_contact', days: 30 }, { yes: send });
     } else if (kind === 'court_schedule') {
+      // API publik PN Bulukumba: { success, tanggal, pidana: [...], perdata: [...], total: { pidana, perdata, semua } }
       name = 'Jadwal sidang PN Bulukumba';
       settings.cancelText = 'Baik, pengecekan jadwal sidang dibatalkan.';
-      nodes[root].next = add('condition', { kind: 'keyword', match: 'contains', keywords: ['jadwal sidang', 'sidang'] }, { yes: courtFlow() });
-    } else if (kind === 'service_menu') {
-      // Menu utama: formulir Layanan petugas (panggilan suara/video), cek jadwal sidang, informasi, pengaduan
-      name = 'Menu layanan';
-      const officer = add('waflow', { flowId: S.fl?.calldeskFlowId || '', text: 'Silakan isi formulir berikut untuk berbicara dengan petugas melalui panggilan suara atau video call.',
-        cta: 'Isi formulir', header: '', footer: '', screen: '', var: 'formulir', timeoutMinutes: 60 }, { fail: msg('Formulir belum diisi. Ketik *petugas* kapan saja untuk mencoba lagi.') });
-      const info = msg('ℹ️ *Informasi layanan*\nJam layanan: Senin–Jumat, 08.00–15.00.\n\nKetik *petugas* untuk berbicara dengan petugas, atau *sidang* untuk mengecek jadwal sidang.');
-      const complaint = msg('Silakan tuliskan pengaduan Anda. Petugas kami akan menindaklanjutinya.', { next: toAgent() });
-      const pick = (value, yes, no) => add('condition', { kind: 'variable', path: 'menu', op: 'eq', value }, { yes, no });
-      const route = pick('petugas', officer, pick('sidang', courtFlow(), pick('info', info, complaint)));
-      const ask = add('ask', { ...FL_ASK_DEFAULTS, text: 'Halo {{name}}, selamat datang di layanan WhatsApp kami. Silakan pilih layanan:', var: 'menu', input: 'choice', button: 'Pilih layanan',
-        choices: [{ title: 'Bicara dengan petugas', value: 'petugas' }, { title: 'Cek jadwal sidang', value: 'sidang' }, { title: 'Informasi layanan', value: 'info' }, { title: 'Pengaduan', value: 'pengaduan' }],
-        invalidText: 'Silakan pilih salah satu layanan dari daftar, atau ketik *batal*.' }, { next: route, fail: msg('Petugas kami akan membantu Anda.', { next: toAgent() }) });
-      nodes[root].next = add('condition', { kind: 'keyword', match: 'contains', keywords: ['halo', 'petugas', 'video call'] }, { yes: ask });
-    }
-    return { id: null, name, enabled: false, root, nodes, settings };
-
-    // Cek jadwal sidang (API publik PN Bulukumba: { success, tanggal, pidana: [...], perdata: [...], total: { pidana, perdata, semua } }); mengembalikan langkah pertamanya
-    function courtFlow() {
+      const msg = (text, links) => add('send', { text, image: null, buttons: [] }, links);
+      const toAgent = () => add('assign', { mode: 'least_busy', onlyIfUnassigned: true });
       const item = (pihak) => `*{{no}}. {{item.noPerkara}}*\n🕐 {{item.jamSidang|jam}} · {{item.ruangSidang}}\n📋 {{item.agendaSidang}}\n${pihak}\n⚖️ Hakim: {{item.namaHakim|default:-}}`;
       const list = (text, path, pihak, next) => add('send', { text, image: null, buttons: [], repeat: { path, item: item(pihak), perMessage: 5, max: 30, more: '…dan {{rest}} perkara lainnya.' } }, next ? { next } : {});
       const perdata = list('📄 *Perkara perdata* ({{count}}) — {{page}}/{{pages}}', 'hasil.perdata', '👥 {{item.penggugat|default:-}} vs {{item.tergugat|default:-}}');
@@ -2789,9 +2769,11 @@
       const apiFail = msg('Maaf, data jadwal sidang sedang tidak dapat diakses. {{hasil.error|default:Silakan coba beberapa saat lagi.}}', { next: toAgent() });
       const api = add('api', { method: 'GET', url: 'https://api.pnblk.my.id/api.php?tanggalSidang={{tanggal}}', headers: [], body: '', timeoutSec: 15, saveAs: 'hasil', okPath: 'success', okValue: 'true' }, { next: any, fail: apiFail });
       const badDate = msg('Maaf, tanggal belum dapat dikenali. Petugas kami akan membantu Anda.', { next: toAgent() });
-      return add('ask', { ...FL_ASK_DEFAULTS, text: 'Tanggal sidang yang ingin Anda cek?', var: 'tanggal', input: 'date', days: 3,
+      const ask = add('ask', { ...FL_ASK_DEFAULTS, text: 'Tanggal sidang yang ingin Anda cek?', var: 'tanggal', input: 'date', days: 3,
         invalidText: 'Format tanggal belum dikenali. Contoh: 21-10-2026, atau ketik *batal*.' }, { next: api, fail: badDate });
+      nodes[root].next = add('condition', { kind: 'keyword', match: 'contains', keywords: ['jadwal sidang', 'sidang'] }, { yes: ask });
     }
+    return { id: null, name, enabled: false, root, nodes, settings };
   }
 
   function flSummary(n) {
@@ -3852,7 +3834,7 @@
       const own = new Set(s.children.filter(isField).map((c) => c.p.name));
       for (const c of s.children) {
         const def = WFB_COMP[c.type], p = c.p;
-        if (c.type === 'Raw') { err(p.reason ? `${p.json?.type || 'Komponen'} ${p.reason} — tidak diubah editor visual, disalin apa adanya (normal untuk formulir yang dikelola Kontaq).` : `Komponen ${p.json?.type || '?'} tidak didukung editor visual dan disalin apa adanya.`, s, c, 'warn'); continue; }
+        if (c.type === 'Raw') { err(p.reason ? `${p.json?.type || 'Komponen'} ${p.reason} — tidak diubah editor visual, disalin apa adanya.` : `Komponen ${p.json?.type || '?'} tidak didukung editor visual dan disalin apa adanya.`, s, c, 'warn'); continue; }
         if (def.min && !vge(v, def.min)) err(`${def.n} membutuhkan Flow JSON ${def.min} atau lebih baru.`, s, c);
         for (const d of def.props) {
           if (d.show && !d.show(p)) continue;
@@ -5530,286 +5512,9 @@
   }
 
   /* ───────────── Panggilan (Calling API) ───────────── */
-  /* ───────────── Layanan petugas (janji panggilan suara / video) ───────────── */
-  const CD_STATUS = { waiting: ['amber', 'Menunggu petugas'], pending_slot: ['amber', 'Memilih jadwal'], scheduled: ['', 'Terjadwal'], in_progress: ['green', 'Berlangsung'], done: ['green', 'Selesai'], no_show: ['red', 'Tidak hadir'], cancelled: ['', 'Dibatalkan'] };
-  const CD_OPEN = ['waiting', 'pending_slot', 'scheduled', 'in_progress'];
-  const cdBadge = (s) => { const [c, l] = CD_STATUS[s] || ['', s]; return `<span class="badge ${c ? 'badge-' + c : ''}"><span class="dot"></span>${esc(l)}</span>`; };
-  const cdKind = (a) => (a.kind === 'video' ? `${ICON.camera.replace('<svg', '<svg width="12" height="12" style="display:inline;vertical-align:-2px"')} Video` : `${ICON.phone.replace('<svg', '<svg width="12" height="12" style="display:inline;vertical-align:-2px"')} Suara`);
-  S.cd = { list: [], tab: 'today', loaded: false };
-  async function cdLoad() {
-    const d = await api('GET', '/api/calldesk');
-    Object.assign(S.cd, { list: d.appointments, slots: d.slots, departments: d.departments, enabled: d.enabled, loaded: true });
-    return d;
-  }
-  function cdUpsert(a) {
-    const i = S.cd.list.findIndex((x) => x.id === a.id);
-    if (i >= 0) S.cd.list[i] = a; else S.cd.list.push(a);
-    if (S.view === 'calls') cdRenderList();
-    const c = activeConv(); if (S.view === 'inbox' && c && c.id === a.conversationId) { const box = $('#info-cd'); if (box) box.innerHTML = cdInfoHtml(c); }
-  }
-  // Aksi petugas pada satu janji (tombol data-cda di daftar, panel info, kartu notifikasi)
-  function cdActions(a, compact, chat = true) {
-    const open = CD_OPEN.includes(a.status), b = (act, label, cls = '') => `<button class="btn btn-sm ${cls}" data-cda="${act}" data-cdid="${a.id}">${label}</button>`;
-    const out = [];
-    if (a.kind === 'video' && a.roomUrl && open) out.push(`<a class="btn btn-sm btn-accent" href="${esc(a.roomUrl)}" target="_blank" rel="noopener noreferrer" data-cda="join" data-cdid="${a.id}">${ICON.camera} Gabung video</a>`);
-    if (a.kind === 'voice' && open) out.push(b('call', `${ICON.phone} Telepon`, 'btn-accent'));
-    if (!compact) {
-      if (open && a.agentId !== S.user.id) out.push(b('claim', 'Ambil'));
-      if (['waiting', 'scheduled'].includes(a.status)) out.push(b('start', 'Mulai'));
-      if (open) out.push(b('done', 'Selesai'), b('reschedule', 'Jadwal ulang'), b('more', '⋯'));
-    }
-    if (chat) out.push(`<a class="btn btn-sm btn-ghost" href="#/inbox/${a.conversationId}">Chat</a>`);
-    return out.join('');
-  }
-  const cdTime = (a) => (a.startAt ? fmtTz(a.startAt) : '—');
-  function cdRowHtml(a) {
-    return `<div class="cd-row ${a.status === 'waiting' ? 'is-now' : ''}" data-cdrow="${a.id}">
-      <div class="cd-when"><div class="text-[13px] font-semibold">${a.status === 'waiting' ? 'Sekarang' : a.startAt ? fmtTz(a.startAt, { weekday: undefined, day: undefined, month: undefined }) : '—'}</div><div class="text-[11px] ink-3">${a.startAt ? fmtTz(a.startAt, { hour: undefined, minute: undefined }) : 'belum dijadwalkan'}</div></div>
-      <div class="min-w-0 flex-1">
-        <div class="flex flex-wrap items-center gap-2"><button class="font-medium hover:underline text-left" data-cda="detail" data-cdid="${a.id}">${esc(a.name)}</button><span class="text-[11px] ink-3 mono">${esc(a.code)}</span>${cdBadge(a.status)}</div>
-        <div class="text-xs ink-2 mt-0.5">${cdKind(a)} · ${esc(a.departmentName)} · ${a.agentName ? esc(a.agentName) : '<span class="warn-ink">belum ada petugas</span>'}</div>
-        <div class="text-xs ink-3 truncate">${esc(a.purpose)}</div>
-      </div>
-      <div class="flex flex-wrap gap-1.5 justify-end">${cdActions(a)}</div>
-    </div>`;
-  }
-  function cdRenderList() {
-    const box = $('#cd-list'); if (!box) return;
-    const today = tzParts().date, day = (t) => (t ? tzParts(t).date : '');
-    const L = S.cd.list, open = L.filter((a) => CD_OPEN.includes(a.status));
-    const groups = {
-      today: open.filter((a) => a.status === 'waiting' || day(a.startAt) === today || (a.status === 'pending_slot')),
-      upcoming: open.filter((a) => a.startAt && day(a.startAt) > today && a.status !== 'waiting'),
-      history: L.filter((a) => !CD_OPEN.includes(a.status)),
-    };
-    const sort = (a, b) => (b.status === 'waiting') - (a.status === 'waiting') || (a.startAt || a.createdAt) - (b.startAt || b.createdAt);
-    const rows = (groups[S.cd.tab] || []).slice().sort(S.cd.tab === 'history' ? (a, b) => (b.startAt || b.createdAt) - (a.startAt || a.createdAt) : sort);
-    $$('#cd-tabs [data-cdt]').forEach((x) => { const n = groups[x.dataset.cdt].length; $('[data-n]', x).textContent = x.dataset.cdt === 'history' || !n ? '' : n; x.classList.toggle('active', x.dataset.cdt === S.cd.tab); });
-    box.innerHTML = rows.map(cdRowHtml).join('') || `<div class="empty">${{ today: 'Tidak ada janji panggilan hari ini.', upcoming: 'Belum ada janji panggilan mendatang.', history: 'Belum ada riwayat.' }[S.cd.tab]}</div>`;
-  }
-  async function cdSection() {
-    const el = $('#cd-sec'); if (!el) return;
-    try { await cdLoad(); } catch (e) { el.innerHTML = `<div class="p-4 text-xs danger-ink">${esc(e.message)}</div>`; return; }
-    if (S.view !== 'calls') return;
-    el.innerHTML = `<div class="card-h"><div class="min-w-0"><div class="card-t">Janji panggilan</div><div class="text-[11px] ink-3">Permintaan panggilan suara & video call dari formulir Layanan petugas · zona waktu ${esc(TZ)}</div></div>
-        ${S.isAdmin ? '<a class="btn btn-sm" href="#/settings/calldesk">Pengaturan</a>' : ''}</div>
-      <div class="px-4 pt-3"><div class="seg" id="cd-tabs">${[['today', 'Hari ini & perlu tindakan'], ['upcoming', 'Mendatang'], ['history', 'Riwayat']].map(([k, l]) => `<button data-cdt="${k}">${l}<span class="ml-1 ink-3" data-n></span></button>`).join('')}</div></div>
-      <div id="cd-list" class="cd-list"></div>`;
-    $$('#cd-tabs [data-cdt]').forEach((b) => b.addEventListener('click', () => { S.cd.tab = b.dataset.cdt; cdRenderList(); }));
-    cdRenderList();
-  }
-  // Panel info Inbox: janji panggilan aktif percakapan ini
-  function cdInfoHtml(c) {
-    const xs = S.cd.list.filter((a) => a.conversationId === c.id && CD_OPEN.includes(a.status));
-    if (!xs.length) return '';
-    return `<div class="p-4 border-b bd"><div class="text-xs font-semibold mb-2">Janji panggilan</div><div class="space-y-2">${xs.map((a) => `<div class="cd-mini">
-      <div class="flex items-center gap-2"><span class="text-[13px] font-medium">${cdKind(a)}</span><span class="mono text-[11px] ink-3">${esc(a.code)}</span>${cdBadge(a.status)}</div>
-      <div class="text-xs ink-2 mt-0.5">${a.status === 'waiting' ? 'Sekarang' : esc(cdTime(a))} · ${esc(a.departmentName)}${a.agentName ? ' · ' + esc(a.agentName) : ''}</div>
-      <div class="flex flex-wrap gap-1.5 mt-2">${cdActions(a, true, false)}</div></div>`).join('')}</div></div>`;
-  }
-  function cdDetail(a) {
-    modal(`${a.code} · ${a.name}`, `<div class="space-y-3 text-[13px]">
-      <div class="flex flex-wrap items-center gap-2">${cdBadge(a.status)}<span class="ink-2">${cdKind(a)}</span></div>
-      <div class="grid grid-cols-[7rem_1fr] gap-y-1.5 text-xs">
-        <span class="ink-3">Waktu</span><span>${a.status === 'waiting' ? 'Sekarang (menunggu petugas)' : esc(cdTime(a))}</span>
-        <span class="ink-3">Tujuan</span><span>${esc(a.departmentName)}</span>
-        <span class="ink-3">Petugas</span><span>${esc(a.agentName || '—')}</span>
-        <span class="ink-3">WhatsApp</span><span class="mono">+${esc(a.phone)}</span>
-        ${a.identity ? `<span class="ink-3">No. HP / NIK</span><span>${esc(a.identity)}</span>` : ''}
-        <span class="ink-3">Keperluan</span><span class="whitespace-pre-wrap">${esc(a.purpose)}</span>
-        ${a.roomUrl ? `<span class="ink-3">Ruang video</span><span class="break-all"><a class="underline" href="${esc(a.roomUrl)}" target="_blank" rel="noopener noreferrer">${esc(a.roomUrl)}</a></span>` : ''}
-        ${a.kind === 'voice' ? `<span class="ink-3">Izin telepon</span><span>${callbackOk(a) ? '<span class="accent-ink">Diberikan</span>' : 'Belum'}</span>` : ''}
-      </div>
-      <details><summary class="text-xs font-medium cursor-pointer">Riwayat</summary><ol class="mt-2 space-y-1">${(a.history || []).slice().reverse().map((h) => `<li class="text-[11px]"><span class="ink-3">${fmtTz(h.at)}</span> · ${esc(h.text)}</li>`).join('')}</ol></details>
-    </div>`, { footer: `<div class="flex flex-wrap gap-1.5 justify-end w-full">${cdActions(a)}</div>` });
-  }
-  function cdMore(a, btn) {
-    $$('.cd-menu').forEach((x) => x.remove());
-    const m = document.createElement('div'); m.className = 'pop cd-menu';
-    m.innerHTML = [a.kind === 'video' ? ['link', 'Kirim ulang link ke pelanggan'] : null, ['no_show', 'Tandai tidak hadir'], ['cancel', 'Batalkan janji', 'danger-ink']].filter(Boolean)
-      .map(([k, l, cls]) => `<button data-cda="${k}" data-cdid="${a.id}" class="${cls || ''}">${l}</button>`).join('');
-    btn.parentElement.style.position = 'relative'; btn.parentElement.appendChild(m);
-    setTimeout(() => document.addEventListener('click', () => m.remove(), { once: true }));
-  }
-  async function cdReschedule(a) {
-    let date = a.startAt && a.startAt > Date.now() ? tzParts(a.startAt).date : tzParts().date;
-    modal(`Jadwal ulang ${a.code}`, `<div class="space-y-3"><div><label class="label" for="cdr-d">Tanggal</label><input type="date" class="input" id="cdr-d" min="${tzParts().date}" value="${date}"></div>
-      <div><div class="label">Jam <span class="ink-3 font-normal">(angka = terisi/kapasitas)</span></div><div id="cdr-slots" class="cd-slots"></div></div>
-      <p class="hint">Pelanggan diberi tahu otomatis: pesan + tombol link bila jendela 24 jam terbuka, selain itu memakai template pengingat (bila diatur).</p></div>`,
-    { footer: '<button class="btn" data-act="modal-close">Batal</button><button class="btn btn-primary" id="cdr-go" disabled>Simpan jadwal</button>' });
-    let pick = null;
-    const load = async () => {
-      date = $('#cdr-d').value; pick = null; $('#cdr-go').disabled = true;
-      const box = $('#cdr-slots'); box.innerHTML = '<span class="text-xs ink-3">Memuat…</span>';
-      const r = await api('GET', `/api/calldesk/slots?department=${encodeURIComponent(a.departmentId)}&date=${date}&except=${a.id}`).catch((e) => ({ error: e.message }));
-      if (r.error) { box.innerHTML = `<span class="text-xs danger-ink">${esc(r.error)}</span>`; return; }
-      box.innerHTML = r.workday ? r.slots.map((s) => `<button type="button" class="cd-slot" data-t="${s.time}" ${s.free ? '' : 'disabled'}>${s.time.replace(':', '.')}<span>${s.taken}/${s.capacity}</span></button>`).join('') : '<span class="text-xs ink-3">Bukan hari layanan.</span>';
-      $$('.cd-slot', box).forEach((b) => b.addEventListener('click', () => { pick = b.dataset.t; $$('.cd-slot', box).forEach((x) => x.classList.toggle('on', x === b)); $('#cdr-go').disabled = false; }));
-    };
-    $('#cdr-d').addEventListener('change', load); load();
-    $('#cdr-go').addEventListener('click', (e) => busy(e.currentTarget, async () => {
-      const r = await api('POST', `/api/calldesk/appointments/${a.id}/reschedule`, { date, time: pick });
-      closeModal(); cdUpsert(r); toast(r.warning ? `Dijadwalkan ulang, tetapi pelanggan belum diberi tahu: ${r.warning}` : `Dijadwalkan ulang ke ${fmtTz(r.startAt)}. Pelanggan sudah diberi tahu.`, !!r.warning);
-    }));
-  }
-  document.addEventListener('click', (e) => {
-    const b = e.target.closest('[data-cda]'); if (!b) return;
-    const a = S.cd.list.find((x) => x.id === b.dataset.cdid); if (!a) return;
-    const act = b.dataset.cda;
-    if (act === 'join') { b.closest('#rem-stack [data-cdcard]')?.remove(); return; } // tautan dibuka browser
-    e.preventDefault();
-    if (act === 'detail') return cdDetail(a);
-    if (act === 'more') { e.stopPropagation(); return cdMore(a, b); }
-    if (act === 'reschedule') return cdReschedule(a);
-    if (act === 'call') {
-      if (!callbackOk(a)) {
-        return confirmBox('Pelanggan belum mengizinkan ditelepon. Kirim permintaan izin telepon sekarang?', 'Kirim permintaan').then((ok) => ok && busy(null, async () => {
-          await api('POST', `/api/conversations/${a.conversationId}/messages`, { type: 'call_permission_request', body: `Petugas ${S.user.name} ingin menelepon Anda untuk ${a.code}. Izinkan panggilan WhatsApp?` });
-          toast('Permintaan izin telepon dikirim. Tombol Telepon aktif setelah pelanggan menyetujui.');
-        }));
-      }
-      b.closest('#rem-stack [data-cdcard]')?.remove();
-      return startCallback({ id: a.contactId, name: a.contactName, phone: a.phone });
-    }
-    const ask = { cancel: 'Batalkan janji ini? Pelanggan akan diberi tahu.', no_show: 'Tandai pelanggan tidak hadir?' }[act];
-    (ask ? confirmBox(ask, act === 'cancel' ? 'Batalkan janji' : 'Tandai', act === 'cancel') : Promise.resolve(true)).then((ok) => ok && busy(b.tagName === 'BUTTON' ? b : null, async () => {
-      const r = await api('POST', `/api/calldesk/appointments/${a.id}/${act}`);
-      cdUpsert(r); if ($('#modal-root').innerHTML && act !== 'link') closeModal();
-      toast(r.warning ? `Tersimpan, tetapi pelanggan belum diberi tahu: ${r.warning}` : { claim: 'Janji diambil.', start: 'Ditandai berlangsung.', done: 'Ditandai selesai.', no_show: 'Ditandai tidak hadir.', cancel: 'Janji dibatalkan, pelanggan diberi tahu.', link: 'Link dikirim ulang.' }[act], !!r.warning);
-    }));
-  });
-  // Permintaan "sekarang" untuk petugas: kartu di pojok layar sampai ditangani
-  function cdNowCard(a) {
-    if (a.agentId !== S.user.id) return;
-    let root = $('#rem-stack');
-    if (!root) { root = document.createElement('div'); root.id = 'rem-stack'; root.setAttribute('aria-live', 'polite'); document.body.appendChild(root); }
-    $(`[data-cdcard="${a.id}"]`, root)?.remove();
-    const el = document.createElement('div'); el.className = 'rem-due cd-now'; el.dataset.cdcard = a.id; el.setAttribute('role', 'alert');
-    el.innerHTML = `<div class="flex items-start gap-2"><span class="accent-ink mt-0.5">${a.kind === 'video' ? ICON.camera : ICON.phone}</span><div class="min-w-0 flex-1">
-        <div class="text-[11px] ink-3">Permintaan ${a.kind === 'video' ? 'video call' : 'telepon'} sekarang · ${esc(a.code)}</div>
-        <div class="text-[13px] font-medium">${esc(a.name)} · ${esc(a.departmentName)}</div><div class="text-xs ink-2 line-clamp-2">${esc(a.purpose)}</div></div>
-        <button class="btn btn-ghost btn-icon" onclick="this.closest('[data-cdcard]').remove()" aria-label="Tutup">${ICON.x}</button></div>
-      <div class="flex flex-wrap gap-1.5 mt-2">${cdActions(a, true)}</div>`;
-    root.appendChild(el);
-    playChime(true); notifyBrowser(`Permintaan ${a.kind === 'video' ? 'video call' : 'telepon'} sekarang`, `${a.name} · ${a.departmentName}`);
-  }
-
-  /* Pengaturan › Layanan petugas */
-  async function setCalldesk() {
-    const el = $('#set-body');
-    let d; try { d = await api('GET', '/api/calldesk'); } catch (e) { el.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
-    const c = d.settings, tpls = (await ensureTemplates().catch(() => [])).filter((t) => t.status === 'APPROVED');
-    const deps = c.departments.map((x) => ({ ...x }));
-    const f = c.form;
-    el.innerHTML = `<div class="space-y-4">
-      <section class="card"><div class="card-h"><div class="min-w-0"><div class="card-t">Layanan petugas</div><div class="text-[11px] ink-3">Pelanggan meminta panggilan suara (WhatsApp) atau video call (Jitsi) lewat formulir; Kontaq menjadwalkan, menunjuk petugas, dan mengirim link otomatis.</div></div>${sw('cd-on', c.enabled, 'Aktifkan layanan petugas')}</div>
-        <div class="p-4 grid sm:grid-cols-2 gap-3 text-xs">
-          <label class="flex items-start gap-2"><input type="checkbox" class="check mt-0.5" id="cd-now" ${c.callNow ? 'checked' : ''}> <span><b>Telepon sekarang</b><br><span class="ink-3">Pelanggan dapat meminta panggilan langsung bila di jam layanan dan ada petugas tujuan yang sedang online di Kontaq.</span></span></label>
-          <div class="ink-2">Status saat ini: ${c.openNow ? '<span class="accent-ink font-medium">di jam layanan</span>' : 'di luar jam layanan'} · zona waktu ${esc(c.timezone)}</div>
-        </div></section>
-
-      <section class="card"><div class="card-h"><div class="min-w-0"><div class="card-t">Formulir WhatsApp Flow</div><div class="text-[11px] ink-3">Dua layar: data pemohon → waktu panggilan. Daftar tujuan, slot jam, dan tanggal diambil dari pengaturan di bawah setiap kali formulir dikirim.</div></div>
-          ${f ? wfBadge(f.status) : '<span class="badge">Belum dibuat</span>'}</div>
-        <div class="p-4 space-y-3 text-xs">
-          ${f?.validationErrors?.length ? `<div class="wfb-note danger">Meta menemukan ${f.validationErrors.length} error validasi: ${esc(f.validationErrors.map((e) => e.message || e.error).slice(0, 3).join(' · '))}</div>` : ''}
-          <div class="flex flex-wrap gap-2">
-            ${!f || ['DEPRECATED', 'BLOCKED'].includes(f.status) ? `<button class="btn btn-primary" id="cd-form">${ICON.form} Buat formulir di Meta</button>` : ''}
-            ${f?.status === 'DRAFT' ? `<button class="btn" id="cd-form">${ICON.refresh} Perbarui formulir</button><button class="btn btn-accent" id="cd-pub" ${f.validationErrors?.length ? 'disabled' : ''}>Terbitkan</button>` : ''}
-            ${f ? `<a class="btn" href="#/waflows/${esc(f.id)}">Lihat di WhatsApp Flows</a>` : ''}
-          </div>
-          <ol class="list-decimal ml-4 space-y-1 ink-2">
-            <li>Buat formulir, lalu uji lewat pratinjau di WhatsApp Flows, kemudian <b>Terbitkan</b>.</li>
-            <li>Buka <b>Flow otomatis › Flow baru › Menu layanan</b> (kata kunci <i>halo, petugas, video call</i> — dapat ditambah), simpan, lalu aktifkan.</li>
-            <li>Petugas melihat jadwal di menu <b>Panggilan</b> dan mendapat pengingat sebelum jadwal.</li>
-          </ol>
-        </div></section>
-
-      <section class="card"><div class="card-h"><div class="card-t">Tujuan & petugas</div><button class="btn btn-sm" id="cd-add">${ICON.plus} Tujuan</button></div>
-        <div class="p-4 space-y-2" id="cd-deps"></div>
-        <p class="hint px-4 pb-4 -mt-2">Tujuan tanpa petugas dilayani semua pengguna aktif. Kapasitas slot = jumlah petugas × kuota per petugas.</p></section>
-
-      <section class="card"><div class="card-h"><div class="card-t">Jam layanan & slot</div></div>
-        <div class="p-4 space-y-3">
-          <div><div class="label">Hari layanan</div><div class="flex flex-wrap gap-x-3 gap-y-1.5">${AR_DAYS.map((x, i) => `<label class="flex items-center gap-1.5 text-[13px]"><input type="checkbox" class="check" name="cd-day" value="${i}" ${c.days.includes(i) ? 'checked' : ''}>${x}</label>`).join('')}</div></div>
-          <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            <div><label class="label" for="cd-s">Mulai</label><input type="time" class="input" id="cd-s" value="${c.start}"></div>
-            <div><label class="label" for="cd-e">Selesai</label><input type="time" class="input" id="cd-e" value="${c.end}"></div>
-            <div><label class="label" for="cd-sl">Durasi slot</label><select class="select" id="cd-sl">${[10, 15, 20, 30, 45, 60, 90, 120].map((m) => `<option value="${m}" ${c.slotMinutes === m ? 'selected' : ''}>${m} menit</option>`).join('')}</select></div>
-            <div><label class="label" for="cd-pa">Kuota per petugas</label><input type="number" class="input" id="cd-pa" min="1" max="10" value="${c.perAgent}"></div>
-            <div><label class="label" for="cd-da">Pesan maks. (hari ke depan)</label><input type="number" class="input" id="cd-da" min="1" max="60" value="${c.daysAhead}"></div>
-          </div>
-          <div><label class="label" for="cd-hol">Hari libur <span class="ink-3 font-normal">(YYYY-MM-DD, pisahkan koma)</span></label><input class="input mono" id="cd-hol" value="${esc(c.holidays.join(', '))}" placeholder="2026-12-25, 2026-12-31"></div>
-          <p class="hint" id="cd-slots-prev"></p>
-        </div></section>
-
-      <section class="card"><div class="card-h"><div class="card-t">Video call (Jitsi Meet)</div></div>
-        <div class="p-4 space-y-3">
-          <div class="grid sm:grid-cols-2 gap-3">
-            <div><label class="label" for="cd-dom">Domain Jitsi</label><input class="input mono" id="cd-dom" value="${esc(c.jitsiDomain)}" placeholder="meet.jit.si"></div>
-            <div><label class="label" for="cd-pre">Awalan nama ruang</label><input class="input mono" id="cd-pre" value="${esc(c.roomPrefix)}" maxlength="20"></div>
-          </div>
-          <p class="text-xs ink-2">Contoh link: <span class="mono" id="cd-ex"></span></p>
-          <p class="hint">Nama ruang memuat kode acak sehingga sulit ditebak. Di <span class="mono">meet.jit.si</span> publik, petugas yang pertama masuk perlu login (Google/GitHub) untuk membuka ruang; pelanggan cukup klik link tanpa akun. Untuk data yang tidak keluar instansi, isi domain server Jitsi milik sendiri.</p>
-        </div></section>
-
-      <section class="card"><div class="card-h"><div class="card-t">Pengingat</div></div>
-        <div class="p-4 space-y-3">
-          <div class="grid sm:grid-cols-2 gap-3">
-            <div><label class="label" for="cd-rc">Pengingat ke pelanggan (menit sebelum)</label><input type="number" class="input" id="cd-rc" min="0" max="240" value="${c.customerReminderMin}"></div>
-            <div><label class="label" for="cd-ra">Pengingat ke petugas (menit sebelum)</label><input type="number" class="input" id="cd-ra" min="0" max="240" value="${c.agentReminderMin}"></div>
-          </div>
-          <div><label class="label" for="cd-tpl">Template pengingat <span class="ink-3 font-normal">(dipakai bila jendela 24 jam sudah tertutup)</span></label>
-            <select class="select" id="cd-tpl"><option value="">— Tidak ada (pengingat dilewati bila jendela tertutup) —</option>${tpls.map((t, i) => `<option value="${i}" ${c.reminderTemplate?.name === t.name && c.reminderTemplate?.language === t.language ? 'selected' : ''}>${esc(t.name)} · ${esc(t.language)} · ${esc(t.category)}</option>`).join('')}</select>
-            <p class="hint">Buat template <b>UTILITY</b> dengan tombol URL, mis. <span class="mono">https://${esc(c.jitsiDomain)}/{{1}}</span>. Variabel body diisi berurutan: nama, waktu, tujuan, kode. Akhiran tombol URL diisi nama ruang video.</p></div>
-        </div></section>
-
-      <div class="flex justify-end"><button class="btn btn-primary" id="cd-save">Simpan pengaturan</button></div>
-    </div>`;
-    const renderDeps = () => {
-      $('#cd-deps').innerHTML = deps.map((x, i) => `<div class="cd-dep" data-i="${i}">
-        <div class="flex items-center gap-2"><input type="checkbox" class="check" data-k="enabled" ${x.enabled ? 'checked' : ''} aria-label="Aktif"><input class="input" data-k="name" value="${esc(x.name)}" maxlength="30" placeholder="Nama tujuan" aria-label="Nama tujuan">
-          <button class="btn btn-ghost btn-sm btn-icon" data-del aria-label="Hapus tujuan">${ICON.trash}</button></div>
-        <div class="flex flex-wrap gap-1.5 mt-2">${c.users.map((u) => `<label class="cd-agent"><input type="checkbox" value="${u.id}" data-agent ${x.agentIds.includes(u.id) ? 'checked' : ''}><span>${esc(u.name)}</span></label>`).join('')}</div>
-      </div>`).join('') || '<p class="text-xs ink-3">Belum ada tujuan.</p>';
-    };
-    renderDeps();
-    $('#cd-deps').addEventListener('input', (e) => { const row = e.target.closest('[data-i]'); if (!row) return; const x = deps[row.dataset.i];
-      if (e.target.dataset.k === 'name') x.name = e.target.value; if (e.target.dataset.k === 'enabled') x.enabled = e.target.checked;
-      if (e.target.dataset.agent !== undefined) x.agentIds = $$('[data-agent]', row).filter((y) => y.checked).map((y) => y.value); });
-    $('#cd-deps').addEventListener('click', (e) => { const b = e.target.closest('[data-del]'); if (!b) return; deps.splice(Number(b.closest('[data-i]').dataset.i), 1); renderDeps(); });
-    $('#cd-add').addEventListener('click', () => { deps.push({ id: '', name: '', agentIds: [], enabled: true }); renderDeps(); $('#cd-deps [data-i]:last-child [data-k=name]').focus(); });
-    const prev = () => {
-      const s = $('#cd-s').value, en = $('#cd-e').value, m = Number($('#cd-sl').value), out = [];
-      if (s && en) for (let t = Number(s.slice(0, 2)) * 60 + Number(s.slice(3)); t + m <= Number(en.slice(0, 2)) * 60 + Number(en.slice(3)); t += m) out.push(`${String(Math.floor(t / 60)).padStart(2, '0')}.${String(t % 60).padStart(2, '0')}`);
-      $('#cd-slots-prev').textContent = out.length ? `${out.length} slot per hari: ${out.join(', ')}` : 'Jam layanan lebih pendek dari satu slot.';
-      $('#cd-ex').textContent = `https://${$('#cd-dom').value || 'meet.jit.si'}/${$('#cd-pre').value || 'Kontaq'}-JP-0001-a1B2c3D4`;
-    };
-    ['#cd-s', '#cd-e', '#cd-sl', '#cd-dom', '#cd-pre'].forEach((s) => $(s).addEventListener('input', prev)); prev();
-    const body = () => {
-      const t = $('#cd-tpl').value !== '' ? tpls[$('#cd-tpl').value] : null;
-      return { enabled: $('#cd-on').checked, callNow: $('#cd-now').checked, days: $$('input[name=cd-day]:checked').map((x) => Number(x.value)), start: $('#cd-s').value, end: $('#cd-e').value,
-        slotMinutes: Number($('#cd-sl').value), perAgent: Number($('#cd-pa').value), daysAhead: Number($('#cd-da').value), holidays: $('#cd-hol').value,
-        jitsiDomain: $('#cd-dom').value, roomPrefix: $('#cd-pre').value, customerReminderMin: Number($('#cd-rc').value), agentReminderMin: Number($('#cd-ra').value),
-        reminderTemplate: t ? { name: t.name, language: t.language } : null, departments: deps };
-    };
-    $('#cd-on').addEventListener('change', (e) => e.target.closest('.switch').classList.toggle('on', e.target.checked));
-    $('#cd-save').addEventListener('click', (e) => busy(e.currentTarget, async () => { await api('PUT', '/api/calldesk/settings', body()); toast('Pengaturan layanan petugas disimpan.'); setCalldesk(); }));
-    $('#cd-form')?.addEventListener('click', (e) => busy(e.currentTarget, async () => {
-      await api('PUT', '/api/calldesk/settings', body());
-      const r = await api('POST', '/api/calldesk/form', {});
-      const n = r.form?.validationErrors?.length || 0;
-      toast(n ? `Formulir disimpan dengan ${n} error validasi dari Meta.` : 'Formulir dibuat sebagai draf di Meta. Uji lewat pratinjau lalu terbitkan.', !!n); setCalldesk();
-    }));
-    $('#cd-pub')?.addEventListener('click', async (e) => {
-      if (!await confirmBox('Terbitkan formulir layanan petugas? Setelah terbit, struktur formulir tidak dapat diubah (pengaturan tujuan, jam, dan slot tetap dapat diubah kapan saja).', 'Terbitkan')) return;
-      busy($('#cd-pub'), async () => { await api('POST', '/api/calldesk/form/publish', {}); toast('Formulir diterbitkan.'); setCalldesk(); });
-    });
-  }
-
   async function viewCalls() {
     const v = $('#view');
     v.innerHTML = `<div class="p-4 md:p-6 max-w-7xl space-y-4">
-      <section class="card" id="cd-sec"><div class="p-4 text-xs ink-3">Memuat janji panggilan…</div></section>
       <section class="card"><div class="card-h"><div class="card-t">WhatsApp Business Calling API</div><span id="cl-status" class="text-xs ink-3">Memeriksa…</span></div>
         <div class="p-4 text-xs ink-2 space-y-2" id="cl-body">
           <p>Panggilan suara memakai Calling API resmi Meta (WebRTC). Persyaratan: nomor terdaftar di Cloud API, fitur Calling tersedia untuk akun & negara Anda, webhook field <span class="kbd">calls</span> disubscribe, dan browser agen mengizinkan mikrofon via HTTPS.</p>
@@ -5823,7 +5528,7 @@
         <div id="cl-cards" class="sm:hidden"></div>
         <table class="tbl hidden sm:table"><thead><tr><th>Waktu</th><th>Kontak</th><th>Arah</th><th>Status</th><th>Durasi</th><th>Diangkat oleh</th></tr></thead><tbody id="cl-rows"><tr><td colspan="6" class="ink-3">Memuat…</td></tr></tbody></table></section>
     </div>`;
-    loadCallbacks(); cdSection();
+    loadCallbacks();
     api('GET', '/api/calls').then((rows) => {
       if (S.view !== 'calls') return;
       const dur = (c) => (c.duration ? Math.floor(c.duration / 60) + 'm ' + (c.duration % 60) + 'd' : '');
@@ -6705,10 +6410,10 @@
   }
 
   function viewSettings(tab) {
-    const tabs = [S.isAdmin && ['meta', 'Koneksi Meta'], S.isAdmin && ['team', 'Tim CS'], S.isAdmin && ['gateway', 'Gateway WA'], S.isAdmin && ['calldesk', 'Layanan petugas'], S.isAdmin && ['addons', 'Add-on'], ['security', 'Notifikasi & keamanan'], S.isAdmin && ['audit', 'Audit log']].filter(Boolean);
+    const tabs = [S.isAdmin && ['meta', 'Koneksi Meta'], S.isAdmin && ['team', 'Tim CS'], S.isAdmin && ['gateway', 'Gateway WA'], S.isAdmin && ['addons', 'Add-on'], ['security', 'Notifikasi & keamanan'], S.isAdmin && ['audit', 'Audit log']].filter(Boolean);
     const cur = tabs.some((t) => t[0] === tab) ? tab : tabs[0][0];
     $('#view').innerHTML = `<div class="p-4 md:p-6 max-w-5xl space-y-4"><nav class="tabs">${tabs.map(([k, l]) => `<a href="#/settings/${k}" class="tab ${k === cur ? 'active' : ''}">${l}</a>`).join('')}</nav><div id="set-body"></div></div>`;
-    ({ meta: setMeta, team: setTeam, gateway: setGateway, calldesk: setCalldesk, addons: setAddons, security: setSecurity, audit: setAudit })[cur]();
+    ({ meta: setMeta, team: setTeam, gateway: setGateway, addons: setAddons, security: setSecurity, audit: setAudit })[cur]();
   }
   async function setMeta() {
     const el = $('#set-body');
@@ -6893,7 +6598,7 @@
   // di belakang reverse proxy yang tidak meneruskan header Upgrade (mis. Apache tanpa mod_proxy_wstunnel).
   const socket = io({ transports: ['polling', 'websocket'], tryAllTransports: true });
   const live = (ok, text) => { const el = $('#live'); el.className = 'badge ' + (ok ? 'badge-green' : 'badge-amber'); el.innerHTML = `<span class="dot"></span><span>${text}</span>`; };
-  socket.on('connect', () => { live(true, 'Live'); loadReminders().catch(() => {}); cdLoad().catch(() => {}); checkRingingCall(); if (S.view === 'inbox') loadConvs().then(renderConvList).catch(() => {}); });
+  socket.on('connect', () => { live(true, 'Live'); loadReminders().catch(() => {}); checkRingingCall(); if (S.view === 'inbox') loadConvs().then(renderConvList).catch(() => {}); });
   socket.on('disconnect', () => live(false, 'Terputus'));
   socket.on('connect_error', (e) => { live(false, 'Terputus'); if (e.message === 'unauthorized') location.reload(); });
   socket.on('message:new', ({ message, conversation }) => {
@@ -6944,8 +6649,6 @@
     if (tr && S.view === 'campaigns') tr.outerHTML = campaignRow(c);
     else if (!tr && S.view === 'campaigns' && !$('#modal-root').innerHTML) viewCampaigns();
   });
-  socket.on('calldesk:now', (a) => { cdUpsert(a); cdNowCard(a); });
-  socket.on('calldesk:update', (a) => { cdUpsert(a); if (!['waiting'].includes(a.status)) $(`#rem-stack [data-cdcard="${a.id}"]`)?.remove(); });
   socket.on('reminder:due', (r) => { remUpsert(r); if (remMine(r)) showRemDue(r); });
   socket.on('reminder:update', remUpsert);
   socket.on('reminder:removed', ({ id }) => { S.rem.list = S.rem.list.filter((x) => x.id !== id); remChanged(); });

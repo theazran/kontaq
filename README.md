@@ -277,32 +277,6 @@ Kirim ucapan selamat ulang tahun via WhatsApp ke pegawai setiap hari pada jam ya
 - Tab **Pegawai** menampilkan ulang tahun mendatang (hari ini, 7 hari, bulan ini); tiap pegawai bisa dikirimi ucapan manual kapan saja
   (mis. ucapan susulan). Riwayat ada di tab **Riwayat kirim** dan Log pesan (sumber "Ulang tahun").
 
-## Layanan petugas (panggilan suara & video call)
-
-Pelanggan dapat meminta berbicara dengan petugas lewat formulir WhatsApp Flow: **nama, No. HP/NIK, tujuan, keperluan,
-jenis panggilan (suara/video), lalu "Sekarang" atau "Pilih jadwal" (tanggal & jam)**.
-
-1. **Pengaturan › Layanan petugas** (admin): atur tujuan & petugasnya, hari & jam layanan, durasi slot, kuota per petugas,
-   hari libur, domain Jitsi, pengingat, dan template pengingat. Klik **Buat formulir di Meta**, uji di WhatsApp Flows, lalu **Terbitkan**.
-2. **Flow otomatis › Flow baru › Menu layanan**: kata kunci *halo, petugas, video call* (dapat ditambah) membuka menu
-   Bicara dengan petugas · Cek jadwal sidang · Informasi layanan · Pengaduan. Simpan lalu aktifkan.
-
-Setelah formulir dikirim, Kontaq:
-- **Jadwal:** memeriksa hari/jam layanan dan kuota slot (jumlah petugas tujuan × kuota per petugas). Bila slot penuh atau tidak valid,
-  pelanggan ditawari slot kosong terdekat lewat pesan daftar.
-- **Sekarang:** hanya di jam layanan dan bila ada petugas tujuan yang sedang membuka Kontaq; petugas mendapat kartu notifikasi
-  (+ WA pribadi bila diaktifkan). Bila tidak ada, pelanggan ditawari jadwal.
-- **Video call:** membuat ruang **Jitsi Meet** dengan nama acak (`https://meet.jit.si/<awalan>-JP-0001-<acak>`) dan mengirim
-  **tombol link** (pesan CTA URL). Di `meet.jit.si` publik, petugas yang pertama masuk perlu login untuk membuka ruang;
-  pelanggan cukup klik link. Domain dapat diganti ke server Jitsi milik sendiri.
-- **Panggilan suara:** petugas menelepon dari Kontaq (Calling API); Kontaq meminta izin telepon bila belum ada.
-- Menugaskan percakapan ke petugas, menambah catatan internal berisi data formulir, membuat **pengingat petugas**, dan mengirim
-  **pengingat pelanggan** sebelum jadwal (template pengingat dipakai bila jendela 24 jam sudah tertutup).
-
-Daftar tujuan, slot jam, dan rentang tanggal dikirim sebagai data awal pesan formulir, jadi perubahan pengaturan langsung berlaku
-tanpa mengubah formulir yang sudah terbit. Petugas mengelola jadwal di **Panggilan › Janji panggilan** (gabung video, telepon,
-ambil, mulai, selesai, tidak hadir, jadwal ulang, batalkan, kirim ulang link); pelanggan diberi tahu otomatis saat jadwal diubah atau dibatalkan.
-
 ## Pemakaian di HP
 
 Buka Kontaq di browser HP (Chrome/Safari) lewat **HTTPS**. Mikrofon untuk panggilan hanya diizinkan lewat HTTPS.
