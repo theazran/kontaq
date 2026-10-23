@@ -4514,6 +4514,12 @@ const timeRe = /^([01]\d|2[0-3]):[0-5]\d$/;
 const ATT_ROUTING = { smart: 'Pintar (teks bila jendela 24 jam terbuka)', template: 'Selalu template' };
 const ATT_DEFAULT_TEXT = '*BELUM PRESENSI {{JENIS}}*\nHalo {{nama}}, jangan lupa melakukan presensi {{jenis}} hari ini. Pastikan presensi tercatat dengan benar. Terima kasih. 😊';
 const attRouting = (st) => (ATT_ROUTING[st.routing] ? st.routing : 'smart');
+// Pegawai dengan status presensi ini (mis. dinas luar, sakit, cuti) tidak dikirimi pengingat. Dicocokkan per kata, tanpa
+// membedakan huruf besar/kecil: "Cuti" cocok dengan "CUTI TAHUNAN", "DL" cocok dengan "DL" tetapi tidak dengan "WFO".
+const ATT_SKIP_STATUS_DEFAULT = ['Dinas Luar', 'DL', 'Sakit', 'Cuti'];
+const attSkipStatuses = (st) => (Array.isArray(st.skipStatuses) ? st.skipStatuses : ATT_SKIP_STATUS_DEFAULT);
+const attNormStatus = (s) => ` ${String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()} `;
+const attStatusSkipped = (st, status) => attNormStatus(status).trim() !== '' && attSkipStatuses(st).some((k) => attNormStatus(k).trim() && attNormStatus(status).includes(attNormStatus(k)));
 const attConvFor = (phone) => { const c = idx.contactByPhone.get(phone); return c ? idx.convByContact.get(c.id) : null; };
 const attWindowOpen = (phone) => { const conv = attConvFor(phone); return !!(conv && windowOpen(conv)); };
 function attDefaults() {
@@ -4529,7 +4535,7 @@ function attDefaults() {
       datang: { enabled: true, slots: [{ days: [1, 2, 3, 4, 5], time: '07:45' }] },
       pulang: { enabled: true, slots: [{ days: [1, 2, 3, 4], time: '16:05' }, { days: [5], time: '16:35' }] },
     },
-    defaultNotify: true, skipDates: [],
+    defaultNotify: true, skipDates: [], skipStatuses: [...ATT_SKIP_STATUS_DEFAULT],
     employees: {}, // nip → { notify?, phone? }
     directory: [], directoryAt: 0, directoryError: '',
     lastSlot: {}, // "datang@07:45" → YYYY-MM-DD terakhir dijalankan
@@ -4731,11 +4737,12 @@ async function attPrepare(st, type, nips) {
     const emp = st.employees[a.nip] || {}, p = byNip.get(a.nip) || {};
     if (!want && !(emp.notify ?? st.defaultNotify)) continue;
     const item = { nip: a.nip, nama: a.nama || p.nama || a.nip, phone: attPhone(emp.phone) || p.phone || '', status: 'pending', detail: '' };
-    if (!a.belum[type]) Object.assign(item, { status: 'skipped', detail: `Sudah presensi ${type}` });
+    if (attStatusSkipped(st, a.status)) Object.assign(item, { status: 'skipped', detail: `Status ${a.status}` });
+    else if (!a.belum[type]) Object.assign(item, { status: 'skipped', detail: `Sudah presensi ${type}` });
     else if (!item.phone) Object.assign(item, { status: 'skipped', detail: 'Nomor WhatsApp tidak ditemukan' });
     else if (!usable && !(smart && attWindowOpen(item.phone))) Object.assign(item, { status: 'failed', detail: 'Jendela 24 jam tertutup dan template belum APPROVED' });
-    // Pegawai yang sudah presensi tidak dicatat pada pengiriman terjadwal (agar riwayat ringkas)
-    if (want || item.status !== 'skipped' || item.detail.startsWith('Nomor')) items.push(item);
+    // Pegawai yang sudah presensi tidak dicatat pada pengiriman terjadwal (agar riwayat ringkas); yang dilewati karena status tetap dicatat
+    if (want || item.status !== 'skipped' || item.detail.startsWith('Nomor') || item.detail.startsWith('Status')) items.push(item);
   }
   if (want) for (const n of want) if (!rows.some((a) => a.nip === n)) items.push({ nip: n, nama: byNip.get(n)?.nama || n, phone: '', status: 'skipped', detail: 'Tidak ada di data presensi hari ini' });
   return { tpl: usable, values, items, smart };
@@ -4883,6 +4890,7 @@ function attCleanConfig(st, b) {
   const skip = [...new Set((Array.isArray(b.skipDates) ? b.skipDates : String(b.skipDates || '').split(/[\s,;]+/)).map((x) => str(x, 10)).filter(Boolean))].sort();
   if (skip.some((d) => !/^\d{4}-\d{2}-\d{2}$/.test(d) || !ymdDate(d))) throw new HttpError(400, 'Tanggal libur harus berformat YYYY-MM-DD.');
   const today = zonedDate(flowTz());
+  const statuses = [...new Set((Array.isArray(b.skipStatuses) ? b.skipStatuses : String(b.skipStatuses ?? ATT_SKIP_STATUS_DEFAULT.join(',')).split(/[,;\n]+/)).map((x) => str(String(x), 40)).filter(Boolean))].slice(0, 20);
   Object.assign(st, {
     absensiUrl: url(b.absensiUrl, 'URL API presensi'), pegawaiUrl: url(b.pegawaiUrl, 'URL data pegawai'),
     template: { name, language: str(b.template?.language, 15), header: vals(b.template?.header), body: vals(b.template?.body) },
@@ -4893,6 +4901,7 @@ function attCleanConfig(st, b) {
     schedule: { datang: sched(b.schedule?.datang, 'datang'), pulang: sched(b.schedule?.pulang, 'pulang') },
     defaultNotify: b.defaultNotify !== false,
     skipDates: skip.filter((d) => d >= addDays(today, -7)).slice(0, 400),
+    skipStatuses: statuses,
   });
   if (st.optOut.enabled && st.button.mode === 'reply' && st.button.replies.length > 2) throw new HttpError(400, 'Dengan tombol berhenti aktif, balasan cepat maksimal 2 (WhatsApp membatasi 3 tombol per pesan).');
   attMarkPast(st, false);
@@ -4906,7 +4915,7 @@ function attConfigPublic(st) {
   const comp = (t, type) => (t.components || []).find((c) => c.type === type);
   return {
     ...cfg, routing: attRouting(st), text: st.text || ATT_DEFAULT_TEXT, routingOptions: ATT_ROUTING, button: { mode: st.button?.mode || (st.button?.enabled ? 'link' : 'none'), text: 'Login SIKEP', url: '', header: '', footer: '', ...st.button, replies: st.button?.replies || ['Sudah presensi', 'Izin / Cuti'] },
-    timezone: flowTz(), today: zonedDate(flowTz()), vars: ATT_VARS, busy: attBusy, optOut: attOptOut(st),
+    timezone: flowTz(), today: zonedDate(flowTz()), vars: ATT_VARS, busy: attBusy, optOut: attOptOut(st), skipStatuses: attSkipStatuses(st),
     templateStatus: tpl ? { language: tpl.language, status: tpl.status, category: tpl.category } : null,
     // Template APPROVED (dan template terpilih apa pun statusnya) beserta variabel & isian bawaannya, untuk pemetaan variabel di UI
     templates: db.templates.filter((t) => t.status === 'APPROVED' || t.name === st.template.name).map((t) => ({

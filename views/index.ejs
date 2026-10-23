@@ -6103,6 +6103,11 @@
           <div class="flex gap-2"><input type="date" class="input h-8 text-xs flex-1" id="att-skip-date" aria-label="Tanggal libur"><button type="button" class="btn btn-sm" id="att-skip-add">${ICON.plus}<span>Tambah</span></button></div>
           <div id="att-skip-list" class="flex flex-wrap gap-1"></div>
         </div></section>
+        <section class="card"><div class="card-h"><div class="card-t">Status tanpa pengingat</div></div><div class="p-4 space-y-2">
+          <p class="text-xs ink-3">Pegawai dengan status presensi ini tidak dikirimi pengingat (terjadwal maupun manual) dan tercatat "dilewati" di riwayat.</p>
+          <input class="input" name="skipStatuses" value="${esc((c.skipStatuses || []).join(', '))}" placeholder="Dinas Luar, DL, Sakit, Cuti" aria-label="Status tanpa pengingat">
+          <p class="hint">Pisahkan dengan koma. Dicocokkan per kata tanpa membedakan huruf besar/kecil — "Cuti" juga mencakup "Cuti Tahunan". Kosongkan agar semua status tetap dikirimi.</p>
+        </div></section>
         <section class="card"><div class="card-h"><div class="card-t">Pegawai</div></div><div class="p-4 space-y-3">
           <label class="flex items-start gap-3"><span class="switch ${c.defaultNotify ? 'on' : ''}"><input type="checkbox" class="sr-only" name="defaultNotify" ${c.defaultNotify ? 'checked' : ''} role="switch" aria-label="Notifikasi aktif untuk pegawai baru"><span></span></span><span class="text-xs"><span class="font-medium block text-[13px]">Pegawai baru otomatis menerima notifikasi</span><span class="ink-3">Berlaku untuk pegawai yang belum pernah diatur. Atur per pegawai di tab Pegawai.</span></span></label>
         </div></section>
@@ -6152,7 +6157,7 @@
       const fd = ev.target;
       S.att.cfg = await api('PUT', '/api/addons/attendance/config', {
         absensiUrl: fd.absensiUrl.value, pegawaiUrl: fd.pegawaiUrl.value, defaultNotify: fd.defaultNotify.checked,
-        template: f.template, schedule: f.schedule, skipDates: f.skipDates, routing: fd.routing.value, text: fd.text.value,
+        template: f.template, schedule: f.schedule, skipDates: f.skipDates, skipStatuses: fd.skipStatuses.value, routing: fd.routing.value, text: fd.text.value,
         button: { mode: fd.btnMode.value, text: fd.btnText.value, url: fd.btnUrl.value, header: fd.btnHeader.value, footer: fd.btnFooter.value,
           replies: [0, 1, 2].map((i) => fd['btnReply' + i].value.trim()).filter(Boolean) },
         optOut: { enabled: fd.ooOn.checked, stopLabel: fd.ooStop.value, resumeLabel: fd.ooResume.value, stopText: fd.ooStopText.value, resumeText: fd.ooResumeText.value },
