@@ -108,7 +108,7 @@ const csvCell = (v) => {
 const EMPTY_DB = {
   settings: {}, users: [], contacts: [], conversations: [], messages: [],
   templates: [], templatesSyncedAt: 0, campaigns: [], calls: [], audit: [], avatars: {}, autoReply: null, arMedia: {}, costs: null, sendLog: [],
-  flows: [], flowRuns: [], groups: [], csat: null, waFlows: [], flowSubmissions: [], stickers: [], reminders: [], addons: {},
+  flows: [], flowRuns: [], groups: [], csat: null, waFlows: [], flowSubmissions: [], stickers: [], reminders: [], addons: {}, templateMedia: [],
 };
 let db;
 try { db = { ...EMPTY_DB, ...JSON.parse(fs.readFileSync(DB_FILE, 'utf8')) }; }
@@ -253,6 +253,91 @@ async function uploadMedia(file) {
   const r = await graph('post', `${needPhone()}/media`, { data: fd });
   return r.id;
 }
+
+/* Media header template (gambar/video/dokumen) diunggah langsung dari komputer/HP.
+ * File disimpan di data/template-media lalu diunggah ke Meta; template dikirim dengan media ID. Media ID Meta hanya berlaku
+ * 30 hari, jadi file diunggah ulang otomatis sebelum kedaluwarsa (saat dikirim, dan berkala untuk campaign/pengingat yang
+ * masih aktif). File yang tidak dipakai lagi dibersihkan setelah 90 hari.
+ */
+const TPL_MEDIA_DIR = path.join(DATA_DIR, 'template-media');
+const TPL_MEDIA_TTL_MS = 25 * 86400000;
+const TPL_MEDIA_KEEP_MS = 90 * 86400000;
+// Batas header template sesuai Cloud API: dokumen header template hanya PDF
+const TPL_MEDIA_RULES = {
+  IMAGE: { max: 5, mimes: ['image/jpeg', 'image/png'], label: 'Gambar JPG/PNG' },
+  VIDEO: { max: 16, mimes: ['video/mp4', 'video/3gpp'], label: 'Video MP4/3GPP' },
+  DOCUMENT: { max: 100, mimes: ['application/pdf'], label: 'Dokumen PDF' },
+};
+const TPL_MEDIA_EXT = { 'image/jpeg': '.jpg', 'image/png': '.png', 'video/mp4': '.mp4', 'video/3gpp': '.3gp', 'application/pdf': '.pdf' };
+const tplMediaById = (id) => (/^tm_[\w-]{6,20}$/.test(String(id || '')) ? db.templateMedia.find((m) => m.id === id) : null);
+const tplMediaFile = (m) => path.join(TPL_MEDIA_DIR, m.id + (TPL_MEDIA_EXT[m.mime] || ''));
+// Validasi file header untuk format template tertentu (kirim maupun contoh saat membuat template)
+function tplMediaCheck(file, format) {
+  const rule = TPL_MEDIA_RULES[format];
+  if (!rule) throw new HttpError(400, 'Format header tidak valid.');
+  if (!file) throw new HttpError(400, 'Pilih file terlebih dahulu.');
+  let mime = String(file.mimetype || '').split(';')[0].toLowerCase();
+  const ext = path.extname(file.originalname || '').slice(1).toLowerCase();
+  if ((!mime || mime === 'application/octet-stream') && ext === 'pdf') mime = 'application/pdf';
+  if (mime === 'image/jpg') mime = 'image/jpeg';
+  if (!rule.mimes.includes(mime)) throw new HttpError(400, `Header ${format.toLowerCase()} harus ${rule.label} (file Anda: ${mime || 'tidak dikenal'}).`);
+  if (file.size > rule.max * 1024 * 1024) throw new HttpError(400, `Ukuran maksimal header ${format.toLowerCase()}: ${rule.max} MB.`);
+  file.mimetype = mime;
+  return file;
+}
+async function tplMediaEnsure(m) {
+  if (m.mediaId && now() - m.uploadedAt < TPL_MEDIA_TTL_MS) return m;
+  let buffer;
+  try { buffer = fs.readFileSync(tplMediaFile(m)); } catch { throw new HttpError(400, `File header "${m.filename}" tidak ditemukan di server. Unggah ulang file tersebut.`); }
+  m.mediaId = await uploadMedia({ buffer, mimetype: m.mime, originalname: m.filename });
+  m.uploadedAt = now(); save();
+  return m;
+}
+// Dipanggil sebelum membangun komponen template: pastikan media ID header masih berlaku
+async function tplMediaPrepare(values) {
+  const m = tplMediaById(values?.headerMedia);
+  if (m) { await tplMediaEnsure(m); m.lastUsedAt = now(); }
+}
+// Referensi file header yang masih dibutuhkan (campaign & pengingat yang belum selesai)
+function tplMediaInUse() {
+  const refs = new Set();
+  const add = (v) => { if (/^tm_/.test(v?.headerMedia || '')) refs.add(v.headerMedia); };
+  db.campaigns.filter((c) => !['done', 'cancelled'].includes(c.status)).forEach((c) => add(c.values));
+  (db.reminders || []).filter((r) => ['pending', 'due'].includes(r.status)).forEach((r) => { add(r.template?.values); add(r.fallback?.values); });
+  return refs;
+}
+setInterval(async () => {
+  const used = tplMediaInUse();
+  for (const m of db.templateMedia) {
+    if (used.has(m.id) && now() - (m.uploadedAt || 0) >= TPL_MEDIA_TTL_MS) await tplMediaEnsure(m).catch((e) => console.warn('[template-media]', m.id, e.message));
+  }
+  const stale = db.templateMedia.filter((m) => !used.has(m.id) && now() - Math.max(m.createdAt, m.lastUsedAt || 0) > TPL_MEDIA_KEEP_MS);
+  if (stale.length) {
+    for (const m of stale) fs.rm(tplMediaFile(m), { force: true }, () => {});
+    const ids = new Set(stale.map((m) => m.id));
+    db.templateMedia = db.templateMedia.filter((m) => !ids.has(m.id)); save();
+  }
+}, 3600000);
+
+// Contoh file header untuk pengajuan template baru: Resumable Upload API → header_handle
+async function metaAppId() {
+  if (db.settings.appId) return db.settings.appId;
+  if (db.settings.appIdDetected) return db.settings.appIdDetected;
+  const r = await graph('get', 'app').catch(() => null);
+  if (!r?.id) throw new HttpError(400, 'App ID aplikasi Meta tidak terdeteksi dari token. Isi App ID di Pengaturan › Koneksi Meta.');
+  db.settings.appIdDetected = String(r.id); save();
+  return db.settings.appIdDetected;
+}
+async function resumableUpload(file) {
+  const appId = await metaAppId();
+  const s = await graph('post', `${appId}/uploads`, { params: { file_name: file.originalname || 'header', file_length: file.size, file_type: file.mimetype } });
+  if (!s?.id) throw new HttpError(502, 'Meta tidak membuat sesi unggah.');
+  // Unggah isi file ke sesi (header Authorization: OAuth, sesuai Resumable Upload API)
+  const r = await graph('post', s.id, { data: file.buffer, headers: { Authorization: `OAuth ${meta().accessToken}`, file_offset: '0', 'Content-Type': 'application/octet-stream' } });
+  if (!r?.h) throw new HttpError(502, 'Meta tidak mengembalikan handle file contoh.');
+  return r.h;
+}
+
 
 /* ───────────────────────── 5. Domain: kontak, percakapan, pesan ───────────────────────── */
 
@@ -457,10 +542,15 @@ function buildTemplateComponents(tpl, values = {}, contact = {}) {
       const vars = templateVars(header.text);
       if (vars.length) comps.push({ type: 'header', parameters: vars.map((v, i) => param(v, (values.header || [])[i])) });
     } else if (['IMAGE', 'VIDEO', 'DOCUMENT'].includes(header.format)) {
-      const link = str(values.headerMedia, 2000);
-      if (!/^https:\/\//.test(link)) throw new HttpError(400, `Template memerlukan URL HTTPS untuk header ${header.format.toLowerCase()}.`);
-      const k = header.format.toLowerCase();
-      comps.push({ type: 'header', parameters: [{ type: k, [k]: { link } }] });
+      const ref = str(values.headerMedia, 2000), k = header.format.toLowerCase(), m = tplMediaById(ref);
+      if (m) {
+        if (m.format !== header.format) throw new HttpError(400, `File header berjenis ${m.format.toLowerCase()}, template memerlukan ${k}.`);
+        if (!m.mediaId) throw new HttpError(400, `File header "${m.filename}" belum terunggah ke Meta. Unggah ulang.`);
+        comps.push({ type: 'header', parameters: [{ type: k, [k]: { id: m.mediaId, ...(k === 'document' ? { filename: m.filename } : {}) } }] });
+      } else {
+        if (!/^https:\/\//.test(ref)) throw new HttpError(400, `Template memerlukan file atau URL HTTPS untuk header ${k}.`);
+        comps.push({ type: 'header', parameters: [{ type: k, [k]: { link: ref } }] });
+      }
     }
   }
   if (body) {
@@ -498,6 +588,7 @@ function renderTemplateText(tpl, comps) {
 }
 
 async function sendTemplateTo(contact, tpl, values, extra = {}, ctx = {}) {
+  await tplMediaPrepare(values);
   const components = buildTemplateComponents(tpl, values, contact);
   const payload = { messaging_product: 'whatsapp', recipient_type: 'individual', to: contact.phone, type: 'template', template: { name: tpl.name, language: { code: tpl.language } } };
   if (components.length) payload.template.components = components;
@@ -1992,6 +2083,7 @@ async function sendToGroup(g, b, user) {
     const tpl = findTemplate(str(b.name, 512), str(b.language, 15));
     if (!tpl) throw new HttpError(400, 'Template tidak ditemukan. Sinkronkan template terlebih dahulu.');
     if (tpl.status !== 'APPROVED') throw new HttpError(400, `Template berstatus ${tpl.status}, hanya APPROVED yang dapat dikirim.`);
+    await tplMediaPrepare(b.values);
     const components = buildTemplateComponents(tpl, b.values || {}, {});
     payload = { type: 'template', template: { name: tpl.name, language: { code: tpl.language }, ...(components.length ? { components } : {}) } };
     record = { type: 'template', content: { name: tpl.name, language: tpl.language, body: renderTemplateText(tpl, components) } };
@@ -2810,7 +2902,7 @@ app.get('/api/settings/meta', requireAdmin, (req, res) => {
   const m = meta();
   res.json({
     graphVersion: m.graphVersion, phoneNumberId: m.phoneNumberId, wabaId: m.wabaId, verifyToken: m.verifyToken,
-    accessTokenMasked: mask(m.accessToken), appSecretMasked: mask(m.appSecret),
+    accessTokenMasked: mask(m.accessToken), appSecretMasked: mask(m.appSecret), appId: db.settings.appId || '', appIdDetected: db.settings.appIdDetected || '',
     webhookUrl: (process.env.PUBLIC_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '') + '/webhook',
     lastWebhookAt: db.settings.lastWebhookAt || 0, connection: db.settings.connection || null,
   });
@@ -2828,7 +2920,11 @@ app.put('/api/settings/meta', requireAdmin, wrap(async (req, res) => {
     }
   }
   if (b.verifyToken !== undefined) s.verifyToken = str(b.verifyToken, 200);
-  if (b.accessToken) s.accessTokenEnc = encrypt(str(b.accessToken, 2000));
+  if (b.appId !== undefined) {
+    if (b.appId && !/^\d{5,25}$/.test(b.appId)) throw new HttpError(400, 'App ID harus berupa angka.');
+    s.appId = b.appId || '';
+  }
+  if (b.accessToken) { s.accessTokenEnc = encrypt(str(b.accessToken, 2000)); s.appIdDetected = ''; }
   if (b.appSecret) s.appSecretEnc = encrypt(str(b.appSecret, 200));
   s.connection = null;
   audit(req, 'settings.meta', `Diperbarui: ${Object.keys(b).filter((k) => b[k] !== undefined && b[k] !== '').join(', ')}`);
@@ -3983,7 +4079,13 @@ app.post('/api/templates', requireAdmin, wrap(async (req, res) => {
   if (!bodyText) throw new HttpError(400, 'Isi (body) wajib diisi.');
   const splitEx = (s) => String(s || '').split('|').map((x) => x.trim()).filter(Boolean);
   const components = [];
-  if (b.headerText) {
+  const headerFormat = ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(b.headerFormat) ? b.headerFormat : null;
+  if (headerFormat) {
+    const handle = str(b.headerHandle, 4000);
+    if (!handle) throw new HttpError(400, `Unggah contoh file untuk header ${headerFormat.toLowerCase()}.`);
+    if (b.category === 'AUTHENTICATION') throw new HttpError(400, 'Template AUTHENTICATION tidak dapat memakai header media.');
+    components.push({ type: 'HEADER', format: headerFormat, example: { header_handle: [handle] } });
+  } else if (b.headerText) {
     const text = str(b.headerText, 60);
     const hv = templateVars(text);
     if (hv.length > 1) throw new HttpError(400, 'Header teks hanya boleh 1 variabel.');
@@ -4013,6 +4115,31 @@ app.post('/api/templates', requireAdmin, wrap(async (req, res) => {
   db.templates.push({ id: r.id, name, language, category: r.category || b.category, status: r.status || 'PENDING', components });
   audit(req, 'template.create', `${name} (${language}) → ${r.status}`); save();
   res.json(r);
+}));
+app.post('/api/template-media', upload.single('file'), wrap(async (req, res) => {
+  const format = str(req.body.format, 10).toUpperCase();
+  const file = tplMediaCheck(req.file, format);
+  const m = { id: uid('tm_'), format, filename: str(file.originalname, 200) || 'file' + (TPL_MEDIA_EXT[file.mimetype] || ''), mime: file.mimetype, size: file.size,
+    mediaId: null, uploadedAt: 0, createdAt: now(), createdBy: req.user.name };
+  fs.mkdirSync(TPL_MEDIA_DIR, { recursive: true });
+  fs.writeFileSync(tplMediaFile(m), file.buffer);
+  try { m.mediaId = await uploadMedia(file); m.uploadedAt = now(); }
+  catch (e) { fs.rm(tplMediaFile(m), { force: true }, () => {}); throw e; }
+  db.templateMedia.push(m); save();
+  res.json({ id: m.id, format, filename: m.filename, mime: m.mime, size: m.size });
+}));
+app.get('/api/template-media/:id', (req, res) => {
+  const m = tplMediaById(req.params.id);
+  if (!m || !fs.existsSync(tplMediaFile(m))) return res.sendStatus(404);
+  res.set('Cache-Control', 'private, max-age=86400');
+  res.type(m.mime).sendFile(tplMediaFile(m), { headers: { 'Content-Disposition': `inline; filename="${m.filename.replace(/[^\w.\- ]/g, '_')}"` } });
+});
+app.post('/api/templates/header-sample', requireAdmin, upload.single('file'), wrap(async (req, res) => {
+  const format = str(req.body.format, 10).toUpperCase();
+  const file = tplMediaCheck(req.file, format);
+  const handle = await resumableUpload(file);
+  audit(req, 'template.header_sample', `${format} ${file.originalname} (${file.size} B)`);
+  res.json({ handle, format, filename: file.originalname, mime: file.mimetype, size: file.size });
 }));
 app.delete('/api/templates/:name', requireAdmin, wrap(async (req, res) => {
   const name = str(req.params.name, 512);

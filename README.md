@@ -295,5 +295,8 @@ berdering muncul lagi saat aplikasi dibuka. Notifikasi saat browser tertutup mem
   data di bagian 2 `server.js` ke MySQL. Jangan jalankan PM2 dalam mode cluster dengan DB JSON.
 - Calling API (WebRTC di browser): menerima panggilan dari pelanggan, dan telepon balik ke pelanggan yang
   memberi izin (aktifkan "Izinkan telepon balik" di menu Panggilan). Ketersediaan bergantung pada akun dan negara di Meta.
-- Header template media (gambar/video/dokumen) belum dapat dibuat dari formulir — buat di WhatsApp
-  Manager lalu sinkronkan; template tersebut tetap dapat dikirim (dengan URL media).
+- Header template gambar/video/dokumen: saat **mengirim** (Inbox, campaign, pengingat, grup) file dapat diunggah langsung
+  dari komputer/HP atau memakai URL HTTPS. File disimpan di `data/template-media` dan dikirim dengan media ID; karena
+  media ID Meta berlaku 30 hari, Kontaq mengunggah ulang otomatis sebelum kedaluwarsa. Saat **membuat** template ber-header
+  media, unggah contoh file (dikirim ke Meta lewat Resumable Upload API; App ID terdeteksi dari token atau diisi di
+  Pengaturan › Koneksi Meta). Batas: gambar JPG/PNG ≤ 5 MB, video MP4/3GPP ≤ 16 MB, dokumen PDF ≤ 100 MB.

@@ -1566,11 +1566,48 @@
       : campaign ? '<p class="hint">Gunakan <span class="kbd">{{name}}</span> atau <span class="kbd">{{phone}}</span> untuk nilai per kontak.</p>' : '';
     let out = '';
     if (h?.format === 'TEXT') out += tplVars(h.text).map((v, i) => `<div><label class="label">Header {{${esc(v)}}}</label><input class="input" name="header_${i}" required></div>`).join('');
-    if (h && ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(h.format)) out += `<div><label class="label">URL ${h.format.toLowerCase()} header (HTTPS publik)</label><input class="input" name="headerMedia" type="url" required placeholder="https://…"></div>`;
+    if (h && ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(h.format)) out += tmFieldHtml(h.format);
     out += tplVars(b?.text).map((v, i) => `<div><label class="label">Body {{${esc(v)}}}</label><input class="input" name="body_${i}" required ${invite && i === 0 ? 'value="{{link}}"' : ''}></div>`).join('');
     if (!invite) out += urlButtons(t).map(({ btn, i }) => `<div><label class="label">Tombol "${esc(btn.text)}" — akhiran URL</label><input class="input" name="btn_${i}" required placeholder="${esc(btn.url.replace(/\{\{.*$/, ''))}…"></div>`).join('');
     return (out ? out + hint : '<p class="text-xs ink-3">Template ini tidak memiliki variabel.</p>');
   }
+  // Header media template: unggah dari perangkat (disimpan server, dikirim dengan media ID) atau URL HTTPS publik
+  const TM_RULE = { IMAGE: ['image/jpeg,image/png', 'JPG/PNG, maks. 5 MB', 'gambar'], VIDEO: ['video/mp4,video/3gpp', 'MP4/3GPP, maks. 16 MB', 'video'], DOCUMENT: ['application/pdf,.pdf', 'PDF, maks. 100 MB', 'dokumen'] };
+  function tmFieldHtml(format) {
+    const [accept, rule, label] = TM_RULE[format];
+    return `<div class="tm-field" data-tm data-format="${format}"><div class="label">Header ${label}</div>
+      <input type="hidden" name="headerMedia" value="">
+      <div class="tm-pick"><label class="btn btn-sm cursor-pointer">${ICON.clip}<span>Unggah dari perangkat</span><input type="file" accept="${accept}" class="hidden" data-tm-file></label>
+        <span class="text-[11px] ink-3">atau</span><input class="input h-8 flex-1 min-w-0" type="url" data-tm-url placeholder="tempel URL HTTPS publik" aria-label="URL ${label} header"></div>
+      <div data-tm-info></div>
+      <p class="hint">${rule}. File unggahan disimpan Kontaq dan otomatis diperbarui di Meta sebelum kedaluwarsa (30 hari).</p></div>`;
+  }
+  function tmInfo(box, m) {
+    const info = $('[data-tm-info]', box), fmt = box.dataset.format;
+    info.innerHTML = m ? `<div class="tm-card">${fmt === 'IMAGE' ? `<img src="/api/template-media/${m.id}" alt="">` : `<span class="tm-ic">${fmt === 'VIDEO' ? ICON.camera : ICON.doc}</span>`}
+      <div class="min-w-0 flex-1"><div class="text-xs font-medium truncate">${esc(m.filename)}</div><div class="text-[11px] ink-3">${fmtBytes(m.size)} · terunggah</div></div>
+      <button type="button" class="btn btn-ghost btn-sm" data-tm-clear>Hapus</button></div>` : '';
+    box.dataset.name = m?.filename || '';
+  }
+  document.addEventListener('change', (e) => {
+    const inp = e.target.closest('[data-tm-file]'); if (!inp || !inp.files[0]) return;
+    const box = inp.closest('[data-tm]'), hidden = $('input[name=headerMedia]', box), file = inp.files[0];
+    const fd = new FormData(); fd.append('format', box.dataset.format); fd.append('file', file);
+    box.dataset.busy = '1'; $('[data-tm-info]', box).innerHTML = `<div class="text-xs ink-3">Mengunggah ${esc(file.name)} (${fmtBytes(file.size)})…</div>`;
+    api('POST', '/api/template-media', fd).then((m) => {
+      hidden.value = m.id; $('[data-tm-url]', box).value = ''; tmInfo(box, m);
+      hidden.form?.dispatchEvent(new Event('input', { bubbles: true }));
+    }).catch((err) => { $('[data-tm-info]', box).innerHTML = ''; fail(err); }).finally(() => { delete box.dataset.busy; inp.value = ''; });
+  });
+  document.addEventListener('input', (e) => {
+    const u = e.target.closest('[data-tm-url]'); if (!u) return;
+    const box = u.closest('[data-tm]'); $('input[name=headerMedia]', box).value = u.value.trim(); tmInfo(box, null);
+  });
+  document.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-tm-clear]'); if (!b) return;
+    const box = b.closest('[data-tm]'), hidden = $('input[name=headerMedia]', box); hidden.value = ''; tmInfo(box, null);
+    hidden.form?.dispatchEvent(new Event('input', { bubbles: true }));
+  });
   // Tombol URL dengan variabel, mis. https://contoh.com/pesanan/{{1}}
   const urlButtons = (t) => (comp(t, 'BUTTONS')?.buttons || []).map((btn, i) => ({ btn, i })).filter(({ btn }) => btn.type === 'URL' && /\{\{/.test(btn.url || ''));
   function tplPreview(t, form) {
@@ -1578,7 +1615,11 @@
     const h = comp(t, 'HEADER'), b = comp(t, 'BODY'), f = comp(t, 'FOOTER'), btns = comp(t, 'BUTTONS');
     const val = (name) => form?.[name]?.value || '';
     let i = 0, j = 0;
-    const header = h ? (h.format === 'TEXT' ? `<div class="font-semibold mb-1">${esc(String(h.text).replace(/\{\{\s*\w+\s*\}\}/g, () => val('header_' + j++) || '{{…}}'))}</div>` : `<div class="text-[11px] ink-3 mb-1">[${esc(h.format)}]</div>`) : '';
+    const media = val('headerMedia'), mname = form?.querySelector?.('[data-tm]')?.dataset.name || '';
+    const header = h ? (h.format === 'TEXT' ? `<div class="font-semibold mb-1">${esc(String(h.text).replace(/\{\{\s*\w+\s*\}\}/g, () => val('header_' + j++) || '{{…}}'))}</div>`
+      : h.format === 'IMAGE' && /^tm_/.test(media) ? `<img src="/api/template-media/${esc(media)}" alt="" class="tm-prev-img">`
+      : h.format === 'IMAGE' && /^https:\/\//.test(media) ? `<img src="${esc(media)}" alt="" class="tm-prev-img" referrerpolicy="no-referrer" onerror="this.remove()">`
+      : `<div class="tm-prev-ph">${h.format === 'DOCUMENT' ? '📄' : h.format === 'VIDEO' ? '🎬' : '🖼'} ${esc(mname || (media ? media.split('/').pop().slice(0, 40) : h.format.toLowerCase()))}</div>`) : '';
     const body = waFormat(String(b?.text || '').replace(/\{\{\s*\w+\s*\}\}/g, () => val('body_' + i++) || '{{…}}'));
     return `<div class="chat-bg rounded-md p-3"><div class="bubble out">${header}${body}${f ? `<div class="text-[11px] ink-3 mt-1">${esc(f.text)}</div>` : ''}${(btns?.buttons || []).map((x) => `<span class="ib-btn">${esc(x.text)}</span>`).join('')}</div></div>`;
   }
@@ -1586,7 +1627,14 @@
     const h = comp(t, 'HEADER'), b = comp(t, 'BODY');
     return {
       header: h?.format === 'TEXT' ? tplVars(h.text).map((_, i) => form['header_' + i].value) : [],
-      headerMedia: form.headerMedia?.value || '',
+      headerMedia: (() => {
+        if (!h || !['IMAGE', 'VIDEO', 'DOCUMENT'].includes(h.format)) return '';
+        const box = form.querySelector('[data-tm]'), v = form.headerMedia?.value || '';
+        if (box?.dataset.busy) throw new Error('Tunggu hingga file header selesai diunggah.');
+        if (!v) throw new Error(`Unggah file header ${h.format.toLowerCase()} atau isi URL-nya.`);
+        if (!/^tm_/.test(v) && !/^https:\/\//.test(v)) throw new Error('URL header harus diawali https://');
+        return v;
+      })(),
       body: tplVars(b?.text).map((_, i) => form['body_' + i].value),
       buttonUrl: (comp(t, 'BUTTONS')?.buttons || []).map((_, i) => form['btn_' + i]?.value || ''),
     };
@@ -1962,17 +2010,40 @@
           <div><label class="label">Kategori</label><select class="select" name="category"><option>MARKETING</option><option>UTILITY</option><option>AUTHENTICATION</option></select></div>
           <div><label class="label">Bahasa</label><select class="select" name="language"><option value="id">Indonesia (id)</option><option value="en_US">English US (en_US)</option><option value="en">English (en)</option><option value="ms">Melayu (ms)</option></select></div>
         </div>
-        <div><label class="label">Header teks (opsional)</label><input class="input" name="headerText" maxlength="60" placeholder="Halo {{1}}"></div>
-        <div id="tc-hex" class="hidden"><label class="label">Contoh variabel header</label><input class="input" name="headerExample"></div>
+        <div><label class="label">Header (opsional)</label><select class="select" name="headerFormat"><option value="">Tanpa header</option><option value="TEXT">Teks</option><option value="IMAGE">Gambar</option><option value="VIDEO">Video</option><option value="DOCUMENT">Dokumen (PDF)</option></select></div>
+        <div id="tc-htext" class="hidden space-y-3"><div><label class="label">Header teks</label><input class="input" name="headerText" maxlength="60" placeholder="Halo {{1}}"></div>
+          <div id="tc-hex" class="hidden"><label class="label">Contoh variabel header</label><input class="input" name="headerExample"></div></div>
+        <div id="tc-hmedia" class="hidden"><div class="label">Contoh file header</div>
+          <label class="btn btn-sm cursor-pointer">${ICON.clip}<span>Pilih file contoh</span><input type="file" class="hidden" id="tc-hfile"></label>
+          <div id="tc-hinfo" class="mt-2"></div>
+          <p class="hint" id="tc-hhint"></p></div>
         <div><label class="label">Body</label><textarea class="textarea" name="body" rows="5" maxlength="1024" required placeholder="Hai {{1}}, pesanan {{2}} sudah dikirim."></textarea><p class="hint">Variabel berurutan {{1}}, {{2}}, … Format: *tebal* _miring_</p></div>
         <div id="tc-bex" class="hidden"><label class="label">Contoh nilai variabel body (pisah |)</label><input class="input" name="bodyExample" placeholder="Budi | INV-001"></div>
         <div><label class="label">Footer (opsional)</label><input class="input" name="footer" maxlength="60"></div>
         <div><div class="flex items-center justify-between"><span class="label mb-0">Tombol (opsional)</span><button type="button" class="btn btn-sm btn-ghost" id="tc-addbtn">${ICON.plus} Tombol</button></div><div id="tc-btns" class="space-y-2 mt-2"></div></div>
-        <p class="hint">Header media (gambar/video/dokumen) memerlukan unggahan contoh via Resumable Upload API dan belum didukung di formulir ini — buat di WhatsApp Manager, lalu sinkronkan.</p>
       </div>
       <div><div class="label">Pratinjau</div><div id="tc-prev"></div></div>
     </form>`, { wide: true, footer: '<button class="btn" data-act="modal-close">Batal</button><button class="btn btn-primary" id="tc-go">Ajukan ke Meta</button>' });
     const f = $('#f-tc'), btns = $('#tc-btns');
+    let sample = null, sampleUrl = '';
+    const setSample = (x, file) => {
+      if (sampleUrl) URL.revokeObjectURL(sampleUrl);
+      sample = x; sampleUrl = x && file && f.headerFormat.value === 'IMAGE' ? URL.createObjectURL(file) : '';
+      $('#tc-hinfo').innerHTML = x ? `<div class="tm-card">${sampleUrl ? `<img src="${sampleUrl}" alt="">` : `<span class="tm-ic">${f.headerFormat.value === 'VIDEO' ? ICON.camera : ICON.doc}</span>`}<div class="min-w-0 flex-1"><div class="text-xs font-medium truncate">${esc(x.filename)}</div><div class="text-[11px] ink-3">${fmtBytes(x.size)} · contoh terunggah ke Meta</div></div></div>` : '';
+      draw();
+    };
+    f.headerFormat.addEventListener('change', () => {
+      const v = f.headerFormat.value, media = ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(v);
+      $('#tc-htext').classList.toggle('hidden', v !== 'TEXT'); $('#tc-hmedia').classList.toggle('hidden', !media);
+      if (media) { $('#tc-hfile').accept = TM_RULE[v][0]; $('#tc-hhint').textContent = `${TM_RULE[v][1]}. File contoh hanya untuk ditinjau Meta — saat mengirim, Anda dapat memakai file lain.`; }
+      setSample(null);
+    });
+    $('#tc-hfile').addEventListener('change', (e) => {
+      const file = e.target.files[0]; if (!file) return;
+      const fd = new FormData(); fd.append('format', f.headerFormat.value); fd.append('file', file);
+      $('#tc-hinfo').innerHTML = `<div class="text-xs ink-3">Mengunggah contoh ${esc(file.name)}…</div>`;
+      busy($('#tc-go'), async () => { setSample(await api('POST', '/api/templates/header-sample', fd), file); }).finally(() => { e.target.value = ''; if (!sample) $('#tc-hinfo').innerHTML = ''; });
+    });
     const addBtn = () => {
       if (btns.children.length >= 10) return;
       const row = document.createElement('div'); row.className = 'grid grid-cols-[7rem_1fr_auto] gap-2';
@@ -1986,6 +2057,8 @@
     };
     const collect = () => {
       const d = formData(f);
+      if (d.headerFormat !== 'TEXT') { d.headerText = ''; d.headerExample = ''; }
+      if (sample) d.headerHandle = sample.handle;
       d.buttons = [...btns.children].map((r) => { const type = r.querySelector('[data-k=type]').value, text = r.querySelector('[data-k=text]').value, extra = r.querySelector('[data-k=extra]').value; return { type, text, url: extra, phone: extra }; });
       return d;
     };
@@ -1993,13 +2066,16 @@
       const d = collect();
       $('#tc-hex').classList.toggle('hidden', !tplVars(d.headerText).length);
       $('#tc-bex').classList.toggle('hidden', !tplVars(d.body).length);
-      const t = { components: [d.headerText && { type: 'HEADER', format: 'TEXT', text: d.headerText }, { type: 'BODY', text: d.body || 'Isi pesan…' }, d.footer && { type: 'FOOTER', text: d.footer }, d.buttons.length && { type: 'BUTTONS', buttons: d.buttons.filter((b) => b.text) }].filter(Boolean) };
+      const t = { components: [d.headerFormat === 'TEXT' && d.headerText ? { type: 'HEADER', format: 'TEXT', text: d.headerText } : ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(d.headerFormat) ? { type: 'HEADER', format: d.headerFormat } : null, { type: 'BODY', text: d.body || 'Isi pesan…' }, d.footer && { type: 'FOOTER', text: d.footer }, d.buttons.length && { type: 'BUTTONS', buttons: d.buttons.filter((b) => b.text) }].filter(Boolean) };
       $('#tc-prev').innerHTML = tplPreview(t);
+      const ph = $('#tc-prev .tm-prev-ph');
+      if (ph && sample) ph.outerHTML = sampleUrl ? `<img src="${sampleUrl}" alt="" class="tm-prev-img">` : `<div class="tm-prev-ph">${d.headerFormat === 'VIDEO' ? '🎬' : '📄'} ${esc(sample.filename)}</div>`;
     };
     $('#tc-addbtn').addEventListener('click', () => { addBtn(); draw(); });
     f.addEventListener('input', draw); draw();
     $('#tc-go').addEventListener('click', (e) => busy(e.currentTarget, async () => {
       if (!f.reportValidity()) return;
+      if (['IMAGE', 'VIDEO', 'DOCUMENT'].includes(f.headerFormat.value) && !sample) throw new Error('Pilih file contoh untuk header terlebih dahulu.');
       const r = await api('POST', '/api/templates', collect());
       closeModal(); toast(`Template diajukan. Status: ${r.status || 'PENDING'}`);
       S.templates.loaded = false; viewTemplates(true);
@@ -6437,6 +6513,7 @@
             <div><label class="label">Verify Token webhook</label><input class="input mono" name="verifyToken" value="${esc(m.verifyToken)}" placeholder="string acak buatan Anda"></div>
             <div><label class="label">Versi Graph API</label><input class="input mono" name="graphVersion" value="${esc(m.graphVersion)}"></div>
           </div>
+          <div><label class="label">App ID <span class="ink-3 font-normal">(opsional)</span></label><input class="input mono" name="appId" value="${esc(m.appId)}" inputmode="numeric" placeholder="${m.appIdDetected ? 'Terdeteksi otomatis: ' + esc(m.appIdDetected) : 'Terdeteksi otomatis dari token'}"><p class="hint">Dipakai untuk mengunggah contoh file saat membuat template ber-header gambar/video/dokumen. Isi bila deteksi otomatis gagal (Meta App Dashboard › App ID).</p></div>
         </div>
         <div class="flex flex-wrap justify-end gap-2 px-4 py-3 border-t bd"><button type="button" class="btn" id="mt-test">Uji koneksi</button><button class="btn btn-primary" type="submit">Simpan</button></div>
       </form>
