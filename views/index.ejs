@@ -5985,7 +5985,7 @@
         </div>
         <div class="overflow-x-auto"><table class="tbl"><thead><tr><th>Pegawai</th><th>WhatsApp</th><th>Presensi hari ini</th><th>Diingatkan hari ini</th><th class="text-center">Notifikasi</th><th class="text-right">Kirim</th></tr></thead><tbody>
         ${rows.map((e) => `<tr>
-          <td class="min-w-[14rem]"><div class="font-medium">${esc(e.nama)}</div><div class="text-[11px] ink-3">${e.jabatan ? esc(e.jabatan) + ' · ' : ''}<span class="mono">${esc(e.nip)}</span>${e.inDirectory ? '' : ' · <span class="danger-ink">tidak ada di data pegawai</span>'}</div></td>
+          <td class="min-w-[14rem]"><div class="font-medium">${e.sapaan ? `<span class="ink-3 font-normal">${esc(e.sapaan)}</span> ` : ''}${esc(e.nama)}</div><div class="text-[11px] ink-3">${e.jabatan ? esc(e.jabatan) + ' · ' : ''}<span class="mono">${esc(e.nip)}</span>${e.inDirectory ? '' : ' · <span class="danger-ink">tidak ada di data pegawai</span>'}</div><button class="att-sal" data-att-sapaan="${esc(e.nip)}" title="Ubah sapaan">${e.sapaanOverride === '-' ? 'Tanpa sapaan' : e.sapaanOverride ? 'Sapaan: ' + esc(e.sapaanOverride) : e.sapaan ? 'Sapaan otomatis' : 'Atur sapaan'} · ubah</button></td>
           <td class="whitespace-nowrap"><button class="btn btn-ghost btn-sm" data-att-phone="${esc(e.nip)}" title="Ubah nomor WhatsApp">${e.waPhone ? `<span class="mono">+${esc(e.waPhone)}</span>` : '<span class="danger-ink">Belum ada</span>'}${e.phoneOverride ? ' <span class="badge">manual</span>' : ''}<span class="w-3.5 h-3.5 block ink-3">${ICON.edit}</span></button>${attWinBadge(e)}</td>
           <td class="whitespace-nowrap text-xs">${e.presensi ? `<div>${esc(e.presensi.status)}</div><div class="ink-3">Datang ${e.presensi.belum.datang ? '<span class="danger-ink">belum</span>' : attTime(e.presensi.jamMasuk)} · Pulang ${e.presensi.belum.pulang ? '<span class="danger-ink">belum</span>' : attTime(e.presensi.jamPulang)}</div>` : '<span class="ink-3">—</span>'}</td>
           <td class="whitespace-nowrap text-xs">${Object.entries(ATT_TYPE).filter(([k]) => e.sentToday[k]).map(([k, l]) => `<span class="badge badge-green">${l} ${esc(fmtTime(e.sentToday[k]))}</span>`).join(' ') || '<span class="ink-3">—</span>'}</td>
@@ -6010,9 +6010,37 @@
       catch (err) { i.checked = !i.checked; i.closest('.switch').classList.toggle('on', i.checked); fail(err); }
     }));
     $$('[data-att-phone]', el).forEach((b) => b.addEventListener('click', () => attPhoneModal(list.find((x) => x.nip === b.dataset.attPhone))));
+    $$('[data-att-sapaan]', el).forEach((b) => b.addEventListener('click', () => attSapaanModal(list.find((x) => x.nip === b.dataset.attSapaan))));
     $$('[data-att-one]', el).forEach((b) => b.addEventListener('click', () => attSendModal(b.dataset.attOne, [b.dataset.nip])));
   }
 
+  function attSapaanModal(e) {
+    const sal = S.att.cfg?.salutation || { enabled: true, male: 'Bapak', female: 'Ibu' };
+    const auto = e.jk === 'L' ? sal.male : e.jk === 'P' ? sal.female : '';
+    const o = e.sapaanOverride || '', preset = !o ? 'auto' : o === '-' ? 'none' : o === sal.male ? 'male' : o === sal.female ? 'female' : 'custom';
+    modal('Sapaan pegawai', `<form id="att-sal" class="space-y-3">
+      <div><div class="font-medium">${esc(e.nama)}</div><div class="text-xs ink-3 mono">${esc(e.nip)}${e.jk ? ' · ' + (e.jk === 'L' ? 'Pria' : 'Wanita') : ''}</div></div>
+      ${sal.enabled ? '' : '<p class="text-xs p-2 rounded" style="background:var(--warn-soft)">Sapaan sedang dimatikan di tab Pengaturan, jadi pilihan ini belum dipakai.</p>'}
+      <div class="space-y-1.5 text-[13px]">${[['auto', `Otomatis${auto ? ' (' + esc(auto) + ')' : ' (jenis kelamin tidak diketahui)'}`], ['male', esc(sal.male)], ['female', esc(sal.female)], ['none', 'Tanpa sapaan'], ['custom', 'Lainnya…']]
+        .map(([k, l]) => `<label class="flex items-center gap-2"><input type="radio" class="check" name="pick" value="${k}" ${preset === k ? 'checked' : ''}> ${l}</label>`).join('')}</div>
+      <div id="att-sal-custom" class="${preset === 'custom' ? '' : 'hidden'}"><input class="input" name="custom" maxlength="30" value="${preset === 'custom' ? esc(o) : ''}" placeholder="mis. Dr., Yth. Bapak, Kak"></div>
+      <p class="text-xs ink-2">Contoh: <b id="att-sal-prev"></b></p>
+    </form>`, { footer: '<button class="btn" data-act="modal-close">Batal</button><button class="btn btn-primary" form="att-sal" type="submit">Simpan</button>' });
+    const f = $('#att-sal');
+    const value = () => ({ auto: '', male: sal.male, female: sal.female, none: '-', custom: f.custom.value.trim() })[f.pick.value];
+    const draw = () => {
+      $('#att-sal-custom').classList.toggle('hidden', f.pick.value !== 'custom');
+      const v = value(), shown = v === '-' ? '' : v || auto;
+      $('#att-sal-prev').textContent = `Halo ${shown ? shown + ' ' : ''}${e.nama}`;
+    };
+    f.addEventListener('input', draw); f.addEventListener('change', draw); draw();
+    f.addEventListener('submit', (ev) => { ev.preventDefault(); busy(ev.submitter, async () => {
+      if (f.pick.value === 'custom' && !f.custom.value.trim()) throw new Error('Isi teks sapaan.');
+      const r = await api('PUT', `/api/addons/attendance/employees/${e.nip}`, { sapaan: value() });
+      e.sapaanOverride = r.sapaanOverride; e.sapaan = r.sapaan;
+      closeModal(); toast('Sapaan disimpan.'); attEmployees();
+    }); });
+  }
   function attPhoneModal(e) {
     modal('Nomor WhatsApp pegawai', `<form id="att-ph" class="space-y-3">
       <div><div class="font-medium">${esc(e.nama)}</div><div class="text-xs ink-3 mono">${esc(e.nip)}</div></div>
@@ -6184,6 +6212,11 @@
           <input class="input" name="skipStatuses" value="${esc((c.skipStatuses || []).join(', '))}" placeholder="Dinas Luar, DL, Sakit, Cuti" aria-label="Status tanpa pengingat">
           <p class="hint">Pisahkan dengan koma. Dicocokkan per kata tanpa membedakan huruf besar/kecil — "Cuti" juga mencakup "Cuti Tahunan". Kosongkan agar semua status tetap dikirimi.</p>
         </div></section>
+        <section class="card"><div class="card-h"><div class="card-t">Sapaan sebelum nama</div></div><div class="p-4 space-y-3">
+          <label class="flex items-start gap-3"><span class="switch ${c.salutation?.enabled !== false ? 'on' : ''}"><input type="checkbox" class="sr-only" name="salOn" ${c.salutation?.enabled !== false ? 'checked' : ''} role="switch" aria-label="Tambahkan sapaan sebelum nama"><span></span></span><span class="text-xs"><span class="font-medium block text-[13px]">Tambahkan sapaan</span><span class="ink-3"><span class="kbd">{{nama}}</span> menjadi mis. "Bapak Budi Santoso". Ditentukan dari Jenis Kelamin di data pegawai (cadangan: NIP).</span></span></label>
+          <div class="grid grid-cols-2 gap-2"><div><label class="label">Pria</label><input class="input" name="salMale" maxlength="20" value="${esc(c.salutation?.male || 'Bapak')}"></div><div><label class="label">Wanita</label><input class="input" name="salFemale" maxlength="20" value="${esc(c.salutation?.female || 'Ibu')}"></div></div>
+          <p class="hint">Ubah sapaan per pegawai di tab Pegawai (klik sapaan di bawah nama). <span class="kbd">{{sapaan}}</span> = sapaan saja, <span class="kbd">{{nama_saja}}</span> = nama tanpa sapaan.</p>
+        </div></section>
         <section class="card"><div class="card-h"><div class="card-t">Pegawai</div></div><div class="p-4 space-y-3">
           <label class="flex items-start gap-3"><span class="switch ${c.defaultNotify ? 'on' : ''}"><input type="checkbox" class="sr-only" name="defaultNotify" ${c.defaultNotify ? 'checked' : ''} role="switch" aria-label="Notifikasi aktif untuk pegawai baru"><span></span></span><span class="text-xs"><span class="font-medium block text-[13px]">Pegawai baru otomatis menerima notifikasi</span><span class="ink-3">Berlaku untuk pegawai yang belum pernah diatur. Atur per pegawai di tab Pegawai.</span></span></label>
         </div></section>
@@ -6229,11 +6262,13 @@
       toast(`Data pegawai diperbarui (${d.employees.filter((e) => e.inDirectory).length} pegawai).`);
       viewAttendance('settings');
     }));
+    $('#att-form [name=salOn]')?.addEventListener('change', (ev) => ev.target.closest('.switch').classList.toggle('on', ev.target.checked));
     $('#att-form').addEventListener('submit', (ev) => { ev.preventDefault(); busy(ev.submitter, async () => {
       const fd = ev.target;
       S.att.cfg = await api('PUT', '/api/addons/attendance/config', {
         absensiUrl: fd.absensiUrl.value, pegawaiUrl: fd.pegawaiUrl.value, defaultNotify: fd.defaultNotify.checked,
-        template: f.template, schedule: f.schedule, skipDates: f.skipDates, skipStatuses: fd.skipStatuses.value, routing: fd.routing.value, text: fd.text.value,
+        template: f.template, schedule: f.schedule, skipDates: f.skipDates, skipStatuses: fd.skipStatuses.value,
+        salutation: { enabled: fd.salOn.checked, male: fd.salMale.value, female: fd.salFemale.value }, routing: fd.routing.value, text: fd.text.value,
         button: { mode: fd.btnMode.value, text: fd.btnText.value, url: fd.btnUrl.value, header: fd.btnHeader.value, footer: fd.btnFooter.value,
           replies: [0, 1, 2].map((i) => fd['btnReply' + i].value.trim()).filter(Boolean) },
         optOut: { enabled: fd.ooOn.checked, stopLabel: fd.ooStop.value, resumeLabel: fd.ooResume.value, stopText: fd.ooStopText.value, resumeText: fd.ooResumeText.value },

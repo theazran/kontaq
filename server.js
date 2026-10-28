@@ -4633,7 +4633,29 @@ const ATT_RETRY_MS = 10 * 60000;
 const ATT_RUNS_KEEP = 60;
 const ATT_DIR_TTL_MS = 60 * 60000;
 // Variabel yang dapat dipakai di isian template
-const ATT_VARS = { nama: 'Nama pegawai', jenis: 'datang / pulang', JENIS: 'DATANG / PULANG', nip: 'NIP', tanggal: 'Tanggal hari ini' };
+const ATT_VARS = { nama: 'Nama pegawai (diawali sapaan bila aktif)', sapaan: 'Bapak / Ibu', nama_saja: 'Nama tanpa sapaan', jenis: 'datang / pulang', JENIS: 'DATANG / PULANG', nip: 'NIP', tanggal: 'Tanggal hari ini' };
+const ATT_VAR_RE = /\{\{\s*(nama_saja|nama|sapaan|jenis|JENIS|nip|tanggal)\s*\}\}/g;
+// Sapaan sebelum nama: otomatis dari Jenis Kelamin data pegawai (cadangan: digit ke-15 NIP, 1 = pria, 2 = wanita),
+// dapat ditimpa per pegawai ('' = otomatis, '-' = tanpa sapaan, selain itu teks sapaan apa adanya).
+const attSalDefaults = () => ({ enabled: true, male: 'Bapak', female: 'Ibu' });
+const attSal = (st) => ({ ...attSalDefaults(), ...st.salutation });
+function attGender(raw, nip) {
+  const v = String(raw || '').toLowerCase();
+  if (/pria|laki/.test(v)) return 'L';
+  if (/wanita|perempuan/.test(v)) return 'P';
+  const d = /^\d{18}$/.test(nip || '') ? nip[14] : '';
+  return d === '1' ? 'L' : d === '2' ? 'P' : '';
+}
+function attSapaan(st, nip, person) {
+  const sal = attSal(st);
+  if (!sal.enabled) return '';
+  const o = st.employees[nip]?.sapaan || '';
+  if (o === '-') return '';
+  if (o) return o;
+  const g = person?.jk || attGender('', nip);
+  return g === 'L' ? sal.male : g === 'P' ? sal.female : '';
+}
+const attNamed = (sapaan, nama) => (sapaan ? `${sapaan} ${nama}` : nama);
 const timeRe = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 // Smart routing: bila jendela layanan 24 jam masih terbuka (pegawai membalas/mengirim pesan < 24 jam), kirim teks biasa;
@@ -4657,7 +4679,7 @@ function attDefaults() {
     template: { name: 'pengingat_absen', language: '', header: [], body: [] },
     routing: 'smart', text: ATT_DEFAULT_TEXT,
     button: { mode: 'none', text: 'Login SIKEP', url: 'https://sikep.mahkamahagung.go.id/site/login', replies: ['Sudah presensi', 'Izin / Cuti'] }, // tombol link pada pesan teks (interactive cta_url)
-    optOut: attOptOutDefaults(),
+    optOut: attOptOutDefaults(), salutation: attSalDefaults(),
     schedule: {
       datang: { enabled: true, slots: [{ days: [1, 2, 3, 4, 5], time: '07:45' }] },
       pulang: { enabled: true, slots: [{ days: [1, 2, 3, 4], time: '16:05' }, { days: [5], time: '16:35' }] },
@@ -4706,7 +4728,8 @@ async function refreshPegawai(st, owner) {
     if (!Array.isArray(d)) throw new HttpError(502, 'Data pegawai: format tidak dikenal (harus berupa array).');
     const list = d.map((p) => {
       const b = p?.biodata || {};
-      return { nip: attNip(b['NIP/NRP'] || p?.summary?.name), nama: str(b['Nama Lengkap'], 200), jabatan: str(p?.pekerjaan?.jabatan?.[0]?.Jabatan, 200), phone: attPhone(b['Nomor Handphone']) || attPhone(b['Nomor Telepon']) };
+      const nip = attNip(b['NIP/NRP'] || p?.summary?.name);
+      return { nip, nama: str(b['Nama Lengkap'], 200), jabatan: str(p?.pekerjaan?.jabatan?.[0]?.Jabatan, 200), phone: attPhone(b['Nomor Handphone']) || attPhone(b['Nomor Telepon']), jk: attGender(b['Jenis Kelamin'], nip) };
     }).filter((p) => p.nip);
     if (owner() !== st) return st.directory;
     Object.assign(st, { directory: list, directoryAt: now(), directoryError: '' }); save();
@@ -4764,7 +4787,7 @@ function attButton(st, ctx) {
   const mode = ATT_BTN_MODES.includes(b.mode) ? b.mode : b.enabled ? 'link' : 'none';
   const stop = attOptOut(st).enabled ? attOptOut(st).stopLabel : '';
   const extra = { header: attFill(b.header, ctx).trim().slice(0, 60), footer: attFill(b.footer, ctx).trim().slice(0, 60), stop };
-  if (mode === 'link' && b.url) return { kind: 'link', text: b.text.slice(0, 20), url: String(b.url).replace(/\{\{\s*(nama|jenis|JENIS|nip|tanggal)\s*\}\}/g, (_, k) => encodeURIComponent(ctx[k] ?? '')), ...extra };
+  if (mode === 'link' && b.url) return { kind: 'link', text: b.text.slice(0, 20), url: String(b.url).replace(ATT_VAR_RE, (_, k) => encodeURIComponent(ctx[k] ?? '')), ...extra };
   if (mode === 'reply' && b.replies?.length) return { kind: 'reply', replies: b.replies.slice(0, stop ? 2 : 3).map((x) => attFill(x, ctx).slice(0, 20)), ...extra };
   if (stop) return { kind: 'reply', replies: [], ...extra };
   return null;
@@ -4832,7 +4855,7 @@ function handleAttOptOut(conv, contact, msg) {
   }).catch((e) => console.warn('[attendance] konfirmasi berhenti gagal:', e.message));
   return true;
 }
-const attFill = (v, ctx) => String(v || '').replace(/\{\{\s*(nama|jenis|JENIS|nip|tanggal)\s*\}\}/g, (_, k) => ctx[k] ?? '');
+const attFill = (v, ctx) => String(v || '').replace(ATT_VAR_RE, (_, k) => ctx[k] ?? '');
 
 function attRunPublic(r, full) {
   const { items, ...rest } = r;
@@ -4863,7 +4886,7 @@ async function attPrepare(st, type, nips) {
     if (want && !want.has(a.nip)) continue;
     const emp = st.employees[a.nip] || {}, p = byNip.get(a.nip) || {};
     if (!want && !(emp.notify ?? st.defaultNotify)) continue;
-    const item = { nip: a.nip, nama: a.nama || p.nama || a.nip, phone: attPhone(emp.phone) || p.phone || '', status: 'pending', detail: '' };
+    const item = { nip: a.nip, nama: a.nama || p.nama || a.nip, sapaan: attSapaan(st, a.nip, p), phone: attPhone(emp.phone) || p.phone || '', status: 'pending', detail: '' };
     if (attStatusSkipped(st, a.status)) Object.assign(item, { status: 'skipped', detail: `Status ${a.status}` });
     else if (!a.belum[type]) Object.assign(item, { status: 'skipped', detail: `Sudah presensi ${type}` });
     else if (!item.phone) Object.assign(item, { status: 'skipped', detail: 'Nomor WhatsApp tidak ditemukan' });
@@ -4887,7 +4910,7 @@ async function attSend(st, run, { tpl, values, smart }) {
         const existing = idx.contactByPhone.get(it.phone);
         const contact = getOrCreateContact(it.phone, existing ? '' : it.nama);
         if (!existing) contact.labels = ['Pegawai'];
-        const ctx = { nama: it.nama, jenis: run.type, JENIS: run.type.toUpperCase(), nip: it.nip, tanggal };
+        const ctx = { nama: attNamed(it.sapaan, it.nama), sapaan: it.sapaan || '', nama_saja: it.nama, jenis: run.type, JENIS: run.type.toUpperCase(), nip: it.nip, tanggal };
         const conv = getOrCreateConv(contact);
         // Jendela diperiksa tepat sebelum kirim (pegawai bisa saja baru membalas setelah run disiapkan)
         if (smart && windowOpen(conv)) {
@@ -5024,6 +5047,7 @@ function attCleanConfig(st, b) {
     routing: ATT_ROUTING[b.routing] ? b.routing : 'smart',
     button: attCleanButton(b.button),
     optOut: attCleanOptOut(b.optOut),
+    salutation: { enabled: b.salutation?.enabled !== false, male: str(b.salutation?.male, 20) || 'Bapak', female: str(b.salutation?.female, 20) || 'Ibu' },
     text: str(b.text, 4096) || ATT_DEFAULT_TEXT,
     schedule: { datang: sched(b.schedule?.datang, 'datang'), pulang: sched(b.schedule?.pulang, 'pulang') },
     defaultNotify: b.defaultNotify !== false,
@@ -5042,7 +5066,7 @@ function attConfigPublic(st) {
   const comp = (t, type) => (t.components || []).find((c) => c.type === type);
   return {
     ...cfg, routing: attRouting(st), text: st.text || ATT_DEFAULT_TEXT, routingOptions: ATT_ROUTING, button: { mode: st.button?.mode || (st.button?.enabled ? 'link' : 'none'), text: 'Login SIKEP', url: '', header: '', footer: '', ...st.button, replies: st.button?.replies || ['Sudah presensi', 'Izin / Cuti'] },
-    timezone: flowTz(), today: zonedDate(flowTz()), vars: ATT_VARS, busy: attBusy, optOut: attOptOut(st), skipStatuses: attSkipStatuses(st),
+    timezone: flowTz(), today: zonedDate(flowTz()), vars: ATT_VARS, busy: attBusy, optOut: attOptOut(st), skipStatuses: attSkipStatuses(st), salutation: attSal(st),
     templateStatus: tpl ? { language: tpl.language, status: tpl.status, category: tpl.category } : null,
     // Template APPROVED (dan template terpilih apa pun statusnya) beserta variabel & isian bawaannya, untuk pemetaan variabel di UI
     templates: db.templates.filter((t) => t.status === 'APPROVED' || t.name === st.template.name).map((t) => ({
@@ -5331,6 +5355,7 @@ app.get('/api/addons/attendance/employees', requireAdmin, wrap(async (req, res) 
       const waPhone = attPhone(e.phone) || p.phone, conv = waPhone ? attConvFor(waPhone) : null;
       return {
         ...p, nama: p.nama || a?.nama || p.nip, phoneOverride: e.phone || '', waPhone, notify: e.notify ?? st.defaultNotify, selfOptOutAt: e.selfOptOutAt || 0,
+        sapaan: attSapaan(st, p.nip, p), sapaanOverride: e.sapaan || '', jk: p.jk || attGender('', p.nip),
         windowOpen: !!(conv && windowOpen(conv)), windowExpiresAt: conv?.lastInboundAt ? conv.lastInboundAt + SERVICE_WINDOW_MS : 0,
         presensi: a ? { status: a.status, jamMasuk: a.jamMasuk, jamPulang: a.jamPulang, belum: a.belum } : null, sentToday: sent[p.nip] || {}
       };
@@ -5341,6 +5366,7 @@ app.put('/api/addons/attendance/employees/:nip', requireAdmin, (req, res) => {
   const st = attOr404(), nip = attNip(req.params.nip), b = req.body || {};
   if (!nip) throw new HttpError(400, 'NIP tidak valid.');
   const e = { ...(st.employees[nip] || {}) };
+  if ('sapaan' in b) { const v = str(b.sapaan, 30); if (v) e.sapaan = v; else delete e.sapaan; }
   if ('notify' in b) { e.notify = !!b.notify; if (e.notify) delete e.selfOptOutAt; }
   if ('phone' in b) {
     const raw = str(b.phone, 30);
@@ -5349,7 +5375,7 @@ app.put('/api/addons/attendance/employees/:nip', requireAdmin, (req, res) => {
   }
   if (!e.phone) delete e.phone;
   st.employees[nip] = e; save();
-  res.json({ nip, notify: e.notify ?? st.defaultNotify, phoneOverride: e.phone || '' });
+  res.json({ nip, notify: e.notify ?? st.defaultNotify, phoneOverride: e.phone || '', sapaanOverride: e.sapaan || '', sapaan: attSapaan(st, nip, st.directory.find((x) => x.nip === nip)) });
 });
 // Nyalakan/matikan notifikasi semua pegawai sekaligus
 app.post('/api/addons/attendance/employees/notify-all', requireAdmin, wrap(async (req, res) => {
