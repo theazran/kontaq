@@ -526,7 +526,11 @@ function findTemplate(name, language) {
   return db.templates.find((t) => t.name === name && t.language === language);
 }
 // values: { header: [..] | headerMedia: url, body: [..] } dengan placeholder {{name}}/{{phone}} diganti dari kontak
+// Template yang dibuat otomatis oleh Direct Send (source=AUTO_GENERATED) tidak boleh dikirim sebagai pesan template
+// (Meta: #132018 "Direct send template can't be used for template message")
+const isDsTemplate = (t) => !!t?.directSend;
 function buildTemplateComponents(tpl, values = {}, contact = {}) {
+  if (isDsTemplate(tpl)) throw new HttpError(400, `Template "${tpl.name}" dibuat otomatis oleh Direct Send dan tidak dapat dikirim sebagai template. Pilih template lain, atau kirim sebagai pesan Direct Send.`);
   const fill = (v) => String(v ?? '').replace(/\{\{\s*(name|phone)\s*\}\}/g, (_, k) => (k === 'name' ? contact.name || contact.waName || '' : contact.phone || ''));
   const named = tpl.parameter_format === 'NAMED';
   const comps = [];
@@ -593,7 +597,9 @@ async function sendTemplateTo(contact, tpl, values, extra = {}, ctx = {}) {
   const payload = { messaging_product: 'whatsapp', recipient_type: 'individual', to: contact.phone, type: 'template', template: { name: tpl.name, language: { code: tpl.language } } };
   if (components.length) payload.template.components = components;
   const conv = getOrCreateConv(contact);
-  const r = await sendToMeta(payload, { source: 'inbox', contact, conversation: conv, template: tpl, userId: extra.userId, userName: extra.userName, ...ctx });
+  let r;
+  try { r = await sendToMeta(payload, { source: 'inbox', contact, conversation: conv, template: tpl, userId: extra.userId, userName: extra.userName, ...ctx }); }
+  catch (e) { throw markDsTemplateOnError(tpl, e); }
   // 'accepted' = Meta menerima request; sent/delivered/read hanya dari webhook status
   const msg = addMessage(conv, {
     direction: 'out', type: 'template', wamid: r.messages?.[0]?.id, status: 'accepted',
@@ -683,6 +689,14 @@ async function sendToMeta(payload, ctx = {}) {
     pushLog(entry);
     throw e;
   }
+}
+
+function markDsTemplateOnError(tpl, e) {
+  if (e.meta?.code !== 132018 || !/direct send/i.test(`${e.message} ${e.meta?.error_data?.details || ''}`)) return e;
+  for (const t of db.templates) if (t.name === tpl.name) t.directSend = true;
+  save();
+  io?.emit('template:update', { id: tpl.id, name: tpl.name, language: tpl.language, status: tpl.status, directSend: true });
+  return new HttpError(400, `Template "${tpl.name}" dibuat otomatis oleh Direct Send dan tidak dapat dikirim sebagai template (Meta #132018). Template ini kini disembunyikan dari pilihan — pilih template lain atau kirim sebagai pesan Direct Send.`);
 }
 
 /* Direct Send (Meta): pesan utilitas bisnis-inisiasi tanpa template, di luar jendela layanan 24 jam. Payload pesan biasa
@@ -4122,6 +4136,19 @@ app.post('/api/templates/sync', wrap(async (req, res) => {
     all.push(...(r.data || []));
     after = r.paging?.next ? r.paging.cursors?.after : null;
   } while (after && all.length < 2000);
+  // Template buatan Direct Send: daftar source=AUTO_GENERATED + penanda yang sudah diketahui sebelumnya (mis. dari error #132018)
+  const auto = new Set();
+  try {
+    let a2;
+    do {
+      const r = await graph('get', `${needWaba()}/message_templates`, { params: { fields: 'id,name', source: 'AUTO_GENERATED', limit: 100, after: a2 } });
+      (r.data || []).forEach((t) => auto.add(String(t.id)));
+      a2 = r.paging?.next ? r.paging.cursors?.after : null;
+    } while (a2 && auto.size < 2000);
+  } catch { /* filter tidak tersedia untuk akun ini */ }
+  const known = new Set(db.templates.filter(isDsTemplate).map((t) => t.name));
+  const dsNames = new Set([dsCfg().templateName, att()?.dsTemplateName].filter(Boolean));
+  for (const t of all) if (auto.has(String(t.id)) || known.has(t.name) || dsNames.has(t.name)) t.directSend = true;
   db.templates = all; db.templatesSyncedAt = now(); save();
   res.json({ syncedAt: db.templatesSyncedAt, rows: db.templates });
 }));
@@ -4824,8 +4851,8 @@ async function attAbsensi(st) {
 // Template pengingat: APPROVED; bahasa kosong = bahasa pertama yang tersedia untuk nama tersebut
 function attTemplate(st, strict = true) {
   const t = st.template;
-  const tpl = db.templates.find((x) => x.name === t.name && (!t.language || x.language === t.language) && x.status === 'APPROVED')
-    || (strict ? null : db.templates.find((x) => x.name === t.name && (!t.language || x.language === t.language)));
+  const tpl = db.templates.find((x) => x.name === t.name && (!t.language || x.language === t.language) && x.status === 'APPROVED' && !isDsTemplate(x))
+    || (strict ? null : db.templates.find((x) => x.name === t.name && (!t.language || x.language === t.language) && !isDsTemplate(x)));
   if (!tpl && strict) throw new HttpError(400, `Template "${t.name}"${t.language ? ' (' + t.language + ')' : ''} belum APPROVED atau belum disinkronkan. Buka menu Template lalu sinkronkan.`);
   return tpl || null;
 }
@@ -5143,7 +5170,7 @@ function attConfigPublic(st) {
     timezone: flowTz(), today: zonedDate(flowTz()), vars: ATT_VARS, busy: attBusy, optOut: attOptOut(st), skipStatuses: attSkipStatuses(st), salutation: attSal(st), directSendOn: dsOn(), dsTemplateName: st.dsTemplateName || '',
     templateStatus: tpl ? { language: tpl.language, status: tpl.status, category: tpl.category } : null,
     // Template APPROVED (dan template terpilih apa pun statusnya) beserta variabel & isian bawaannya, untuk pemetaan variabel di UI
-    templates: db.templates.filter((t) => t.status === 'APPROVED' || t.name === st.template.name).map((t) => ({
+    templates: db.templates.filter((t) => !isDsTemplate(t) && (t.status === 'APPROVED' || t.name === st.template.name)).map((t) => ({
       name: t.name, language: t.language, status: t.status, category: t.category,
       header: comp(t, 'HEADER')?.format === 'TEXT' ? comp(t, 'HEADER').text : '', body: comp(t, 'BODY')?.text || '',
       vars: attTemplateVars(t), defaults: attTemplateValues({ template: { header: [], body: [] } }, t),
@@ -5360,7 +5387,7 @@ function bdConfigPublic(st) {
     ...cfg, routing: bdRouting(st), routingOptions: BD_ROUTING, timezone: flowTz(), today, vars: BD_VARS, busy: bdBusy,
     doneToday: st.lastDate === today,
     templateStatus: tpl ? { language: tpl.language, status: tpl.status, category: tpl.category } : null,
-    templates: db.templates.filter((t) => t.status === 'APPROVED' || t.name === st.template.name).map((t) => ({
+    templates: db.templates.filter((t) => !isDsTemplate(t) && (t.status === 'APPROVED' || t.name === st.template.name)).map((t) => ({
       name: t.name, language: t.language, status: t.status, category: t.category,
       header: comp(t, 'HEADER')?.format === 'TEXT' ? comp(t, 'HEADER').text : '', body: comp(t, 'BODY')?.text || '',
       vars: attTemplateVars(t), defaults: bdTemplateValues({ template: { header: [], body: [] } }, t),

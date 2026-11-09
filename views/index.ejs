@@ -1658,7 +1658,7 @@
     return S.templates.rows;
   }
   async function templateSendModal(conv) {
-    const rows = (await ensureTemplates().catch((e) => { fail(e); return []; })).filter((t) => t.status === 'APPROVED');
+    const rows = (await ensureTemplates().catch((e) => { fail(e); return []; })).filter((t) => t.status === 'APPROVED' && !t.directSend);
     modal('Kirim template', rows.length ? `<form id="f-tpl" class="grid md:grid-cols-2 gap-4">
       <div class="space-y-3"><div><label class="label">Template</label><select class="select" name="tpl">${rows.map((t, i) => `<option value="${i}">${esc(t.name)} · ${esc(t.language)} · ${esc(t.category)}</option>`).join('')}</select></div><div id="tpl-fields" class="space-y-3"></div></div>
       <div><div class="label">Pratinjau</div><div id="tpl-prev"></div></div></form>`
@@ -1989,7 +1989,7 @@
       </div>
       <div class="card overflow-x-auto"><table class="tbl"><thead><tr><th>Nama</th><th>Kategori</th><th>Bahasa</th><th>Status</th><th>Kualitas</th><th>Isi</th><th></th></tr></thead><tbody>
         ${rows.map((t) => `<tr>
-          <td class="font-medium mono text-xs">${esc(t.name)}</td><td class="text-xs">${esc(t.category)}</td><td class="text-xs">${esc(t.language)}</td>
+          <td class="font-medium mono text-xs">${esc(t.name)}${t.directSend ? ' <span class="badge badge-amber" title="Dibuat otomatis oleh Direct Send — tidak dapat dikirim sebagai template">Direct Send</span>' : ''}</td><td class="text-xs">${esc(t.category)}</td><td class="text-xs">${esc(t.language)}</td>
           <td>${statusBadge(t.status)}${t.rejected_reason && t.rejected_reason !== 'NONE' ? `<div class="text-[11px] danger-ink mt-0.5">${esc(t.rejected_reason)}</div>` : ''}</td>
           <td class="text-xs">${esc(t.quality_score?.score || '—')}</td>
           <td class="max-w-[22rem] truncate ink-2 text-xs">${esc(comp(t, 'BODY')?.text || '')}</td>
@@ -2136,7 +2136,7 @@
       <td class="text-xs ink-3 whitespace-nowrap">${fmtDT(c.createdAt)}</td><td class="text-right"><button class="btn btn-sm" data-open="${c.id}">Detail</button></td></tr>`;
   }
   async function campaignModal() {
-    const tpls = (await ensureTemplates().catch(() => [])).filter((t) => t.status === 'APPROVED');
+    const tpls = (await ensureTemplates().catch(() => [])).filter((t) => t.status === 'APPROVED' && !t.directSend);
     const labels = (await api('GET', '/api/contacts?page=1').catch(() => ({ labels: [] }))).labels;
     if (!tpls.length) return modal('Campaign baru', '<div class="empty">Belum ada template APPROVED. Sinkronkan template di menu Template.</div>');
     modal('Campaign baru', `<form id="f-cp" class="grid md:grid-cols-2 gap-4">
@@ -2405,7 +2405,7 @@
 
   async function reminderModal(conv, kind = 'self') {
     const k = conv.contact;
-    const tpls = (await ensureTemplates().catch(() => [])).filter((t) => t.status === 'APPROVED');
+    const tpls = (await ensureTemplates().catch(() => [])).filter((t) => t.status === 'APPROVED' && !t.directSend);
     const tplOpts = (none) => (none ? '<option value="">— Tidak ada (lewati bila jendela tertutup) —</option>' : '') + tpls.map((t, i) => {
       const blocked = t.category === 'MARKETING' && !k.optIn;
       return `<option value="${i}" ${blocked ? 'disabled' : ''}>${esc(t.name)} · ${esc(t.language)} · ${esc(t.category)}${blocked ? ' (perlu opt-in)' : ''}</option>`;
@@ -5372,7 +5372,7 @@
     }));
   }
   async function grTemplateModal() {
-    const rows = (await ensureTemplates().catch((e) => { fail(e); return []; })).filter((t) => t.status === 'APPROVED');
+    const rows = (await ensureTemplates().catch((e) => { fail(e); return []; })).filter((t) => t.status === 'APPROVED' && !t.directSend);
     modal('Kirim template ke grup', rows.length ? `<form id="f-grt" class="grid md:grid-cols-2 gap-4">
       <div class="space-y-3"><div><label class="label">Template</label><select class="select" name="tpl">${rows.map((t, i) => `<option value="${i}">${esc(t.name)} · ${esc(t.language)} · ${esc(t.category)}</option>`).join('')}</select></div><div id="grt-fields" class="space-y-3"></div></div>
       <div><div class="label">Pratinjau</div><div id="grt-prev"></div></div></form>`
@@ -5459,7 +5459,7 @@
   }
   async function grInviteModal() {
     const g = S.gr.detail;
-    const tpls = (await ensureTemplates().catch(() => [])).filter((t) => t.status === 'APPROVED');
+    const tpls = (await ensureTemplates().catch(() => [])).filter((t) => t.status === 'APPROVED' && !t.directSend);
     const picked = new Map();
     modal('Kirim undangan grup', `<div class="space-y-4">
       <div><label class="label" for="gi-q">Kontak penerima (maks. 50)</label><input class="input" id="gi-q" placeholder="Cari nama atau nomor…">
@@ -6784,7 +6784,8 @@
   });
   socket.on('template:update', (t) => {
     const row = S.templates.rows.find((x) => String(x.id) === String(t.id) || (x.name === t.name && x.language === t.language));
-    if (row) { row.status = t.status; if (t.reason && t.reason !== 'NONE') row.rejected_reason = t.reason; }
+    if (row) { row.status = t.status; if (t.reason && t.reason !== 'NONE') row.rejected_reason = t.reason; if (t.directSend) S.templates.rows.forEach((x) => { if (x.name === t.name) x.directSend = true; }); }
+    if (t.directSend) { if (S.view === 'templates') viewTemplates(); return; }
     toast(`Template ${t.name}: ${t.status}`);
     if (S.view === 'templates') viewTemplates();
   });
