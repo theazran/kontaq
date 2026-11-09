@@ -277,6 +277,22 @@ Kirim ucapan selamat ulang tahun via WhatsApp ke pegawai setiap hari pada jam ya
 - Tab **Pegawai** menampilkan ulang tahun mendatang (hari ini, 7 hari, bulan ini); tiap pegawai bisa dikirimi ucapan manual kapan saja
   (mis. ucapan susulan). Riwayat ada di tab **Riwayat kirim** dan Log pesan (sumber "Ulang tahun").
 
+## Direct Send (pesan utilitas tanpa template)
+
+Untuk akun yang memenuhi syarat [Direct Send](https://developers.facebook.com/documentation/business-messaging/whatsapp/direct-send)
+(umumnya batas pesan 100.000/tak terbatas; cek banner di WhatsApp Manager), Kontaq dapat mengirim pesan **di luar jendela
+24 jam tanpa membuat template**: payload pesan biasa ditambah `"category": "utility"`, Meta mencocokkan atau membuat template
+otomatis dan menagih tarif utility.
+
+- Aktifkan di **Pengaturan › Koneksi Meta › Direct Send**. Opsional nama template (`direct_send_config.template_name`) agar
+  pesan tercatat ke satu template bernama.
+- **Inbox:** saat jendela 24 jam tertutup, kolom pesan tetap tersedia dengan tanda *Direct Send* (teks maks. 1024 karakter);
+  tombol *Template* tetap ada. Pesan diberi label "Direct Send".
+- **Pengingat ke pelanggan:** mode teks dapat memakai Direct Send bila jendela tertutup (sebelum template cadangan).
+- **Pengingat absensi:** jalur pengiriman *Direct Send* mengirim teks/tombol yang sama di luar jendela 24 jam tanpa template.
+- Hanya untuk konten **utilitas** (bukan promosi; Meta dapat mengategorikan ulang). Didukung: teks, tombol balasan, tombol URL.
+  Bila akun belum memenuhi syarat, Meta menolak dan Kontaq menampilkan penyebabnya di pengaturan dan Log pesan.
+
 ## Pemakaian di HP
 
 Buka Kontaq di browser HP (Chrome/Safari) lewat **HTTPS**. Mikrofon untuk panggilan hanya diizinkan lewat HTTPS.

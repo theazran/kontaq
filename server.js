@@ -685,6 +685,45 @@ async function sendToMeta(payload, ctx = {}) {
   }
 }
 
+/* Direct Send (Meta): pesan utilitas bisnis-inisiasi tanpa template, di luar jendela layanan 24 jam. Payload pesan biasa
+ * (teks, tombol balasan, tombol URL) ditambah "category": "utility"; Meta mencocokkan/membuat template di belakang layar
+ * dan menagih tarif utility. Hanya untuk akun yang memenuhi syarat (aktifkan di Pengaturan › Koneksi Meta) dan hanya untuk
+ * konten utilitas — bukan promosi. Opsional direct_send_config.template_name agar pesan tercatat ke template bernama.
+ */
+const DS_INELIGIBLE = /requires Direct Send|Direct Send.*(isn't|is not|not) enabled/i;
+const dsCfg = () => ({ enabled: false, templateName: '', ...db.settings.directSend });
+const dsOn = () => !!dsCfg().enabled;
+function dsTemplateName(v) {
+  const n = String(v || '').trim();
+  if (n && (!/^[a-z0-9_]+$/.test(n) || n.length > 512)) throw new HttpError(400, 'Nama template Direct Send hanya huruf kecil, angka, dan garis bawah (maks. 512).');
+  return n;
+}
+// Batas Direct Send: teks isi maks. 1024 karakter, label tombol maks. 20
+function dsCheck(payload) {
+  const body = payload.type === 'text' ? payload.text?.body : payload.interactive?.body?.text;
+  if (!['text', 'interactive'].includes(payload.type) || (payload.type === 'interactive' && !['button', 'cta_url'].includes(payload.interactive?.type)))
+    throw new HttpError(400, 'Direct Send hanya mendukung pesan teks, tombol balasan, dan tombol URL.');
+  if (String(body || '').length > 1024) throw new HttpError(400, 'Pesan Direct Send maksimal 1024 karakter.');
+}
+async function sendDirect(payload, ctx, templateName) {
+  dsCheck(payload);
+  const tn = templateName ?? dsCfg().templateName;
+  const p = { ...payload, category: 'utility', ...(tn ? { direct_send_config: { template_name: tn } } : {}) };
+  if (p.type === 'text') p.text = { body: p.text.body }; // preview_url belum didukung Direct Send
+  try {
+    const r = await sendToMeta(p, ctx);
+    if (dsCfg().lastError) { const { lastError, lastErrorAt, ...rest } = dsCfg(); db.settings.directSend = rest; save(); } // akun kini menerima Direct Send
+    return r;
+  }
+  catch (e) {
+    if (DS_INELIGIBLE.test(e.message) || DS_INELIGIBLE.test(e.meta?.error_data?.details || '')) {
+      db.settings.directSend = { ...dsCfg(), lastError: 'Akun belum memenuhi syarat Direct Send', lastErrorAt: now() }; save();
+      throw new HttpError(400, 'Direct Send belum aktif untuk akun WhatsApp ini (Meta menolak). Cek kelayakan di WhatsApp Manager, atau kirim template.');
+    }
+    throw e;
+  }
+}
+
 /** Catat status webhook (idempoten: status+timestamp yang sama diabaikan). Mengembalikan true bila ada perubahan. */
 function recordStatus(target, s) {
   const at = Number(s.timestamp) * 1000 || now();
@@ -2756,7 +2795,7 @@ app.get('/', (req, res) => {
     user: publicUser(req.user), needsSetup: db.users.length === 0,
     // Versi aset dari waktu ubah file: browser HP langsung memuat CSS terbaru setelah update
     assetVersion: Math.floor(fs.statSync(path.join(__dirname, 'public', 'style.css')).mtimeMs).toString(36),
-    boot: req.user ? { user: publicUser(req.user), campaignRate: CAMPAIGN_RATE, timezone: flowTz(), addons: req.user.role === 'admin' ? addonStates() : {} } : null,
+    boot: req.user ? { user: publicUser(req.user), campaignRate: CAMPAIGN_RATE, timezone: flowTz(), addons: req.user.role === 'admin' ? addonStates() : {}, directSend: dsOn() } : null,
   });
 });
 
@@ -2902,7 +2941,7 @@ app.get('/api/settings/meta', requireAdmin, (req, res) => {
   const m = meta();
   res.json({
     graphVersion: m.graphVersion, phoneNumberId: m.phoneNumberId, wabaId: m.wabaId, verifyToken: m.verifyToken,
-    accessTokenMasked: mask(m.accessToken), appSecretMasked: mask(m.appSecret), appId: db.settings.appId || '', appIdDetected: db.settings.appIdDetected || '',
+    accessTokenMasked: mask(m.accessToken), appSecretMasked: mask(m.appSecret), appId: db.settings.appId || '', appIdDetected: db.settings.appIdDetected || '', directSend: dsCfg(),
     webhookUrl: (process.env.PUBLIC_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '') + '/webhook',
     lastWebhookAt: db.settings.lastWebhookAt || 0, connection: db.settings.connection || null,
   });
@@ -2920,6 +2959,11 @@ app.put('/api/settings/meta', requireAdmin, wrap(async (req, res) => {
     }
   }
   if (b.verifyToken !== undefined) s.verifyToken = str(b.verifyToken, 200);
+  if (b.directSend !== undefined) {
+    const was = dsCfg();
+    s.directSend = { enabled: !!b.directSend?.enabled, templateName: dsTemplateName(b.directSend?.templateName),
+      ...(b.directSend?.enabled && !was.enabled ? {} : { lastError: was.lastError, lastErrorAt: was.lastErrorAt }) };
+  }
   if (b.appId !== undefined) {
     if (b.appId && !/^\d{5,25}$/.test(b.appId)) throw new HttpError(400, 'App ID harus berupa angka.');
     s.appId = b.appId || '';
@@ -4027,8 +4071,21 @@ app.post('/api/conversations/:id/messages', wrap(async (req, res) => {
     audit(req, 'message.send', `template ${tpl.name} → ${contact.phone}`);
     return res.json(msg);
   }
-  // Aturan jendela layanan 24 jam: pesan bebas hanya bila pelanggan mengirim pesan dalam 24 jam terakhir
-  if (!windowOpen(conv)) throw new HttpError(400, 'Jendela layanan 24 jam sudah tertutup. Kirim pesan template yang disetujui untuk membuka kembali percakapan.');
+  // Aturan jendela layanan 24 jam: pesan bebas hanya bila pelanggan mengirim pesan dalam 24 jam terakhir.
+  // Di luar jendela: template, atau Direct Send (pesan utilitas) bila aktif dan dipilih pengirim.
+  const direct = !windowOpen(conv) && req.body.directSend === true;
+  if (direct) {
+    if (!dsOn()) throw new HttpError(400, 'Direct Send belum diaktifkan di Pengaturan › Koneksi Meta.');
+    if (!['text', 'buttons'].includes(type)) throw new HttpError(400, 'Direct Send hanya untuk pesan teks dan tombol balasan.');
+    const built = buildOutbound(type, req.body);
+    const payload = { messaging_product: 'whatsapp', recipient_type: 'individual', to: contact.phone, type: built.type || type, ...built.payload };
+    const r = await sendDirect(payload, { source: 'inbox', contact, conversation: conv, userId: req.user.id, userName: req.user.name });
+    if (!conv.assignedTo && req.user.role !== 'admin') conv.assignedTo = req.user.id;
+    const msg = addMessage(conv, { direction: 'out', type: built.type || type, content: { ...built.content, directSend: true }, wamid: r.messages?.[0]?.id, status: 'accepted', userId: req.user.id, userName: req.user.name });
+    audit(req, 'message.direct_send', contact.phone);
+    return res.json(msg);
+  }
+  if (!windowOpen(conv)) throw new HttpError(400, dsOn() ? 'Jendela layanan 24 jam sudah tertutup. Kirim sebagai pesan utilitas (Direct Send) atau template.' : 'Jendela layanan 24 jam sudah tertutup. Kirim pesan template yang disetujui untuk membuka kembali percakapan.');
   if (type === 'reaction') {
     // Reaksi ditempelkan ke pesan target (bukan gelembung baru). Emoji kosong = hapus reaksi.
     const target = byId('messages', str(req.body.messageId, 40));
@@ -4481,8 +4538,14 @@ async function sendCustomerReminder(r) {
       const msg = addMessage(conv, { direction: 'out', type: 'text', content: { body }, wamid: p.messages?.[0]?.id, status: 'accepted', userName: who, auto: 'reminder' });
       return { status: 'sent', detail: 'Pesan teks', wamid: msg.wamid };
     }
+    if (r.directSend && dsOn()) {
+      const body = fillVars(r.text, contact).slice(0, 1024);
+      const p = await sendDirect({ messaging_product: 'whatsapp', recipient_type: 'individual', to: contact.phone, type: 'text', text: { body } }, { source: 'reminder', contact, conversation: conv, userName: who });
+      const msg = addMessage(conv, { direction: 'out', type: 'text', content: { body, directSend: true }, wamid: p.messages?.[0]?.id, status: 'accepted', userName: who, auto: 'reminder' });
+      return { status: 'sent', detail: 'Jendela 24 jam tertutup → Direct Send', wamid: msg.wamid };
+    }
     if (r.fallback) return await useTpl(r.fallback, 'Jendela 24 jam tertutup →');
-    return { status: 'skipped', detail: 'Jendela layanan 24 jam tertutup dan tidak ada template cadangan.' };
+    return { status: 'skipped', detail: r.directSend ? 'Jendela 24 jam tertutup dan Direct Send sedang dinonaktifkan.' : 'Jendela layanan 24 jam tertutup dan tidak ada template cadangan.' };
   } catch (e) {
     return { status: 'failed', detail: e.message };
   }
@@ -4571,6 +4634,8 @@ app.post('/api/reminders', wrap(async (req, res) => {
       r.text = str(b.text, 4096);
       if (!r.text) throw new HttpError(400, 'Isi pesan wajib diisi.');
       r.fallback = b.fallback?.templateName ? reminderTemplate(b.fallback, contact, 'Template cadangan') : null;
+      r.directSend = b.directSend === true && dsOn();
+      if (r.directSend && r.text.length > 1024) throw new HttpError(400, 'Pesan dengan Direct Send maksimal 1024 karakter.');
     } else r.template = reminderTemplate(b.template, contact, 'Template');
   }
   remHistory(r, 'pending', 'Dibuat oleh ' + req.user.name);
@@ -4660,7 +4725,9 @@ const timeRe = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 // Smart routing: bila jendela layanan 24 jam masih terbuka (pegawai membalas/mengirim pesan < 24 jam), kirim teks biasa;
 // selain itu template (wajib di luar jendela menurut kebijakan WhatsApp).
-const ATT_ROUTING = { smart: 'Pintar (teks bila jendela 24 jam terbuka)', template: 'Selalu template' };
+const BD_ROUTING = { smart: 'Pintar (teks bila jendela 24 jam terbuka)', template: 'Selalu template' };
+// Ucapan ulang tahun bukan pesan utilitas, jadi Direct Send hanya untuk pengingat absensi
+const ATT_ROUTING = { smart: BD_ROUTING.smart, direct: 'Direct Send (teks tanpa template, juga di luar jendela 24 jam)', template: BD_ROUTING.template };
 const ATT_DEFAULT_TEXT = '*BELUM PRESENSI {{JENIS}}*\nHalo {{nama}}, jangan lupa melakukan presensi {{jenis}} hari ini. Pastikan presensi tercatat dengan benar. Terima kasih. 😊';
 const attRouting = (st) => (ATT_ROUTING[st.routing] ? st.routing : 'smart');
 // Pegawai dengan status presensi ini (mis. dinas luar, sakit, cuti) tidak dikirimi pengingat. Dicocokkan per kata, tanpa
@@ -4860,7 +4927,7 @@ const attFill = (v, ctx) => String(v || '').replace(ATT_VAR_RE, (_, k) => ctx[k]
 function attRunPublic(r, full) {
   const { items, ...rest } = r;
   const count = (s) => items.filter((i) => i.status === s).length;
-  return { ...rest, total: items.length, sent: count('sent'), viaText: items.filter((i) => i.via === 'text').length, failed: count('failed'), skipped: count('skipped'), ...(full ? { items } : {}) };
+  return { ...rest, total: items.length, sent: count('sent'), viaText: items.filter((i) => i.via === 'text').length, viaDirect: items.filter((i) => i.via === 'direct').length, failed: count('failed'), skipped: count('skipped'), ...(full ? { items } : {}) };
 }
 function attEmitRun(r) { io?.to('admins').emit('attendance:run', attRunPublic(r)); }
 function attPushRun(st, r) {
@@ -4872,7 +4939,9 @@ function attPushRun(st, r) {
 /* Siapkan pengiriman: validasi template + ambil data presensi & pegawai. Error di sini dikembalikan langsung ke pemanggil.
  * nips: daftar NIP pilihan (kirim manual) — dikirim meski notifikasinya dimatikan; tanpa nips hanya pegawai yang notifikasinya aktif. */
 async function attPrepare(st, type, nips) {
-  const smart = attRouting(st) === 'smart';
+  const direct = attRouting(st) === 'direct';
+  if (direct && !dsOn()) throw new HttpError(400, 'Jalur Direct Send dipilih, tetapi Direct Send belum diaktifkan di Pengaturan › Koneksi Meta.');
+  const smart = attRouting(st) === 'smart' || direct;
   // Mode pintar: template hanya diperlukan untuk pegawai yang jendela 24 jamnya tertutup
   const tpl = smart ? attTemplate(st, false) : attTemplate(st);
   const usable = tpl?.status === 'APPROVED' ? tpl : null;
@@ -4890,16 +4959,16 @@ async function attPrepare(st, type, nips) {
     if (attStatusSkipped(st, a.status)) Object.assign(item, { status: 'skipped', detail: `Status ${a.status}` });
     else if (!a.belum[type]) Object.assign(item, { status: 'skipped', detail: `Sudah presensi ${type}` });
     else if (!item.phone) Object.assign(item, { status: 'skipped', detail: 'Nomor WhatsApp tidak ditemukan' });
-    else if (!usable && !(smart && attWindowOpen(item.phone))) Object.assign(item, { status: 'failed', detail: 'Jendela 24 jam tertutup dan template belum APPROVED' });
+    else if (!direct && !usable && !(smart && attWindowOpen(item.phone))) Object.assign(item, { status: 'failed', detail: 'Jendela 24 jam tertutup dan template belum APPROVED' });
     // Pegawai yang sudah presensi tidak dicatat pada pengiriman terjadwal (agar riwayat ringkas); yang dilewati karena status tetap dicatat
     if (want || item.status !== 'skipped' || item.detail.startsWith('Nomor') || item.detail.startsWith('Status')) items.push(item);
   }
   if (want) for (const n of want) if (!rows.some((a) => a.nip === n)) items.push({ nip: n, nama: byNip.get(n)?.nama || n, phone: '', status: 'skipped', detail: 'Tidak ada di data presensi hari ini' });
-  return { tpl: usable, values, items, smart };
+  return { tpl: usable, values, items, smart, direct };
 }
 
 let attBusy = false;
-async function attSend(st, run, { tpl, values, smart }) {
+async function attSend(st, run, { tpl, values, smart, direct }) {
   const who = 'Pengingat absensi' + (run.trigger === 'manual' ? ' · ' + run.userName : '');
   const tanggal = longDate(zonedDate(flowTz()));
   try {
@@ -4913,22 +4982,26 @@ async function attSend(st, run, { tpl, values, smart }) {
         const ctx = { nama: attNamed(it.sapaan, it.nama), sapaan: it.sapaan || '', nama_saja: it.nama, jenis: run.type, JENIS: run.type.toUpperCase(), nip: it.nip, tanggal };
         const conv = getOrCreateConv(contact);
         // Jendela diperiksa tepat sebelum kirim (pegawai bisa saja baru membalas setelah run disiapkan)
-        if (smart && windowOpen(conv)) {
+        const open = windowOpen(conv);
+        if (smart && (open || direct)) {
           const btn = attButton(st, ctx);
           // Dengan tombol: pesan interaktif (teks maks. 1024 karakter, label tombol maks. 20)
           const hint = btn?.kind === 'link' && btn.stop ? `\n\n_Ketik *${btn.stop}* untuk berhenti menerima pengingat ini._` : '';
-          const body = attFill(st.text, ctx).slice(0, btn ? 1024 - hint.length : 4096) + hint;
+          const body = attFill(st.text, ctx).slice(0, btn || !open ? 1024 - hint.length : 4096) + hint;
           const replyBtns = btn?.kind === 'reply' ? [...btn.replies.map((title, i) => ({ id: 'att_qr_' + i, title })), ...(btn.stop ? [{ id: 'att_stop', title: btn.stop }] : [])] : [];
           const payload = { messaging_product: 'whatsapp', recipient_type: 'individual', to: contact.phone };
           const hf = btn ? { ...(btn.header ? { header: { type: 'text', text: btn.header } } : {}), ...(btn.footer ? { footer: { text: btn.footer } } : {}) } : {};
           if (btn?.kind === 'link') Object.assign(payload, { type: 'interactive', interactive: { type: 'cta_url', ...hf, body: { text: body }, action: { name: 'cta_url', parameters: { display_text: btn.text, url: btn.url } } } });
           else if (btn?.kind === 'reply') Object.assign(payload, { type: 'interactive', interactive: { type: 'button', ...hf, body: { text: body }, action: { buttons: replyBtns.map((reply) => ({ type: 'reply', reply })) } } });
           else Object.assign(payload, { type: 'text', text: { body, preview_url: /https?:\/\//.test(body) } });
-          const r = await sendToMeta(payload, { source: 'attendance', contact, conversation: conv, userName: who });
+          const r = open ? await sendToMeta(payload, { source: 'attendance', contact, conversation: conv, userName: who })
+            : await sendDirect(payload, { source: 'attendance', contact, conversation: conv, userName: who }, st.dsTemplateName || undefined);
           const content = !btn ? { body } : btn.kind === 'link' ? { kind: 'cta_url', body, button: btn.text, url: btn.url, header: btn.header, footer: btn.footer }
             : { kind: 'button', body, buttons: replyBtns.map((x) => x.title), header: btn.header, footer: btn.footer };
+          if (!open) content.directSend = true;
           const msg = addMessage(conv, { direction: 'out', type: btn ? 'interactive' : 'text', content, wamid: r.messages?.[0]?.id, status: 'accepted', userName: who, auto: 'attendance' });
-          Object.assign(it, { status: 'sent', via: 'text', detail: !btn ? '' : btn.kind === 'link' ? 'Teks + tombol link' : btn.replies.length ? 'Teks + balasan cepat' : 'Teks + tombol berhenti', wamid: msg.wamid, at: now() });
+          const det = !btn ? '' : btn.kind === 'link' ? 'Teks + tombol link' : btn.replies.length ? 'Teks + balasan cepat' : 'Teks + tombol berhenti';
+          Object.assign(it, { status: 'sent', via: open ? 'text' : 'direct', detail: open ? det : ['Direct Send', det].filter(Boolean).join(' · '), wamid: msg.wamid, at: now() });
         } else {
           if (!tpl) throw new HttpError(400, 'Jendela 24 jam tertutup dan template belum APPROVED');
           const msg = await sendTemplateTo(contact, tpl, { header: values.header.map((v) => attFill(v, ctx)), body: values.body.map((v) => attFill(v, ctx)) },
@@ -5045,6 +5118,7 @@ function attCleanConfig(st, b) {
     absensiUrl: url(b.absensiUrl, 'URL API presensi'), pegawaiUrl: url(b.pegawaiUrl, 'URL data pegawai'),
     template: { name, language: str(b.template?.language, 15), header: vals(b.template?.header), body: vals(b.template?.body) },
     routing: ATT_ROUTING[b.routing] ? b.routing : 'smart',
+    dsTemplateName: dsTemplateName(b.dsTemplateName),
     button: attCleanButton(b.button),
     optOut: attCleanOptOut(b.optOut),
     salutation: { enabled: b.salutation?.enabled !== false, male: str(b.salutation?.male, 20) || 'Bapak', female: str(b.salutation?.female, 20) || 'Ibu' },
@@ -5066,7 +5140,7 @@ function attConfigPublic(st) {
   const comp = (t, type) => (t.components || []).find((c) => c.type === type);
   return {
     ...cfg, routing: attRouting(st), text: st.text || ATT_DEFAULT_TEXT, routingOptions: ATT_ROUTING, button: { mode: st.button?.mode || (st.button?.enabled ? 'link' : 'none'), text: 'Login SIKEP', url: '', header: '', footer: '', ...st.button, replies: st.button?.replies || ['Sudah presensi', 'Izin / Cuti'] },
-    timezone: flowTz(), today: zonedDate(flowTz()), vars: ATT_VARS, busy: attBusy, optOut: attOptOut(st), skipStatuses: attSkipStatuses(st), salutation: attSal(st),
+    timezone: flowTz(), today: zonedDate(flowTz()), vars: ATT_VARS, busy: attBusy, optOut: attOptOut(st), skipStatuses: attSkipStatuses(st), salutation: attSal(st), directSendOn: dsOn(), dsTemplateName: st.dsTemplateName || '',
     templateStatus: tpl ? { language: tpl.language, status: tpl.status, category: tpl.category } : null,
     // Template APPROVED (dan template terpilih apa pun statusnya) beserta variabel & isian bawaannya, untuk pemetaan variabel di UI
     templates: db.templates.filter((t) => t.status === 'APPROVED' || t.name === st.template.name).map((t) => ({
@@ -5128,7 +5202,7 @@ function bdNext(b, today) {
   if (on < today) on = bdOn(b, y + 1);
   return { date: on, age: +on.slice(0, 4) - b.y, days: Math.round((ymdDate(on) - ymdDate(today)) / 86400000) };
 }
-const bdRouting = (st) => (ATT_ROUTING[st.routing] ? st.routing : 'smart');
+const bdRouting = (st) => (BD_ROUTING[st.routing] ? st.routing : 'smart');
 const bdFill = (v, ctx) => String(v || '').replace(/\{\{\s*(nama|usia|jabatan|nip|tanggal)\s*\}\}/g, (_, k) => ctx[k] ?? '');
 // Isian variabel template; yang kosong memakai bawaan menurut posisi (judul: nama; isi: nama, usia, jabatan)
 function bdTemplateValues(st, tpl) {
@@ -5271,7 +5345,7 @@ function bdCleanConfig(st, b) {
   const timeChanged = time !== st.schedule.time;
   Object.assign(st, {
     pegawaiUrl: u, schedule: { enabled: !!b.schedule?.enabled, time },
-    routing: ATT_ROUTING[b.routing] ? b.routing : 'smart', text: str(b.text, 4096) || BD_DEFAULT_TEXT,
+    routing: BD_ROUTING[b.routing] ? b.routing : 'smart', text: str(b.text, 4096) || BD_DEFAULT_TEXT,
     template: { name, language: str(b.template?.language, 15), header: vals(b.template?.header), body: vals(b.template?.body) },
     defaultNotify: b.defaultNotify !== false,
   });
@@ -5283,7 +5357,7 @@ function bdConfigPublic(st) {
   const comp = (t, type) => (t.components || []).find((c) => c.type === type);
   const today = zonedDate(flowTz());
   return {
-    ...cfg, routing: bdRouting(st), routingOptions: ATT_ROUTING, timezone: flowTz(), today, vars: BD_VARS, busy: bdBusy,
+    ...cfg, routing: bdRouting(st), routingOptions: BD_ROUTING, timezone: flowTz(), today, vars: BD_VARS, busy: bdBusy,
     doneToday: st.lastDate === today,
     templateStatus: tpl ? { language: tpl.language, status: tpl.status, category: tpl.category } : null,
     templates: db.templates.filter((t) => t.status === 'APPROVED' || t.name === st.template.name).map((t) => ({

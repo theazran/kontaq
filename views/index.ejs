@@ -787,7 +787,7 @@
     const acts = `<div class="reply-btn opacity-0 group-hover:opacity-100 self-center flex flex-col gap-0.5 ${out ? 'mr-1' : 'ml-1'}">
         ${canReact ? `<button type="button" class="ink-3 p-1 rounded-full hover:bg-[var(--surface-2)]" data-react-open="${m.id}" title="Beri reaksi" aria-label="Beri reaksi">${ICON.smile.replace('<svg', '<svg width="15" height="15"')}</button>` : ''}
         <button type="button" class="ink-3 p-1 rounded-full hover:bg-[var(--surface-2)]" data-reply="${m.id}" title="Balas" aria-label="Balas">${ICON.reply.replace('<svg', '<svg width="14" height="14"')}</button></div>`;
-    const meta = `<div class="meta">${out && m.userName ? `<span>${m.auto ? '⚡ ' : ''}${esc(m.userName)} ·</span>` : ''}<span>${fmtTime(m.timestamp)}</span>${out ? tick(m.status) : ''}</div>`;
+    const meta = `<div class="meta">${m.content?.directSend ? '<span class="ds-tag" title="Dikirim di luar jendela 24 jam sebagai pesan utilitas (Direct Send)">Direct Send ·</span>' : ''}${out && m.userName ? `<span>${m.auto ? '⚡ ' : ''}${esc(m.userName)} ·</span>` : ''}<span>${fmtTime(m.timestamp)}</span>${out ? tick(m.status) : ''}</div>`;
     const failed = m.status === 'failed' ? `<div class="text-[11px] danger-ink mt-1">${esc(m.error || 'Gagal terkirim')}</div>` : '';
     const pills = reactPills(m);
     if (m.type === 'sticker') {
@@ -1005,6 +1005,20 @@
     const c = activeConv(), el = $('#composer'); if (!c || !el) return;
     if (S.rec && S.rec.convId === c.id) return; // jangan ganggu perekaman yang sedang berjalan
     const draft = $('#cmp-text')?.value || '';
+    if (!c.windowOpen && BOOT.directSend) {
+      el.innerHTML = `<div class="ds-bar"><span class="badge badge-amber">Direct Send</span><span class="flex-1 min-w-0">Jendela 24 jam tertutup — pesan dikirim sebagai <b>pesan utilitas</b> tanpa template (tarif utility). Bukan untuk promosi.</span><button class="btn btn-sm" id="cmp-tpl">${ICON.tpl} Template</button></div>
+        <div class="cmp-row"><textarea id="cmp-text" rows="1" class="textarea flex-1 max-h-40" style="border-radius:1.125rem;padding-left:.875rem" maxlength="1024" placeholder="Ketik pesan utilitas (maks. 1024 karakter)" aria-label="Pesan utilitas">${esc(draft)}</textarea>
+        <button type="button" class="cmp-send" id="cmp-send" title="Kirim (Direct Send)" aria-label="Kirim (Direct Send)">${ICON.send}</button></div>`;
+      const ta = $('#cmp-text'), grow = () => { ta.style.height = 'auto'; ta.style.height = Math.min(160, ta.scrollHeight) + 'px'; };
+      ta.addEventListener('input', grow); grow();
+      ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !isTouch) { e.preventDefault(); $('#cmp-send').click(); } });
+      $('#cmp-send').addEventListener('click', (e) => {
+        const body = ta.value.trim(); if (!body) return;
+        busy(e.currentTarget, async () => { await sendMsg({ type: 'text', body, directSend: true }); ta.value = ''; grow(); });
+      });
+      $('#cmp-tpl').addEventListener('click', () => templateSendModal(c));
+      return;
+    }
     if (!c.windowOpen) {
       el.innerHTML = `<div class="p-3 flex flex-wrap items-center gap-3"><div class="flex-1 min-w-[12rem] text-xs ink-2">Jendela layanan 24 jam tertutup. Sesuai kebijakan Meta, hanya <b>template yang disetujui</b> yang dapat dikirim sampai pelanggan membalas.</div><button class="btn btn-primary max-sm:w-full" id="cmp-tpl">${ICON.tpl} Kirim template</button></div>`;
       $('#cmp-tpl').addEventListener('click', () => templateSendModal(c));
@@ -2419,7 +2433,8 @@
           <div data-m="text" class="space-y-3">
             <div><label class="label">Pesan</label><textarea class="textarea" name="text" rows="3" maxlength="4096" placeholder="Halo {{name}}, mengingatkan jadwal Anda besok pukul 10.00."></textarea>
               <p class="hint"><span class="kbd">{{name}}</span> nama kontak. Pesan teks hanya terkirim bila jendela 24 jam masih terbuka saat jadwal — ${winEnd ? `jendela saat ini berakhir ${fmtTz(winEnd)}` : '<span class="danger-ink">jendela saat ini sudah tertutup</span>'}.</p></div>
-            <div><label class="label">Bila jendela 24 jam tertutup, kirim template</label><select class="select" name="fb">${tplOpts(true)}</select></div>
+            ${BOOT.directSend ? '<label class="flex items-start gap-2 text-xs"><input type="checkbox" class="check mt-0.5" name="ds" checked> <span>Bila jendela 24 jam tertutup, kirim teks ini lewat <b>Direct Send</b> (pesan utilitas, tanpa template, maks. 1024 karakter)</span></label>' : ''}
+            <div><label class="label">${BOOT.directSend ? 'Template cadangan (bila Direct Send tidak dipakai)' : 'Bila jendela 24 jam tertutup, kirim template'}</label><select class="select" name="fb">${tplOpts(true)}</select></div>
           </div>
           <div data-m="template" class="hidden space-y-3"><div><label class="label">Template</label><select class="select" name="tpl">${tplOpts(false)}</select></div></div>
         </form>
@@ -2471,7 +2486,7 @@
         if (mode === 'text' && !fc.text.value.trim()) { fc.text.focus(); throw new Error('Isi pesan wajib diisi.'); }
         if (!ft.reportValidity() || !fw.reportValidity()) return;
         const t = activeTpl(), tv = t && { templateName: t.name, language: t.language, values: readTplValues(t, ft) };
-        body = { kind: 'customer', conversationId: conv.id, mode, note: fw.note.value, ...readSched(fw),
+        body = { kind: 'customer', conversationId: conv.id, mode, note: fw.note.value, ...readSched(fw), directSend: mode === 'text' && !!fc.ds?.checked,
           ...(mode === 'text' ? { text: fc.text.value, fallback: tv || null } : { template: tv }) };
       }
       const r = await api('POST', '/api/reminders', body);
@@ -6095,7 +6110,7 @@
   async function attRunModal(id) {
     let r; try { r = await api('GET', `/api/addons/attendance/runs/${id}`); } catch (e) { fail(e); return; }
     S.att.openRun = id;
-    const counts = `<span class="badge badge-green">${r.sent} terkirim</span> ${r.viaText ? `<span class="badge">${r.viaText} via teks · ${r.sent - r.viaText} via template</span>` : ''} ${r.failed ? `<span class="badge badge-red">${r.failed} gagal</span>` : ''} ${r.skipped ? `<span class="badge">${r.skipped} dilewati</span>` : ''}`;
+    const counts = `<span class="badge badge-green">${r.sent} terkirim</span> ${r.viaText || r.viaDirect ? `<span class="badge">${[r.viaText && r.viaText + ' via teks', r.viaDirect && r.viaDirect + ' via Direct Send', r.sent - (r.viaText || 0) - (r.viaDirect || 0) && (r.sent - (r.viaText || 0) - (r.viaDirect || 0)) + ' via template'].filter(Boolean).join(' · ')}</span>` : ''} ${r.failed ? `<span class="badge badge-red">${r.failed} gagal</span>` : ''} ${r.skipped ? `<span class="badge">${r.skipped} dilewati</span>` : ''}`;
     modal(`Pengingat presensi ${r.type} · ${fmtDT(r.at)}`, `<div class="space-y-3" data-att-run="${esc(r.id)}">
       <div class="flex flex-wrap items-center gap-2 text-xs">${attRunStatus(r)}<span class="ink-3">${attTrigger(r)}</span><span class="flex-1"></span>${counts}</div>
       ${r.error ? `<p class="text-[13px] danger-ink">${esc(r.error)}</p>` : ''}
@@ -6168,7 +6183,11 @@
       <div class="lg:col-span-3 space-y-4">
         <section class="card"><div class="card-h"><div class="card-t">Cara kirim</div></div><div class="p-4 space-y-3">
           <div><label class="label">Jalur pengiriman</label><select class="select" name="routing">${Object.entries(c.routingOptions).map(([k, l]) => `<option value="${k}" ${c.routing === k ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>
-            <p class="hint">Pintar: bila pegawai mengirim/membalas pesan ke nomor ini dalam 24 jam terakhir, pengingat dikirim sebagai pesan teks biasa; selain itu memakai template di bawah (WhatsApp mewajibkan template di luar jendela 24 jam).</p></div>
+            <p class="hint">Pintar: bila pegawai mengirim/membalas pesan ke nomor ini dalam 24 jam terakhir, pengingat dikirim sebagai pesan teks biasa; selain itu memakai template di bawah (WhatsApp mewajibkan template di luar jendela 24 jam). Direct Send: di luar jendela 24 jam pesan teks yang sama dikirim sebagai pesan utilitas tanpa template.</p></div>
+          <div id="att-ds-box" class="${c.routing === 'direct' ? '' : 'hidden'} space-y-2">
+            ${c.directSendOn ? '' : '<p class="text-xs p-2 rounded" style="background:var(--warn-soft)">Direct Send belum diaktifkan di <a class="underline" href="#/settings/meta">Pengaturan › Koneksi Meta</a>. Pengiriman akan ditolak sampai diaktifkan.</p>'}
+            <div><label class="label">Nama template Direct Send <span class="ink-3 font-normal">(opsional)</span></label><input class="input mono" name="dsTemplateName" value="${esc(c.dsTemplateName || '')}" placeholder="mis. pengingat_presensi" pattern="[a-z0-9_]+"><p class="hint">Agar semua pengingat tercatat ke satu template di Meta. Pesan di luar jendela 24 jam maks. 1024 karakter.</p></div>
+          </div>
           <div id="att-text-box"><label class="label">Isi pesan teks</label><textarea class="input text-xs" name="text" rows="5" maxlength="4096">${esc(c.text)}</textarea>
             <p class="hint">Variabel: ${varHelp}. Format WhatsApp: *tebal*, _miring_.</p>
             <div class="mt-3 rounded-lg p-3 space-y-3" style="background:var(--surface-2)">
@@ -6262,13 +6281,14 @@
       toast(`Data pegawai diperbarui (${d.employees.filter((e) => e.inDirectory).length} pegawai).`);
       viewAttendance('settings');
     }));
+    $('#att-form [name=routing]')?.addEventListener('change', (ev) => $('#att-ds-box').classList.toggle('hidden', ev.target.value !== 'direct'));
     $('#att-form [name=salOn]')?.addEventListener('change', (ev) => ev.target.closest('.switch').classList.toggle('on', ev.target.checked));
     $('#att-form').addEventListener('submit', (ev) => { ev.preventDefault(); busy(ev.submitter, async () => {
       const fd = ev.target;
       S.att.cfg = await api('PUT', '/api/addons/attendance/config', {
         absensiUrl: fd.absensiUrl.value, pegawaiUrl: fd.pegawaiUrl.value, defaultNotify: fd.defaultNotify.checked,
         template: f.template, schedule: f.schedule, skipDates: f.skipDates, skipStatuses: fd.skipStatuses.value,
-        salutation: { enabled: fd.salOn.checked, male: fd.salMale.value, female: fd.salFemale.value }, routing: fd.routing.value, text: fd.text.value,
+        salutation: { enabled: fd.salOn.checked, male: fd.salMale.value, female: fd.salFemale.value }, routing: fd.routing.value, dsTemplateName: fd.dsTemplateName.value, text: fd.text.value,
         button: { mode: fd.btnMode.value, text: fd.btnText.value, url: fd.btnUrl.value, header: fd.btnHeader.value, footer: fd.btnFooter.value,
           replies: [0, 1, 2].map((i) => fd['btnReply' + i].value.trim()).filter(Boolean) },
         optOut: { enabled: fd.ooOn.checked, stopLabel: fd.ooStop.value, resumeLabel: fd.ooResume.value, stopText: fd.ooStopText.value, resumeText: fd.ooResumeText.value },
@@ -6420,7 +6440,7 @@
   const bdTrigger = (r) => (r.trigger === 'auto' ? 'Terjadwal' : `Manual · ${esc(r.userName)}`);
   async function bdRunModal(id) {
     let r; try { r = await api('GET', `/api/addons/birthday/runs/${id}`); } catch (e) { fail(e); return; }
-    const counts = `<span class="badge badge-green">${r.sent} terkirim</span> ${r.viaText ? `<span class="badge">${r.viaText} via teks · ${r.sent - r.viaText} via template</span>` : ''} ${r.failed ? `<span class="badge badge-red">${r.failed} gagal</span>` : ''} ${r.skipped ? `<span class="badge">${r.skipped} dilewati</span>` : ''}`;
+    const counts = `<span class="badge badge-green">${r.sent} terkirim</span> ${r.viaText || r.viaDirect ? `<span class="badge">${[r.viaText && r.viaText + ' via teks', r.viaDirect && r.viaDirect + ' via Direct Send', r.sent - (r.viaText || 0) - (r.viaDirect || 0) && (r.sent - (r.viaText || 0) - (r.viaDirect || 0)) + ' via template'].filter(Boolean).join(' · ')}</span>` : ''} ${r.failed ? `<span class="badge badge-red">${r.failed} gagal</span>` : ''} ${r.skipped ? `<span class="badge">${r.skipped} dilewati</span>` : ''}`;
     modal(`Ucapan ulang tahun · ${fmtDT(r.at)}`, `<div class="space-y-3" data-bd-run="${esc(r.id)}">
       <div class="flex flex-wrap items-center gap-2 text-xs">${attRunStatus(r)}<span class="ink-3">${bdTrigger(r)}</span><span class="flex-1"></span>${counts}</div>
       ${r.error ? `<p class="text-[13px] danger-ink">${esc(r.error)}</p>` : ''}
@@ -6550,6 +6570,10 @@
           </div>
           <div><label class="label">App ID <span class="ink-3 font-normal">(opsional)</span></label><input class="input mono" name="appId" value="${esc(m.appId)}" inputmode="numeric" placeholder="${m.appIdDetected ? 'Terdeteksi otomatis: ' + esc(m.appIdDetected) : 'Terdeteksi otomatis dari token'}"><p class="hint">Dipakai untuk mengunggah contoh file saat membuat template ber-header gambar/video/dokumen. Isi bila deteksi otomatis gagal (Meta App Dashboard › App ID).</p></div>
         </div>
+        <div class="px-4 pb-4 space-y-3"><div class="pt-3 border-t bd"><label class="flex items-start gap-3"><span class="switch ${m.directSend?.enabled ? 'on' : ''}"><input type="checkbox" class="sr-only" name="dsOn" ${m.directSend?.enabled ? 'checked' : ''} role="switch" aria-label="Aktifkan Direct Send"><span></span></span>
+            <span class="text-xs"><span class="font-medium block text-[13px]">Direct Send (pesan utilitas tanpa template)</span><span class="ink-3">Kirim pesan teks/tombol di luar jendela 24 jam tanpa membuat template — Meta membuat template otomatis dan menagih tarif utility. Hanya untuk akun yang memenuhi syarat (cek banner di WhatsApp Manager) dan hanya untuk konten utilitas, bukan promosi.</span></span></label></div>
+          ${m.directSend?.lastError ? `<p class="text-xs danger-ink">Terakhir ditolak Meta (${esc(fmtDT(m.directSend.lastErrorAt))}): ${esc(m.directSend.lastError)}. Pastikan akun sudah memenuhi syarat sebelum mengaktifkan.</p>` : ''}
+          <div><label class="label">Nama template Direct Send <span class="ink-3 font-normal">(opsional)</span></label><input class="input mono" name="dsTemplate" value="${esc(m.directSend?.templateName || '')}" placeholder="mis. info_layanan" pattern="[a-z0-9_]+"><p class="hint">Bila diisi, pesan Direct Send dari Inbox & pengingat tercatat ke template dengan nama ini (huruf kecil, angka, garis bawah). Kosongkan agar Meta mencocokkan otomatis.</p></div></div>
         <div class="flex flex-wrap justify-end gap-2 px-4 py-3 border-t bd"><button type="button" class="btn" id="mt-test">Uji koneksi</button><button class="btn btn-primary" type="submit">Simpan</button></div>
       </form>
       <div class="lg:col-span-2 space-y-4">
@@ -6570,9 +6594,12 @@
           </div></section>
       </div></div>`;
     const f = $('#f-meta');
+    f.dsOn.addEventListener('change', () => f.dsOn.closest('.switch').classList.toggle('on', f.dsOn.checked));
     f.addEventListener('submit', (e) => { e.preventDefault(); busy(e.submitter, async () => {
       const d = formData(f); if (!d.accessToken) delete d.accessToken; if (!d.appSecret) delete d.appSecret;
-      await api('PUT', '/api/settings/meta', d); toast('Pengaturan disimpan.'); setMeta();
+      d.directSend = { enabled: !!d.dsOn, templateName: d.dsTemplate || '' }; delete d.dsOn; delete d.dsTemplate;
+      await api('PUT', '/api/settings/meta', d); BOOT.directSend = d.directSend.enabled; toast('Pengaturan disimpan.'); setMeta();
+      if (S.view === 'inbox') renderComposer();
     }); });
     $('#mt-test').addEventListener('click', (e) => busy(e.currentTarget, async () => { await api('POST', '/api/settings/meta/test'); toast('Koneksi berhasil.'); setMeta(); }));
     $('#mt-sub').addEventListener('click', (e) => busy(e.currentTarget, async () => { await api('POST', '/api/settings/meta/subscribe'); toast('App berhasil di-subscribe ke WABA.'); }));
