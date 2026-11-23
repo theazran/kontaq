@@ -621,3 +621,12 @@ button.wfb-vrow:hover { border-color: var(--border-strong); background: var(--su
 /* Direct Send */
 .ds-bar { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; padding: .5rem .75rem 0; font-size: .75rem; color: var(--ink-2); }
 .ds-tag { color: var(--warn); font-weight: 500; }
+
+/* CS online (sidebar kiri bawah) */
+.online-cs { margin-bottom: .5rem; }
+.online-stack { display: flex; align-items: center; padding-left: .375rem; }
+.online-av { position: relative; margin-left: -.375rem; border-radius: 999px; box-shadow: 0 0 0 2px var(--surface); display: inline-flex; }
+.online-av .avatar { border: 0; }
+.online-dot { position: absolute; right: -1px; bottom: -1px; width: 9px; height: 9px; border-radius: 999px; background: var(--accent); box-shadow: 0 0 0 2px var(--surface); }
+.online-more { margin-left: -.375rem; width: 26px; height: 26px; border-radius: 999px; display: inline-grid; place-items: center; font-size: .625rem; font-weight: 600; background: var(--surface-2); color: var(--ink-2); box-shadow: 0 0 0 2px var(--surface); }
+#me-avatar:hover { box-shadow: 0 0 0 2px var(--accent); }

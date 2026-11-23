@@ -72,8 +72,9 @@
       </div>
       <nav id="nav" class="flex-1 p-2 overflow-y-auto scroll-thin flex flex-col" aria-label="Menu utama"></nav>
       <div class="p-3 border-t bd">
+        <div id="online-cs" class="online-cs hidden" aria-live="polite"></div>
         <div class="flex items-center gap-1.5">
-          <span class="avatar" id="me-avatar"></span>
+          <label class="avatar cursor-pointer" id="me-avatar" title="Ganti foto profil"></label>
           <div class="min-w-0 flex-1">
             <div class="font-medium truncate" id="me-name"></div>
             <div class="text-[11px] ink-3 capitalize" id="me-role"></div>
@@ -6742,6 +6743,12 @@
   // di belakang reverse proxy yang tidak meneruskan header Upgrade (mis. Apache tanpa mod_proxy_wstunnel).
   const socket = io({ transports: ['polling', 'websocket'], tryAllTransports: true });
   const live = (ok, text) => { const el = $('#live'); el.className = 'badge ' + (ok ? 'badge-green' : 'badge-amber'); el.innerHTML = `<span class="dot"></span><span>${text}</span>`; };
+  socket.on('presence', (list) => {
+    S.online = list;
+    const me = list.find((u) => u.id === S.user.id);
+    if (me && me.avatarV !== (S.user.avatarV || 0)) { S.user.avatarV = me.avatarV; renderMeAvatar(); } // foto diganti dari tab lain
+    renderOnline();
+  });
   socket.on('connect', () => { live(true, 'Live'); loadReminders().catch(() => {}); checkRingingCall(); if (S.view === 'inbox') loadConvs().then(renderConvList).catch(() => {}); });
   socket.on('disconnect', () => live(false, 'Terputus'));
   socket.on('connect_error', (e) => { live(false, 'Terputus'); if (e.message === 'unauthorized') location.reload(); });
@@ -6840,9 +6847,39 @@
     renderChatHeaderOnly(c); if (wasOpen !== c.windowOpen) renderComposer();
   }, 60000);
 
+  /* ───────────── CS online & foto profil ───────────── */
+  // Foto pengguna: /api/users/:id/avatar (inisial bila belum ada foto)
+  const userAvatar = (u, size = 32) => `<span class="avatar" style="${size !== 32 ? `width:${size}px;height:${size}px;font-size:${Math.max(9, Math.round(size * 0.36))}px` : ''}">${u.avatarV ? `<img src="/api/users/${encodeURIComponent(u.id)}/avatar?v=${u.avatarV}" alt="" loading="lazy">` : initials(u.name)}</span>`;
+  S.online = [];
+  function renderOnline() {
+    const box = $('#online-cs'); if (!box) return;
+    const others = S.online.filter((u) => u.id !== S.user.id), max = 6;
+    box.classList.toggle('hidden', !others.length);
+    if (!others.length) { box.innerHTML = ''; return; }
+    const names = others.map((u) => u.name).join(', ');
+    box.innerHTML = `<div class="online-stack" title="Online: ${esc(names)}" aria-label="CS online: ${esc(names)}">${others.slice(0, max).map((u) => `<span class="online-av" title="${esc(u.name)} · online">${userAvatar(u, 26)}<i class="online-dot"></i></span>`).join('')}
+      ${others.length > max ? `<span class="online-more" title="${esc(others.slice(max).map((u) => u.name).join(', '))}">+${others.length - max}</span>` : ''}</div>`;
+  }
+  function renderMeAvatar() {
+    const el = $('#me-avatar');
+    el.innerHTML = `${S.user.avatarV ? `<img src="/api/users/${encodeURIComponent(S.user.id)}/avatar?v=${S.user.avatarV}" alt="">` : initials(S.user.name)}<input type="file" accept="image/jpeg,image/png,image/webp" class="hidden" id="me-avatar-file" aria-label="Ganti foto profil">`;
+    $('#me-avatar-file').addEventListener('change', (e) => { const file = e.target.files[0]; if (!file) return; busy(null, async () => {
+      const r = await api('PUT', '/api/me/avatar', { dataUrl: await resizeImage(file) });
+      S.user.avatarV = r.avatarV; renderMeAvatar(); toast('Foto profil disimpan.');
+    }); });
+  }
+  // Hapus foto: klik kanan / tekan lama foto sendiri
+  $('#me-avatar').addEventListener('contextmenu', async (e) => {
+    if (!S.user.avatarV) return;
+    e.preventDefault();
+    if (!await confirmBox('Hapus foto profil Anda?', 'Hapus', true)) return;
+    busy(null, async () => { await api('DELETE', '/api/me/avatar'); S.user.avatarV = 0; renderMeAvatar(); toast('Foto profil dihapus.'); });
+  });
+  api('GET', '/api/presence').then((list) => { S.online = list; renderOnline(); }).catch(() => {});
+
   /* ───────────── Mulai ───────────── */
   renderSoundBtn();
-  $('#me-name').textContent = S.user.name; $('#me-role').textContent = S.user.role === 'admin' ? 'Admin' : 'Agen'; $('#me-avatar').innerHTML = initials(S.user.name);
+  $('#me-name').textContent = S.user.name; $('#me-role').textContent = S.user.role === 'admin' ? 'Admin' : 'Agen'; renderMeAvatar();
   loadConvs().catch(() => {}).finally(renderNav);
   route();
   </script>

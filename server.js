@@ -177,7 +177,7 @@ function parseCookies(header = '') {
 function setSessionCookie(res, token, maxAge = SESSION_TTL_MS) {
   res.cookie(COOKIE_NAME, token, { httpOnly: true, sameSite: 'lax', secure: process.env.COOKIE_SECURE === 'true', maxAge, path: '/' });
 }
-const publicUser = (u) => u && { id: u.id, name: u.name, email: u.email, role: u.role, active: u.active, createdAt: u.createdAt, lastLoginAt: u.lastLoginAt };
+const publicUser = (u) => u && { id: u.id, name: u.name, email: u.email, role: u.role, active: u.active, createdAt: u.createdAt, lastLoginAt: u.lastLoginAt, avatarV: u.avatarV || 0 };
 
 const loginAttempts = new Map(); // ip -> { n, until }
 function loginGuard(ip) {
@@ -2881,6 +2881,28 @@ app.post('/api/logout', (req, res) => {
 app.use('/api', requireAuth);
 
 app.get('/api/me', (req, res) => res.json({ user: publicUser(req.user) }));
+app.get('/api/users/:id/avatar', (req, res) => {
+  const a = db.avatars['user:' + req.params.id];
+  if (!a) return res.sendStatus(404);
+  res.set('Cache-Control', 'private, max-age=86400').type(a.mime).send(Buffer.from(a.data, 'base64'));
+});
+app.put('/api/me/avatar', wrap(async (req, res) => {
+  const m = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/.exec(String(req.body.dataUrl || ''));
+  if (!m) throw new HttpError(400, 'Format foto tidak valid (JPEG/PNG/WebP).');
+  if (m[2].length > 200 * 1024) throw new HttpError(400, 'Foto terlalu besar (maks. ~150 KB setelah dikompres).');
+  const u = byId('users', req.user.id);
+  db.avatars['user:' + u.id] = { mime: m[1], data: m[2] };
+  u.avatarV = now(); audit(req, 'user.avatar', u.email); save();
+  emitPresence();
+  res.json({ avatarV: u.avatarV });
+}));
+app.delete('/api/me/avatar', wrap(async (req, res) => {
+  const u = byId('users', req.user.id);
+  delete db.avatars['user:' + u.id]; u.avatarV = 0; save();
+  emitPresence();
+  res.json({ avatarV: 0 });
+}));
+app.get('/api/presence', (req, res) => res.json(presenceList()));
 app.post('/api/me/password', wrap(async (req, res) => {
   if (!checkPassword(req.user, req.body.current || '')) throw new HttpError(400, 'Kata sandi saat ini salah.');
   validatePassword(req.body.password);
@@ -3007,7 +3029,7 @@ app.post('/api/settings/meta/subscribe', requireAdmin, wrap(async (req, res) => 
 /* Pengguna / tim CS (admin) */
 app.get('/api/users', (req, res) => {
   // Agen perlu daftar nama untuk penugasan; detail lengkap hanya untuk admin
-  res.json(db.users.map((u) => (req.user.role === 'admin' ? publicUser(u) : { id: u.id, name: u.name, role: u.role, active: u.active })));
+  res.json(db.users.map((u) => (req.user.role === 'admin' ? publicUser(u) : { id: u.id, name: u.name, role: u.role, active: u.active, avatarV: u.avatarV || 0 })));
 });
 app.post('/api/users', requireAdmin, wrap(async (req, res) => {
   const name = str(req.body.name, 80), email = str(req.body.email, 120).toLowerCase();
@@ -5646,10 +5668,22 @@ function sendCustomerTyping(conv) {
   graph('post', `${needPhone()}/messages`, { data: { messaging_product: 'whatsapp', status: 'read', message_id: last.wamid, typing_indicator: { type: 'text' } } })
     .catch((e) => { typingSentAt.delete(conv.id); console.warn('[typing]', e.message); });
 }
+// Daftar CS yang sedang membuka Kontaq (≥ 1 koneksi socket). Disiarkan ke semua pengguna saat berubah.
+function presenceList() {
+  return db.users.filter((u) => u.active && userOnline(u.id)).map((u) => ({ id: u.id, name: u.name, role: u.role, avatarV: u.avatarV || 0 }))
+    .sort((a, b) => a.name.localeCompare(b.name, 'id'));
+}
+let presenceTimer = null;
+function emitPresence() {
+  clearTimeout(presenceTimer); // gabungkan perubahan beruntun (mis. banyak tab dibuka/ditutup)
+  presenceTimer = setTimeout(() => io?.emit('presence', presenceList()), 300);
+}
 io.on('connection', (socket) => {
   const u = socket.data.user;
   socket.join('user:' + u.id);
   socket.join(u.role === 'admin' ? 'admins' : 'agents');
+  emitPresence();
+  socket.on('disconnect', emitPresence);
   socket.on('typing', (payload) => {
     const user = byId('users', u.id);
     const conv = byId('conversations', String(payload?.conversationId || ''));
