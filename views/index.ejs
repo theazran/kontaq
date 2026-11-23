@@ -73,6 +73,7 @@
       <nav id="nav" class="flex-1 p-2 overflow-y-auto scroll-thin flex flex-col" aria-label="Menu utama"></nav>
       <div class="p-3 border-t bd">
         <div id="online-cs" class="online-cs hidden" aria-live="polite"></div>
+        <div id="avatar-tip" class="avatar-tip hidden" role="note"></div>
         <div class="flex items-center gap-1.5">
           <label class="avatar cursor-pointer" id="me-avatar" title="Ganti foto profil"></label>
           <div class="min-w-0 flex-1">
@@ -5757,7 +5758,7 @@
     notifyBrowser('Panggilan WhatsApp masuk', c.contactName || '+' + c.phone);
   }
   // Preferensi per perangkat (disimpan di browser ini saja)
-  const PREF_DEFAULT = { sound: true, soundOpen: false, typingCustomer: true };
+  const PREF_DEFAULT = { sound: true, soundOpen: false, typingCustomer: true, avatarTipSeen: false };
   function pref(k) { try { const v = localStorage.getItem('kq-' + k); return v === null ? PREF_DEFAULT[k] : v === '1'; } catch (e) { return PREF_DEFAULT[k]; } }
   function setPref(k, val) { try { localStorage.setItem('kq-' + k, val ? '1' : '0'); } catch (e) {} }
   function renderSoundBtn() { const b = $('#sound-btn'); if (b) { b.innerHTML = pref('sound') ? ICON.bell : ICON.bellOff; b.title = pref('sound') ? 'Suara notifikasi: aktif' : 'Suara notifikasi: mati'; } }
@@ -6860,13 +6861,29 @@
     box.innerHTML = `<div class="online-stack" title="Online: ${esc(names)}" aria-label="CS online: ${esc(names)}">${others.slice(0, max).map((u) => `<span class="online-av" title="${esc(u.name)} · online">${userAvatar(u, 26)}<i class="online-dot"></i></span>`).join('')}
       ${others.length > max ? `<span class="online-more" title="${esc(others.slice(max).map((u) => u.name).join(', '))}">+${others.length - max}</span>` : ''}</div>`;
   }
+  // Petunjuk sekali: CS tanpa foto diberi tahu bahwa foto profil dapat ditambahkan (hilang setelah ditutup atau foto dipasang)
+  function renderAvatarTip() {
+    const tip = $('#avatar-tip'); if (!tip) return;
+    const show = !S.user.avatarV && !pref('avatarTipSeen');
+    tip.classList.toggle('hidden', !show);
+    if (!show) { tip.innerHTML = ''; return; }
+    tip.innerHTML = `<div class="flex items-start gap-2"><span class="avatar-tip-ic">${ICON.camera}</span><div class="min-w-0 flex-1">
+        <div class="text-xs font-semibold">Tambahkan foto profil</div>
+        <div class="text-[11px] ink-2 mt-0.5">Klik foto/inisial Anda di bawah. Foto tampil ke rekan CS saat Anda online.</div>
+        <div class="flex gap-1.5 mt-2"><button type="button" class="btn btn-sm btn-primary" id="avatar-tip-go">Pilih foto</button><button type="button" class="btn btn-sm btn-ghost" id="avatar-tip-x">Nanti</button></div>
+      </div></div>`;
+    $('#avatar-tip-go').addEventListener('click', () => $('#me-avatar-file').click());
+    $('#avatar-tip-x').addEventListener('click', () => { setPref('avatarTipSeen', true); renderAvatarTip(); });
+  }
   function renderMeAvatar() {
     const el = $('#me-avatar');
+    el.classList.toggle('avatar-pulse', !S.user.avatarV && !pref('avatarTipSeen'));
     el.innerHTML = `${S.user.avatarV ? `<img src="/api/users/${encodeURIComponent(S.user.id)}/avatar?v=${S.user.avatarV}" alt="">` : initials(S.user.name)}<input type="file" accept="image/jpeg,image/png,image/webp" class="hidden" id="me-avatar-file" aria-label="Ganti foto profil">`;
     $('#me-avatar-file').addEventListener('change', (e) => { const file = e.target.files[0]; if (!file) return; busy(null, async () => {
       const r = await api('PUT', '/api/me/avatar', { dataUrl: await resizeImage(file) });
-      S.user.avatarV = r.avatarV; renderMeAvatar(); toast('Foto profil disimpan.');
+      S.user.avatarV = r.avatarV; setPref('avatarTipSeen', true); renderMeAvatar(); toast('Foto profil disimpan.');
     }); });
+    renderAvatarTip();
   }
   // Hapus foto: klik kanan / tekan lama foto sendiri
   $('#me-avatar').addEventListener('contextmenu', async (e) => {

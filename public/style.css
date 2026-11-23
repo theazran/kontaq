@@ -630,3 +630,12 @@ button.wfb-vrow:hover { border-color: var(--border-strong); background: var(--su
 .online-dot { position: absolute; right: -1px; bottom: -1px; width: 9px; height: 9px; border-radius: 999px; background: var(--accent); box-shadow: 0 0 0 2px var(--surface); }
 .online-more { margin-left: -.375rem; width: 26px; height: 26px; border-radius: 999px; display: inline-grid; place-items: center; font-size: .625rem; font-weight: 600; background: var(--surface-2); color: var(--ink-2); box-shadow: 0 0 0 2px var(--surface); }
 #me-avatar:hover { box-shadow: 0 0 0 2px var(--accent); }
+
+/* Petunjuk foto profil */
+.avatar-tip { position: relative; margin-bottom: .625rem; padding: .625rem .75rem; border: 1px solid var(--border); border-radius: .625rem; background: var(--accent-soft); }
+.avatar-tip::after { content: ""; position: absolute; left: 1.125rem; bottom: -6px; width: 10px; height: 10px; background: var(--accent-soft); border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); transform: rotate(45deg); }
+.avatar-tip-ic { width: 1.75rem; height: 1.75rem; flex: none; border-radius: 999px; display: grid; place-items: center; background: var(--surface); color: var(--accent-ink); }
+.avatar-tip-ic svg { width: 15px; height: 15px; }
+.avatar-pulse { box-shadow: 0 0 0 2px var(--accent); animation: avatar-pulse 1.8s ease-in-out infinite; }
+@keyframes avatar-pulse { 50% { box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent) 25%, transparent); } }
+@media (prefers-reduced-motion: reduce) { .avatar-pulse { animation: none; } }
