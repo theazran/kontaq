@@ -293,6 +293,26 @@ otomatis dan menagih tarif utility.
 - Hanya untuk konten **utilitas** (bukan promosi; Meta dapat mengategorikan ulang). Didukung: teks, tombol balasan, tombol URL.
   Bila akun belum memenuhi syarat, Meta menolak dan Kontaq menampilkan penyebabnya di pengaturan dan Log pesan.
 
+## Video call dengan petugas (Google Meet)
+
+Pelanggan meminta video call dari chatbot; petugas membuat ruang Google Meet dari panel percakapan dan mengirim tautannya.
+
+1. **Pengaturan › Google Meet** (admin): buat OAuth client (jenis *Web application*) di
+   [Google Cloud Console](https://console.cloud.google.com/apis/credentials), salin **Client ID** & **Client Secret**, tambahkan
+   **Authorized redirect URI** yang ditampilkan Kontaq (`PUBLIC_URL/oauth/google/callback`), aktifkan **Google Meet API**, lalu
+   klik **Hubungkan Akun Google**. Scope: `https://www.googleapis.com/auth/meetings.space.created` — hanya untuk membuat ruang
+   meeting. Client secret & refresh token disimpan terenkripsi di server. Tersedia juga **Hubungkan Ulang** dan **Putuskan Koneksi**.
+2. **Flow otomatis**: tambahkan langkah **Minta video call** (mis. pada pilihan menu *Video Call dengan Petugas*). Langkah ini
+   mengirim pesan tunggu ke pelanggan, membuat permintaan, meneruskan percakapan ke agen, dan menambah catatan internal.
+3. **Inbox**: panel info percakapan menampilkan nama, nomor WhatsApp, waktu permintaan, dan status, dengan tombol
+   **Buat Google Meet** → **Buka Meeting** / **Kirim Link** → **Selesaikan** (dan *Ambil* untuk mengambil alih).
+
+Status: *Menunggu Petugas → Meeting Dibuat → Link Terkirim → Selesai*. Ruang dibuat lewat `POST https://meet.googleapis.com/v2/spaces`
+dan `meetingUri` disimpan pada permintaan; satu percakapan hanya punya satu permintaan aktif dan ruang tidak dibuat ulang bila
+tautannya sudah ada. Tautan hanya dikirim setelah ruang berhasil dibuat; bila Meet API gagal atau izin Google dicabut, petugas
+mendapat pesan error yang jelas dan tidak ada pesan terkirim ke pelanggan. Petugas yang kebagian permintaan juga mendapat
+notifikasi WhatsApp bila gateway aktif.
+
 ## Pemakaian di HP
 
 Buka Kontaq di browser HP (Chrome/Safari) lewat **HTTPS**. Mikrofon untuk panggilan hanya diizinkan lewat HTTPS.

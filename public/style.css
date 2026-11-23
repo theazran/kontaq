@@ -639,3 +639,8 @@ button.wfb-vrow:hover { border-color: var(--border-strong); background: var(--su
 .avatar-pulse { box-shadow: 0 0 0 2px var(--accent); animation: avatar-pulse 1.8s ease-in-out infinite; }
 @keyframes avatar-pulse { 50% { box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent) 25%, transparent); } }
 @media (prefers-reduced-motion: reduce) { .avatar-pulse { animation: none; } }
+
+/* Video call (Google Meet) */
+.vc-card { padding: .625rem; border: 1px solid var(--border); border-radius: .5rem; background: var(--surface); }
+.vc-ic { width: 1.5rem; height: 1.5rem; flex: none; border-radius: .375rem; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent-ink); }
+.vc-ic svg { width: 13px; height: 13px; }

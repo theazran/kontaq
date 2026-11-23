@@ -300,7 +300,7 @@
     $('#tabbar').innerHTML = tabs.map(([id, label]) => `<a href="#/${id}" class="tab-item ${S.view === id ? 'active' : ''}">${ICON[VIEWS.find((x) => x.id === id).icon]}<span>${label}</span>${id === 'inbox' && unread ? `<span class="tab-badge">${unread > 99 ? '99+' : unread}</span>` : ''}</a>`).join('')
       + `<button class="tab-item ${inMenu ? 'active' : ''}" data-act="nav-open">${ICON.menu}<span>Lainnya</span></button>`;
     document.body.classList.toggle('chat-open', S.view === 'inbox' && !!S.inbox.activeId);
-    const item = (v) => `<a href="#/${v.id}" class="nav-item ${S.view === v.id ? 'active' : ''}" ${S.view === v.id ? 'aria-current="page"' : ''}>${ICON[v.icon]}<span class="flex-1 truncate">${v.label}</span>${v.id === 'inbox' && unread ? `<span class="badge badge-green">${unread}</span>` : ''}${v.id === 'reminders' && remDueCount() ? `<span class="badge badge-red">${remDueCount()}</span>` : ''}</a>`;
+    const item = (v) => `<a href="#/${v.id}" class="nav-item ${S.view === v.id ? 'active' : ''}" ${S.view === v.id ? 'aria-current="page"' : ''}>${ICON[v.icon]}<span class="flex-1 truncate">${v.label}</span>${v.id === 'inbox' && unread ? `<span class="badge badge-green">${unread}</span>` : ''}${v.id === 'inbox' && vcWaiting() ? `<span class="badge badge-amber" title="Permintaan video call menunggu">🎥 ${vcWaiting()}</span>` : ''}${v.id === 'reminders' && remDueCount() ? `<span class="badge badge-red">${remDueCount()}</span>` : ''}</a>`;
     $('#nav').innerHTML = NAV_SECTIONS.map((s) => {
       const items = VIEWS.filter((v) => v.section === s.id && canView(v));
       if (!items.length) return '';
@@ -1696,6 +1696,7 @@
       </div>
       <div class="p-4 border-b bd"><div class="text-xs font-semibold mb-2">Profil pelanggan</div><div id="info-stats" class="text-xs space-y-1.5"><div class="ink-3">Memuat…</div></div></div>
       <div class="p-4 border-b bd" id="info-csat">${csatInfoHtml(c)}</div>
+      <div id="info-vc">${vcInfoHtml(c)}</div>
       <div class="p-4 border-b bd" id="info-rem">${remInfoHtml(c)}</div>
       <form id="f-contact" class="p-4 space-y-3 border-b bd">
         <div class="sm:hidden grid grid-cols-2 gap-2">
@@ -2291,6 +2292,107 @@
     upd();
   }
 
+  /* ───────────── Video call dengan petugas (Google Meet) ───────────── */
+  const VC_STATUS = { waiting: ['amber', 'Menunggu Petugas'], created: ['', 'Meeting Dibuat'], sent: ['green', 'Link Terkirim'], done: ['', 'Selesai'] };
+  const VC_OPEN = ['waiting', 'created', 'sent'];
+  const vcBadge = (s) => { const [c, l] = VC_STATUS[s] || ['', s]; return `<span class="badge ${c ? 'badge-' + c : ''}"><span class="dot"></span>${esc(l)}</span>`; };
+  S.vc = { list: [], google: { connected: false }, loaded: false };
+  async function vcLoad() {
+    const d = await api('GET', '/api/videocalls');
+    Object.assign(S.vc, { list: d.requests, google: d.google, loaded: true });
+    return d;
+  }
+  function vcUpsert(v) {
+    const i = S.vc.list.findIndex((x) => x.id === v.id);
+    if (i >= 0) S.vc.list[i] = v; else S.vc.list.unshift(v);
+    const c = activeConv();
+    if (S.view === 'inbox' && c && c.id === v.conversationId) { const box = $('#info-vc'); if (box) box.innerHTML = vcInfoHtml(c); }
+    renderNav();
+  }
+  const vcWaiting = () => S.vc.list.filter((v) => v.status === 'waiting' && (!v.agentId || v.agentId === S.user.id)).length;
+  function vcInfoHtml(c) {
+    const xs = S.vc.list.filter((v) => v.conversationId === c.id && VC_OPEN.includes(v.status));
+    if (!xs.length) return '';
+    return `<div class="p-4 border-b bd"><div class="text-xs font-semibold mb-2">Permintaan video call</div><div class="space-y-2">${xs.map((v) => `<div class="vc-card" data-vcid="${v.id}">
+      <div class="flex items-center gap-2 flex-wrap"><span class="vc-ic">${ICON.camera}</span><span class="text-[13px] font-medium flex-1 min-w-0 truncate">${esc(v.contactName)}</span>${vcBadge(v.status)}</div>
+      <div class="text-[11px] ink-3 mt-1"><span class="mono">+${esc(v.phone)}</span> · diminta ${esc(fmtDT(v.createdAt))}${v.agentName ? ' · ' + esc(v.agentName) : ''}</div>
+      ${v.meetUrl ? `<div class="text-[11px] mt-1 break-all"><a class="underline" href="${esc(v.meetUrl)}" target="_blank" rel="noopener noreferrer">${esc(v.meetUrl)}</a></div>` : ''}
+      <div class="flex flex-wrap gap-1.5 mt-2">
+        ${!v.meetUrl ? `<button class="btn btn-sm btn-primary" data-vca="create">${ICON.camera} Buat Google Meet</button>`
+          : `<a class="btn btn-sm btn-accent" data-vc-open href="${esc(v.meetUrl)}" target="_blank" rel="noopener noreferrer">${ICON.external} Buka Meeting</a>
+             <button class="btn btn-sm" data-vca="send">${ICON.send} ${v.status === 'sent' ? 'Kirim ulang link' : 'Kirim Link'}</button>`}
+        <button class="btn btn-sm btn-ghost" data-vca="done">Selesaikan</button>
+        ${v.agentId !== S.user.id ? '<button class="btn btn-sm btn-ghost" data-vca="claim">Ambil</button>' : ''}
+      </div>
+      ${(v.history || []).length ? `<details class="mt-1"><summary class="text-[11px] ink-3 cursor-pointer">Riwayat</summary><ol class="mt-1 space-y-0.5">${v.history.slice().reverse().map((h) => `<li class="text-[11px]"><span class="ink-3">${esc(fmtDT(h.at))}</span> · ${esc(h.text)}</li>`).join('')}</ol></details>` : ''}
+    </div>`).join('')}</div>
+      ${!S.vc.google.connected ? `<p class="hint">Akun Google belum dihubungkan${S.isAdmin ? ' — <a class="underline" href="#/settings/google">hubungkan di Pengaturan</a>' : ', hubungi admin'}.</p>` : ''}</div>`;
+  }
+  document.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-vca]'); if (!b) return;
+    const v = S.vc.list.find((x) => x.id === b.closest('[data-vcid]')?.dataset.vcid); if (!v) return;
+    const act = b.dataset.vca;
+    e.preventDefault();
+    const ask = act === 'done' ? 'Selesaikan permintaan video call ini?' : '';
+    (ask ? confirmBox(ask, 'Selesaikan') : Promise.resolve(true)).then((go) => go && busy(b, async () => {
+      const r = await api('POST', `/api/videocalls/${v.id}/${act}`);
+      vcUpsert(r);
+      toast({ create: 'Ruang Google Meet dibuat. Klik "Kirim Link" untuk mengirim ke pelanggan.', send: 'Tautan dikirim ke pelanggan.', done: 'Permintaan diselesaikan.', claim: 'Permintaan diambil.' }[act]);
+    }));
+  });
+
+  /* Pengaturan › Google Meet */
+  async function setGoogle() {
+    const el = $('#set-body');
+    let d; try { d = await api('GET', '/api/videocalls'); } catch (e) { el.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+    const g = d.google;
+    el.innerHTML = `<div class="grid lg:grid-cols-5 gap-4">
+      <section class="card lg:col-span-3"><div class="card-h"><div class="min-w-0"><div class="card-t">Koneksi Google Meet</div><div class="text-[11px] ink-3">Satu akun Google dipakai untuk membuat semua ruang meeting.</div></div>
+          ${g.connected ? '<span class="badge badge-green"><span class="dot"></span>Terhubung</span>' : '<span class="badge">Belum terhubung</span>'}</div>
+        <form id="f-g" class="p-4 space-y-3">
+          ${g.lastError ? `<p class="text-xs danger-ink">${esc(g.lastError)}${g.lastErrorAt ? ` (${esc(fmtDT(g.lastErrorAt))})` : ''}</p>` : ''}
+          ${g.connected ? `<p class="text-xs ink-2">Akun: <b>${esc(g.email || 'terhubung')}</b>${g.connectedAt ? ` · sejak ${esc(fmtDT(g.connectedAt))}` : ''}</p>` : ''}
+          <div><label class="label">Client ID</label><input class="input mono" name="clientId" value="${esc(g.clientId)}" placeholder="xxxx.apps.googleusercontent.com"></div>
+          <div><label class="label">Client Secret</label><input class="input mono" name="clientSecret" type="password" autocomplete="off" placeholder="${g.clientSecretSet ? 'Tersimpan — isi untuk mengganti' : 'GOCSPX-…'}"><p class="hint">Disimpan terenkripsi di server, tidak pernah dikirim ke browser.</p></div>
+          <div><label class="label">Authorized redirect URI</label><div class="flex gap-2"><input class="input mono" id="g-uri" value="${esc(g.redirectUri)}" readonly><button type="button" class="btn" data-copy="g-uri">Salin</button></div>
+            <p class="hint">Tambahkan URI ini di Google Cloud Console › Credentials › OAuth client.</p></div>
+          <div class="flex flex-wrap gap-2 pt-1">
+            <button class="btn btn-primary" type="submit">Simpan kredensial</button>
+            <button type="button" class="btn btn-accent" id="g-connect">${g.connected ? 'Hubungkan Ulang' : 'Hubungkan Akun Google'}</button>
+            ${g.connected ? '<button type="button" class="btn btn-ghost btn-danger" id="g-off">Putuskan Koneksi</button>' : ''}
+          </div>
+        </form></section>
+      <aside class="lg:col-span-2 space-y-4">
+        <section class="card"><div class="card-h"><div class="card-t">Cara menyiapkan</div></div>
+          <div class="p-4 text-xs ink-2 space-y-2">
+            <ol class="list-decimal ml-4 space-y-1">
+              <li>Buka <a class="underline" href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener noreferrer">Google Cloud Console › Credentials</a>, buat <b>OAuth client ID</b> jenis <i>Web application</i>.</li>
+              <li>Tambahkan redirect URI di sebelah kiri, lalu salin Client ID & Secret ke form ini dan simpan.</li>
+              <li>Aktifkan <b>Google Meet API</b> di menu APIs & Services › Library.</li>
+              <li>Klik <b>Hubungkan Akun Google</b> dan setujui izin membuat ruang meeting.</li>
+            </ol>
+            <p class="hint">Scope: <span class="kbd break-all">${esc(g.scope)}</span> — hanya untuk membuat ruang meeting, tanpa akses kalender, rekaman, atau data lain.</p>
+          </div></section>
+        <section class="card"><div class="card-h"><div class="card-t">Permintaan terbaru</div></div>
+          <div class="divide-y">${d.requests.slice(0, 8).map((v) => `<div class="px-4 py-2 text-xs flex items-center gap-2"><span class="flex-1 min-w-0 truncate">${esc(v.contactName)}</span>${vcBadge(v.status)}</div>`).join('') || '<div class="p-4 text-xs ink-3">Belum ada permintaan video call.</div>'}</div></section>
+      </aside></div>`;
+    $$('[data-copy]').forEach((b) => b.addEventListener('click', () => { navigator.clipboard?.writeText($('#' + b.dataset.copy).value); toast('Disalin.'); }));
+    $('#f-g').addEventListener('submit', (e) => { e.preventDefault(); busy(e.submitter, async () => {
+      const f = formData(e.target); if (!f.clientSecret) delete f.clientSecret;
+      await api('PUT', '/api/settings/google', f); toast('Kredensial disimpan.'); setGoogle();
+    }); });
+    $('#g-connect').addEventListener('click', (e) => busy(e.currentTarget, async () => {
+      const r = await api('POST', '/api/settings/google/connect', {});
+      // Izin Google dibuka di tab baru; status diperbarui lewat socket setelah selesai
+      window.open(r.url, '_blank', 'noopener');
+      toast('Selesaikan izin Google di tab baru, lalu muat ulang halaman ini.');
+    }));
+    $('#g-off')?.addEventListener('click', async () => {
+      if (!await confirmBox('Putuskan koneksi akun Google? Permintaan video call baru tidak dapat dibuatkan ruang sampai dihubungkan lagi.', 'Putuskan', true)) return;
+      busy($('#g-off'), async () => { await api('POST', '/api/settings/google/disconnect', {}); toast('Koneksi Google diputus.'); setGoogle(); });
+    });
+  }
+
   /* ───────────── Pengingat ───────────── */
   const REM_STATUS = { pending: ['Terjadwal', 'amber'], due: ['Jatuh tempo', 'red'], done: ['Selesai', 'green'], sent: ['Terkirim', 'green'], failed: ['Gagal', 'red'], skipped: ['Dilewati', ''], cancelled: ['Dibatalkan', ''] };
   const remBadge = (s) => { const [l, c] = REM_STATUS[s] || [s, '']; return `<span class="badge ${c ? 'badge-' + c : ''}"><span class="dot"></span>${esc(l)}</span>`; };
@@ -2789,6 +2891,7 @@
     waflow: { label: 'Kirim WhatsApp Flow', icon: 'form', desc: 'Kirim formulir, simpan isiannya ke variabel' },
     api: { label: 'API Request', icon: 'globe', desc: 'Panggil API HTTPS, simpan respons JSON' },
     assign: { label: 'Teruskan ke agen', icon: 'users', desc: 'Tugaskan ke agen tertentu atau otomatis' },
+    videocall: { label: 'Minta video call', icon: 'camera', desc: 'Kirim pesan tunggu & buat permintaan video call untuk petugas' },
     label: { label: 'Label kontak', icon: 'tag', desc: 'Tambah atau hapus label kontak' },
     status: { label: 'Ubah status', icon: 'check', desc: 'Terbuka, menunggu, atau selesai' },
     note: { label: 'Catatan internal', icon: 'edit', desc: 'Hanya terlihat oleh tim' },
@@ -2824,6 +2927,7 @@
     ask: { text: '', var: '', input: 'text', ...FL_ASK_DEFAULTS }, api: { method: 'GET', url: 'https://', headers: [], body: '', timeoutSec: 10, saveAs: '', okPath: '', okValue: '' },
     waflow: { flowId: '', text: 'Silakan isi formulir berikut.', cta: 'Isi formulir', header: '', footer: '', screen: '', var: 'formulir', timeoutMinutes: 60 },
     label: { label: '', remove: false }, status: { status: 'closed' }, note: { text: '' }, delay: { minutes: 30, cancelOnReply: true },
+    videocall: { text: 'Baik, permintaan video call Anda akan kami teruskan kepada petugas. Mohon menunggu hingga petugas menyiapkan tautan video call.' },
   }[type] || {});
 
   function flStarter(kind) {
@@ -2891,6 +2995,7 @@
       case 'label': return `${c.remove ? 'Hapus' : 'Tambah'} "${c.label}"`;
       case 'status': return 'Jadikan ' + FL_STATUS[c.status];
       case 'note': return c.text;
+      case 'videocall': return 'Permintaan video call → antrean petugas\n' + c.text;
       case 'delay': return flMinutes(c.minutes) + (c.cancelOnReply ? ' · batal bila dibalas' : '');
       default: return '';
     }
@@ -3365,6 +3470,8 @@
       case 'label': return `<div class="grid sm:grid-cols-[10rem_1fr] gap-3"><div><label class="label">Aksi</label><select class="select" name="remove"><option value="0">Tambah label</option><option value="1" ${c.remove ? 'selected' : ''}>Hapus label</option></select></div>
         <div><label class="label">Label</label><input class="input" name="label" list="fl-labels" maxlength="32" value="${esc(c.label)}" placeholder="Prospek"><datalist id="fl-labels">${(S.fl.labels || []).map((l) => `<option value="${esc(l)}">`).join('')}</datalist></div></div>`;
       case 'status': return `<div class="max-w-xs"><label class="label">Jadikan status percakapan</label><select class="select" name="status">${Object.entries(FL_STATUS).map(([k, l]) => `<option value="${k}" ${c.status === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div>`;
+      case 'videocall': return `<div><label class="label">Pesan ke pelanggan</label><textarea class="textarea" name="text" rows="3" maxlength="1024">${esc(c.text)}</textarea>
+        <p class="hint">Setelah pesan ini dikirim, Kontaq membuat permintaan video call dan meneruskan percakapan ke petugas. Petugas membuat tautan Google Meet dari panel info percakapan.${S.isAdmin ? ' Hubungkan akun Google di <a class="underline" href="#/settings/google">Pengaturan › Google Meet</a>.' : ''}</p></div>`;
       case 'note': return `<div><label class="label">Catatan</label><textarea class="textarea" name="text" rows="3" maxlength="2000" placeholder="Pelanggan menanyakan harga, mohon follow-up.">${esc(c.text)}</textarea>
         <p class="hint">Tidak dikirim ke pelanggan. ${FL_VAR_HINT}</p></div>`;
       case 'delay': {
@@ -3440,6 +3547,7 @@
       case 'label': if (!d.label.trim()) err('Isi nama label.'); return { label: d.label.trim(), remove: d.remove === '1' };
       case 'status': return { status: d.status };
       case 'note': if (!d.text.trim()) err('Isi catatan.'); return { text: d.text.trim() };
+      case 'videocall': if (!d.text.trim()) err('Isi pesan ke pelanggan.'); return { text: d.text.trim() };
       case 'delay': {
         const minutes = Math.round(Number(d.amount) * (d.unit === 'h' ? 60 : 1));
         if (!(minutes >= 1 && minutes <= 1380)) err('Durasi tunggu harus antara 1 menit dan 23 jam.');
@@ -6548,10 +6656,10 @@
   }
 
   function viewSettings(tab) {
-    const tabs = [S.isAdmin && ['meta', 'Koneksi Meta'], S.isAdmin && ['team', 'Tim CS'], S.isAdmin && ['gateway', 'Gateway WA'], S.isAdmin && ['addons', 'Add-on'], ['security', 'Notifikasi & keamanan'], S.isAdmin && ['audit', 'Audit log']].filter(Boolean);
+    const tabs = [S.isAdmin && ['meta', 'Koneksi Meta'], S.isAdmin && ['team', 'Tim CS'], S.isAdmin && ['gateway', 'Gateway WA'], S.isAdmin && ['google', 'Google Meet'], S.isAdmin && ['addons', 'Add-on'], ['security', 'Notifikasi & keamanan'], S.isAdmin && ['audit', 'Audit log']].filter(Boolean);
     const cur = tabs.some((t) => t[0] === tab) ? tab : tabs[0][0];
     $('#view').innerHTML = `<div class="p-4 md:p-6 max-w-5xl space-y-4"><nav class="tabs">${tabs.map(([k, l]) => `<a href="#/settings/${k}" class="tab ${k === cur ? 'active' : ''}">${l}</a>`).join('')}</nav><div id="set-body"></div></div>`;
-    ({ meta: setMeta, team: setTeam, gateway: setGateway, addons: setAddons, security: setSecurity, audit: setAudit })[cur]();
+    ({ meta: setMeta, team: setTeam, gateway: setGateway, google: setGoogle, addons: setAddons, security: setSecurity, audit: setAudit })[cur]();
   }
   async function setMeta() {
     const el = $('#set-body');
@@ -6744,6 +6852,9 @@
   // di belakang reverse proxy yang tidak meneruskan header Upgrade (mis. Apache tanpa mod_proxy_wstunnel).
   const socket = io({ transports: ['polling', 'websocket'], tryAllTransports: true });
   const live = (ok, text) => { const el = $('#live'); el.className = 'badge ' + (ok ? 'badge-green' : 'badge-amber'); el.innerHTML = `<span class="dot"></span><span>${text}</span>`; };
+  socket.on('videocall:new', (v) => { vcUpsert(v); if (!v.agentId || v.agentId === S.user.id) { playChime(true); notifyBrowser('Permintaan video call', v.contactName); toast(`🎥 Permintaan video call dari ${v.contactName}`); } });
+  socket.on('videocall:update', vcUpsert);
+  socket.on('google:update', (g) => { S.vc.google = { ...S.vc.google, ...g }; if (S.view === 'settings') viewSettings('google'); });
   socket.on('presence', (list) => {
     S.online = list;
     const me = list.find((u) => u.id === S.user.id);
@@ -6893,6 +7004,7 @@
     busy(null, async () => { await api('DELETE', '/api/me/avatar'); S.user.avatarV = 0; renderMeAvatar(); toast('Foto profil dihapus.'); });
   });
   api('GET', '/api/presence').then((list) => { S.online = list; renderOnline(); }).catch(() => {});
+  vcLoad().catch(() => {});
 
   /* ───────────── Mulai ───────────── */
   renderSoundBtn();

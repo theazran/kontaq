@@ -108,7 +108,7 @@ const csvCell = (v) => {
 const EMPTY_DB = {
   settings: {}, users: [], contacts: [], conversations: [], messages: [],
   templates: [], templatesSyncedAt: 0, campaigns: [], calls: [], audit: [], avatars: {}, autoReply: null, arMedia: {}, costs: null, sendLog: [],
-  flows: [], flowRuns: [], groups: [], csat: null, waFlows: [], flowSubmissions: [], stickers: [], reminders: [], addons: {}, templateMedia: [],
+  flows: [], flowRuns: [], groups: [], csat: null, waFlows: [], flowSubmissions: [], stickers: [], reminders: [], addons: {}, templateMedia: [], videoCalls: [],
 };
 let db;
 try { db = { ...EMPTY_DB, ...JSON.parse(fs.readFileSync(DB_FILE, 'utf8')) }; }
@@ -1059,7 +1059,7 @@ const FLOW_MAX_NODES = 60;
 // Flow interaktif (tanya-jawab, hasil API berlembar) mengirim beberapa pesan per percakapan; batas ini tetap mencegah loop
 const FLOW_MAX_AUTO_PER_HOUR = 30;
 const FLOW_RUNS_MAX = 3000;
-const FLOW_STEP_LABEL = { trigger: 'Pemicu', condition: 'Kondisi', send: 'Kirim pesan', ask: 'Tanya pelanggan', waflow: 'Kirim WhatsApp Flow', api: 'API Request', assign: 'Teruskan ke agen', label: 'Label kontak', status: 'Ubah status', note: 'Catatan internal', delay: 'Tunggu' };
+const FLOW_STEP_LABEL = { trigger: 'Pemicu', condition: 'Kondisi', send: 'Kirim pesan', ask: 'Tanya pelanggan', waflow: 'Kirim WhatsApp Flow', api: 'API Request', assign: 'Teruskan ke agen', videocall: 'Minta video call', label: 'Label kontak', status: 'Ubah status', note: 'Catatan internal', delay: 'Tunggu' };
 const FLOW_COND_LABEL = { keyword: 'Kata kunci', variable: 'Variabel', schedule: 'Jadwal', business_hours: 'Jam kerja', label: 'Label kontak', new_contact: 'Kontak baru', message_type: 'Jenis pesan', assigned: 'Sudah ditugaskan' };
 const FLOW_MSG_TYPES = ['text', 'image', 'video', 'audio', 'document', 'sticker', 'location', 'reply', 'flow_reply', 'contacts'];
 const STATUS_LABEL = { open: 'Terbuka', pending: 'Menunggu', closed: 'Selesai' };
@@ -1287,6 +1287,9 @@ function cleanFlowNode(raw, isRoot) {
       }
       break;
     }
+    case 'videocall':
+      cfg = { text: str(c.text, 1024) || 'Baik, permintaan video call Anda akan kami teruskan kepada petugas. Mohon menunggu hingga petugas menyiapkan tautan video call.' };
+      break;
     case 'label':
       cfg = { label: cleanLabels([c.label])[0] || '', remove: !!c.remove };
       if (!cfg.label) throw new HttpError(400, `${name}: isi nama label.`);
@@ -1691,6 +1694,14 @@ async function execFlowNode(flow, n, ctx, dry) {
         if (c.status === 'closed') maybeSendCsat(ctx.conv, 'flow', null);
       }
       return { next: n.next, action: true, log: `Status → ${STATUS_LABEL[c.status]}` };
+    }
+    case 'videocall': {
+      const text = renderTpl(c.text, flowScope(ctx));
+      if (dry) return { next: n.next, action: true, log: 'Permintaan video call dibuat → antrean petugas', preview: { text } };
+      const err = await flowSendText(flow, n, ctx, { text, image: null, buttons: [] });
+      if (err) return { next: null, ok: false, log: 'Pesan tidak terkirim: ' + err };
+      const { reused } = vcRequest(ctx.conv, ctx.contact, { flowName: flow.name });
+      return { next: n.next, action: true, log: reused ? 'Permintaan video call sudah ada (dipakai ulang)' : 'Permintaan video call dibuat → antrean petugas', preview: { text } };
     }
     case 'note': {
       const text = renderTpl(c.text, flowScope(ctx));
@@ -2878,6 +2889,45 @@ app.post('/api/logout', (req, res) => {
   res.json({ ok: true });
 });
 
+// Callback OAuth Google (tanpa requireAuth: Google mengarahkan browser ke sini; keamanan lewat state + sesi admin).
+// Dipasang sebelum app.use('/api', requireAuth) agar tidak butuh header X-Requested-With.
+app.get('/oauth/google/callback', wrap(async (req, res) => {
+  const g = vcCfg();
+  const h = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const page = (title, body, ok) => res.type('html').send(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>${title}</title><body style="font-family:system-ui,sans-serif;background:#f4f4f5;margin:0;display:grid;place-items:center;min-height:100vh">
+    <div style="background:#fff;border:1px solid #e4e4e7;border-radius:12px;padding:24px 28px;max-width:30rem;text-align:center">
+    <div style="font-size:2rem">${ok ? '✅' : '⚠️'}</div><h1 style="font-size:1.05rem;margin:.5rem 0">${title}</h1>
+    <p style="font-size:.85rem;color:#52525b;line-height:1.5">${body}</p>
+    <a href="/#/settings/google" style="display:inline-block;margin-top:8px;font-size:.85rem;color:#047857">Kembali ke Kontaq</a></div></body>`);
+  const user = req.user;
+  if (!user || user.role !== 'admin') return page('Perlu login admin', 'Masuk ke Kontaq sebagai admin lalu ulangi proses "Hubungkan Akun Google".', false);
+  if (req.query.error) return page('Dibatalkan', `Google menolak atau membatalkan izin (${h(req.query.error)}).`, false);
+  const code = str(req.query.code, 1000), state = str(req.query.state, 100);
+  if (!code || !state || !g.oauthState || state !== g.oauthState || now() - (g.oauthStateAt || 0) > 10 * 60000) {
+    return page('Tautan tidak berlaku', 'Permintaan tidak dikenali atau sudah kedaluwarsa. Ulangi dari Pengaturan › Google Meet.', false);
+  }
+  delete g.oauthState; delete g.oauthStateAt;
+  try {
+    const r = await axios.post('https://oauth2.googleapis.com/token', new URLSearchParams({
+      code, client_id: g.clientId, client_secret: decrypt(g.clientSecretEnc), redirect_uri: vcRedirect(req), grant_type: 'authorization_code',
+    }), { timeout: 20000, headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+    if (!r.data.refresh_token) return page('Izin belum lengkap', 'Google tidak memberikan refresh token. Hapus akses Kontaq di myaccount.google.com/permissions lalu hubungkan ulang.', false);
+    g.refreshTokenEnc = encrypt(r.data.refresh_token);
+    g.connectedAt = now(); delete g.lastError; delete g.lastErrorAt;
+    vcToken = { value: r.data.access_token || '', exp: now() + (Number(r.data.expires_in) || 3600) * 1000 };
+    // Email akun hanya untuk ditampilkan; diambil dari id_token bila ada (tanpa scope tambahan)
+    try { g.email = JSON.parse(Buffer.from(String(r.data.id_token || '').split('.')[1] || '', 'base64url').toString()).email || ''; } catch { g.email = ''; }
+    audit(req, 'settings.google.connect', g.email || 'akun Google terhubung'); save();
+    io?.to('admins').emit('google:update', { connected: true, email: g.email || '' });
+    return page('Akun Google terhubung', 'Kontaq sekarang dapat membuat ruang Google Meet untuk permintaan video call.', true);
+  } catch (e) {
+    const detail = e.response?.data?.error_description || e.response?.data?.error || e.message;
+    Object.assign(g, { lastError: String(detail).slice(0, 300), lastErrorAt: now() }); save();
+    return page('Gagal menghubungkan', `Google menolak penukaran kode: ${h(detail)}`, false);
+  }
+}));
+
 app.use('/api', requireAuth);
 
 app.get('/api/me', (req, res) => res.json({ user: publicUser(req.user) }));
@@ -3658,7 +3708,7 @@ app.put('/api/costs/settings', requireAdmin, wrap(async (req, res) => {
   res.json(cfg.settings);
 }));
 /* Log pesan API (admin): semua pesan keluar via Cloud API + status pengiriman dari webhook */
-const LOG_SOURCES = { inbox: 'Dashboard', campaign: 'Campaign', auto_reply: 'Auto reply', flow: 'Flow otomatis', group: 'Grup', csat: 'Survei CSAT', reminder: 'Pengingat', attendance: 'Pengingat absensi', birthday: 'Ulang tahun', external: 'Di luar Kontaq' };
+const LOG_SOURCES = { inbox: 'Dashboard', campaign: 'Campaign', auto_reply: 'Auto reply', flow: 'Flow otomatis', group: 'Grup', csat: 'Survei CSAT', reminder: 'Pengingat', videocall: 'Video call', attendance: 'Pengingat absensi', birthday: 'Ulang tahun', external: 'Di luar Kontaq' };
 function logRow(e) {
   const msg = e.wamid ? idx.wamid.get(e.wamid) : null;
   const contact = e.contactId ? byId('contacts', e.contactId) : idx.contactByPhone.get(e.to);
@@ -4529,6 +4579,194 @@ app.post('/api/calls/:id/:action(accept|reject|terminate)', wrap(async (req, res
   audit(req, 'call.' + a, call.phone); save();
   io?.emit('call:update', publicCall(call));
   res.json(publicCall(call));
+}));
+
+/* ───────────────────────── 7f. Video call dengan petugas (Google Meet) ─────────────────────────
+ * Pelanggan meminta video call dari chatbot (langkah "Minta video call") → permintaan masuk antrean dan tampil di panel
+ * percakapan. Petugas menekan "Buat Google Meet" → server membuat ruang lewat Meet API (POST /v2/spaces) memakai satu akun
+ * Google yang dihubungkan admin (OAuth, scope meetings.space.created) → tautan dikirim ke pelanggan lewat Cloud API.
+ * Tautan hanya dikirim bila ruang berhasil dibuat. Satu percakapan hanya punya satu permintaan aktif, dan ruang tidak dibuat
+ * ulang bila permintaan sudah punya tautan.
+ */
+const VC_STATUS = { waiting: 'Menunggu Petugas', created: 'Meeting Dibuat', sent: 'Link Terkirim', done: 'Selesai' };
+const VC_OPEN = ['waiting', 'created', 'sent'];
+const VC_USER = 'Video call';
+const VC_SCOPE = 'https://www.googleapis.com/auth/meetings.space.created';
+const VC_KEEP = 2000;
+const vcCfg = () => (db.settings.google = db.settings.google || {});
+const vcConnected = () => !!vcCfg().refreshTokenEnc;
+const vcRedirect = (req) => `${(process.env.PUBLIC_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '')}/oauth/google/callback`;
+function vcPublicCfg(req) {
+  const g = vcCfg();
+  return { connected: vcConnected(), email: g.email || '', connectedAt: g.connectedAt || 0, clientId: g.clientId || '',
+    clientSecretSet: !!g.clientSecretEnc, lastError: g.lastError || '', lastErrorAt: g.lastErrorAt || 0, redirectUri: vcRedirect(req), scope: VC_SCOPE };
+}
+// Access token Google: ditukar dari refresh token dan di-cache sampai mendekati kedaluwarsa
+let vcToken = { value: '', exp: 0 };
+async function vcAccessToken() {
+  const g = vcCfg();
+  if (!g.refreshTokenEnc) throw new HttpError(400, 'Akun Google belum dihubungkan. Buka Pengaturan › Google Meet.');
+  if (vcToken.value && now() < vcToken.exp - 60000) return vcToken.value;
+  try {
+    const r = await axios.post('https://oauth2.googleapis.com/token', new URLSearchParams({
+      client_id: g.clientId, client_secret: decrypt(g.clientSecretEnc), refresh_token: decrypt(g.refreshTokenEnc), grant_type: 'refresh_token',
+    }), { timeout: 20000, headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+    vcToken = { value: r.data.access_token, exp: now() + (Number(r.data.expires_in) || 3600) * 1000 };
+    if (g.lastError) { delete g.lastError; delete g.lastErrorAt; save(); }
+    return vcToken.value;
+  } catch (e) {
+    const detail = e.response?.data?.error_description || e.response?.data?.error || e.message;
+    // invalid_grant = izin dicabut / refresh token tidak berlaku: minta hubungkan ulang
+    if (/invalid_grant/i.test(JSON.stringify(e.response?.data || ''))) {
+      Object.assign(g, { lastError: 'Izin Google tidak berlaku lagi — hubungkan ulang akun.', lastErrorAt: now() });
+      delete g.refreshTokenEnc; vcToken = { value: '', exp: 0 }; save();
+      throw new HttpError(400, 'Izin akun Google sudah tidak berlaku. Hubungkan ulang di Pengaturan › Google Meet.');
+    }
+    Object.assign(g, { lastError: detail, lastErrorAt: now() }); save();
+    throw new HttpError(502, 'Gagal memperbarui token Google: ' + detail);
+  }
+}
+async function vcCreateSpace() {
+  const token = await vcAccessToken();
+  try {
+    // accessType OPEN: siapa pun yang punya tautan dapat bergabung tanpa menunggu diizinkan (akun pribadi mungkin menolak config)
+    const r = await axios.post('https://meet.googleapis.com/v2/spaces', { config: { accessType: 'OPEN', entryPointAccess: 'ALL' } },
+      { timeout: 20000, headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' } });
+    return { name: r.data.name || '', url: r.data.meetingUri || '', code: r.data.meetingCode || '' };
+  } catch (e) {
+    const d = e.response?.data?.error;
+    // Akun non-Workspace tidak mendukung sebagian konfigurasi: coba lagi tanpa config
+    if (e.response?.status === 400 || e.response?.status === 403) {
+      try {
+        const r2 = await axios.post('https://meet.googleapis.com/v2/spaces', {}, { timeout: 20000, headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' } });
+        return { name: r2.data.name || '', url: r2.data.meetingUri || '', code: r2.data.meetingCode || '' };
+      } catch (e2) {
+        const d2 = e2.response?.data?.error;
+        throw new HttpError(502, `Google Meet menolak permintaan: ${d2?.message || e2.message}${d2?.status ? ` (${d2.status})` : ''}`);
+      }
+    }
+    throw new HttpError(502, `Gagal membuat ruang Google Meet: ${d?.message || e.message}${d?.status ? ` (${d.status})` : ''}`);
+  }
+}
+
+const vcById = (id) => db.videoCalls.find((v) => v.id === id);
+const vcActiveFor = (convId) => db.videoCalls.find((v) => v.conversationId === convId && VC_OPEN.includes(v.status));
+function vcPublic(v) {
+  const agent = v.agentId ? byId('users', v.agentId) : null, contact = byId('contacts', v.contactId);
+  return { ...v, statusLabel: VC_STATUS[v.status], agentName: agent?.name || '', phone: contact?.phone || v.phone,
+    contactName: contact?.name || contact?.waName || v.name, history: (v.history || []).slice(-20) };
+}
+function vcEmit(v, event = 'videocall:update') {
+  if (!io) return;
+  const conv = byId('conversations', v.conversationId);
+  io.to([...new Set(['admins', conv?.assignedTo ? 'user:' + conv.assignedTo : 'agents'])]).emit(event, vcPublic(v));
+}
+const vcLog = (v, text) => { v.history = [...(v.history || []), { at: now(), text: String(text).slice(0, 300) }].slice(-40); };
+// Dipanggil langkah flow "Minta video call": buat permintaan + teruskan percakapan ke agen
+function vcRequest(conv, contact, { flowName } = {}) {
+  const exist = vcActiveFor(conv.id);
+  if (exist) return { v: exist, reused: true };
+  const v = { id: uid('vc_'), conversationId: conv.id, contactId: contact.id, phone: contact.phone, name: contact.name || contact.waName || 'Pelanggan',
+    status: 'waiting', createdAt: now(), agentId: null, meetUrl: '', meetName: '', meetCode: '', sentAt: 0, history: [] };
+  vcLog(v, flowName ? `Permintaan dari flow "${flowName}"` : 'Permintaan video call');
+  db.videoCalls.push(v);
+  if (db.videoCalls.length > VC_KEEP) db.videoCalls.splice(0, db.videoCalls.length - VC_KEEP);
+  if (!conv.assignedTo) {
+    const agent = flowAgents().sort((a, b) => db.conversations.filter((c) => c.assignedTo === a.id && c.status !== 'closed').length - db.conversations.filter((c) => c.assignedTo === b.id && c.status !== 'closed').length)[0];
+    if (agent) { conv.assignedTo = agent.id; v.agentId = agent.id; }
+  } else v.agentId = conv.assignedTo;
+  if (conv.status === 'closed') conv.status = 'open';
+  conv.notes = conv.notes || [];
+  conv.notes.push({ id: uid('n_'), text: `🎥 Permintaan video call dari ${v.name} (+${v.phone}).`, userId: null, userName: VC_USER, at: now() });
+  save();
+  emitConv(conv, 'conversation:update', serializeConv(conv));
+  vcEmit(v, 'videocall:new');
+  const agent = v.agentId ? byId('users', v.agentId) : null;
+  if (agent && waGateway().apiKey) notifyUsers('message', [agent], `🎥 *Permintaan video call*\n${contactLabel(contact)}${appLink('#/inbox/' + conv.id) ? '\n' + appLink('#/inbox/' + conv.id) : ''}`);
+  return { v, reused: false };
+}
+async function vcSendLink(v, user) {
+  const conv = byId('conversations', v.conversationId), contact = byId('contacts', v.contactId);
+  if (!conv || !contact) throw new HttpError(400, 'Percakapan atau kontak sudah dihapus.');
+  if (!v.meetUrl) throw new HttpError(400, 'Buat ruang Google Meet terlebih dahulu.');
+  const who = VC_USER + (user ? ' · ' + user.name : '');
+  const body = `Video call dengan petugas Pengadilan Negeri Bulukumba telah disiapkan.\n\nSilakan bergabung melalui tautan berikut:\n${v.meetUrl}\n\nTerima kasih.`;
+  if (!windowOpen(conv)) throw new HttpError(400, 'Jendela layanan 24 jam sudah tertutup, tautan tidak dapat dikirim sebagai pesan biasa. Minta pelanggan mengirim pesan lagi.');
+  const r = await sendToMeta({ messaging_product: 'whatsapp', recipient_type: 'individual', to: contact.phone, type: 'text', text: { body, preview_url: true } },
+    { source: 'videocall', contact, conversation: conv, userId: user?.id, userName: who });
+  const msg = addMessage(conv, { direction: 'out', type: 'text', content: { body }, wamid: r.messages?.[0]?.id, status: 'accepted', userId: user?.id, userName: who, auto: 'videocall' });
+  Object.assign(v, { status: 'sent', sentAt: now() });
+  vcLog(v, `Tautan dikirim ke pelanggan${user ? ' oleh ' + user.name : ''}`);
+  save(); vcEmit(v);
+  return msg;
+}
+
+app.get('/api/videocalls', wrap(async (req, res) => {
+  const rows = db.videoCalls.filter((v) => {
+    const conv = byId('conversations', v.conversationId);
+    return conv && canSeeConv(req.user, conv);
+  }).slice(-500).reverse().map(vcPublic);
+  res.json({ requests: rows, google: req.user.role === 'admin' ? vcPublicCfg(req) : { connected: vcConnected() } });
+}));
+app.post('/api/videocalls/:id/:action(create|send|done|claim)', wrap(async (req, res) => {
+  const v = vcById(req.params.id), conv = v && byId('conversations', v.conversationId);
+  if (!v || !conv || !canSeeConv(req.user, conv)) throw new HttpError(404, 'Permintaan video call tidak ditemukan.');
+  const act = req.params.action;
+  if (act === 'done') {
+    if (v.status === 'done') throw new HttpError(400, 'Permintaan sudah selesai.');
+    Object.assign(v, { status: 'done', finishedAt: now() });
+    vcLog(v, `Diselesaikan oleh ${req.user.name}`);
+  } else if (act === 'claim') {
+    if (!VC_OPEN.includes(v.status)) throw new HttpError(400, 'Permintaan sudah selesai.');
+    v.agentId = req.user.id;
+    if (!conv.assignedTo) { conv.assignedTo = req.user.id; emitConv(conv, 'conversation:update', serializeConv(conv)); }
+    vcLog(v, `Diambil oleh ${req.user.name}`);
+  } else if (act === 'create') {
+    if (!VC_OPEN.includes(v.status)) throw new HttpError(400, 'Permintaan sudah selesai.');
+    if (v.meetUrl) throw new HttpError(400, 'Permintaan ini sudah memiliki tautan Google Meet.');
+    const space = await vcCreateSpace();
+    if (!space.url) throw new HttpError(502, 'Google Meet tidak mengembalikan tautan meeting.');
+    Object.assign(v, { status: 'created', meetUrl: space.url, meetName: space.name, meetCode: space.code, createdMeetAt: now(), agentId: v.agentId || req.user.id });
+    vcLog(v, `Ruang Google Meet dibuat oleh ${req.user.name} (${space.code || space.url})`);
+    audit(req, 'videocall.create', `${v.phone} · ${space.code || space.url}`);
+  } else {
+    if (v.status === 'done') throw new HttpError(400, 'Permintaan sudah selesai.');
+    await vcSendLink(v, req.user);
+    audit(req, 'videocall.send', v.phone);
+    save();
+    return res.json(vcPublic(v));
+  }
+  save(); vcEmit(v);
+  res.json(vcPublic(v));
+}));
+
+/* OAuth Google (admin). Client ID & secret dari Google Cloud Console; secret & refresh token disimpan terenkripsi. */
+app.put('/api/settings/google', requireAdmin, wrap(async (req, res) => {
+  const g = vcCfg();
+  if (req.body.clientId !== undefined) g.clientId = str(req.body.clientId, 200);
+  if (req.body.clientSecret) g.clientSecretEnc = encrypt(str(req.body.clientSecret, 300));
+  audit(req, 'settings.google', 'Kredensial OAuth diperbarui'); save();
+  res.json(vcPublicCfg(req));
+}));
+app.post('/api/settings/google/connect', requireAdmin, wrap(async (req, res) => {
+  const g = vcCfg();
+  if (!g.clientId || !g.clientSecretEnc) throw new HttpError(400, 'Isi Client ID dan Client Secret terlebih dahulu.');
+  g.oauthState = crypto.randomBytes(16).toString('base64url');
+  g.oauthStateAt = now(); save();
+  const url = 'https://accounts.google.com/o/oauth2/v2/auth?' + new URLSearchParams({
+    client_id: g.clientId, redirect_uri: vcRedirect(req), response_type: 'code', scope: VC_SCOPE,
+    access_type: 'offline', prompt: 'consent', include_granted_scopes: 'true', state: g.oauthState,
+  });
+  res.json({ url });
+}));
+app.post('/api/settings/google/disconnect', requireAdmin, wrap(async (req, res) => {
+  const g = vcCfg();
+  const token = g.refreshTokenEnc ? decrypt(g.refreshTokenEnc) : '';
+  if (token) await axios.post('https://oauth2.googleapis.com/revoke', new URLSearchParams({ token }), { timeout: 15000 }).catch(() => {});
+  delete g.refreshTokenEnc; delete g.email; delete g.connectedAt; delete g.lastError; delete g.lastErrorAt;
+  vcToken = { value: '', exp: 0 };
+  audit(req, 'settings.google.disconnect', ''); save();
+  res.json(vcPublicCfg(req));
 }));
 
 /* ───────────────────────── 7c. Pengingat ─────────────────────────
