@@ -302,7 +302,8 @@ Pelanggan meminta video call dari chatbot; petugas membuat ruang Google Meet dar
    **Authorized redirect URI** yang ditampilkan Kontaq (`PUBLIC_URL/oauth/google/callback`), aktifkan **Google Meet API**, lalu
    klik **Hubungkan Akun Google**. Scope: `https://www.googleapis.com/auth/meetings.space.created` — hanya untuk membuat ruang
    meeting. Client secret & refresh token disimpan terenkripsi di server. Tersedia juga **Hubungkan Ulang** dan **Putuskan Koneksi**.
-2. **Flow otomatis**: tambahkan langkah **Minta video call** (mis. pada pilihan menu *Video Call dengan Petugas*). Langkah ini
+2. **Flow otomatis**: pakai contoh **Menu layanan + video call** di *Flow baru* (menu daftar: Informasi Layanan, Jadwal Sidang,
+   Video Call, Hubungi Petugas), atau tambahkan langkah **Minta video call** ke flow Anda sendiri. Langkah ini
    mengirim pesan tunggu ke pelanggan, membuat permintaan, meneruskan percakapan ke agen, dan menambah catatan internal.
 3. **Inbox**: panel info percakapan menampilkan nama, nomor WhatsApp, waktu permintaan, dan status, dengan tombol
    **Buat Google Meet** → **Buka Meeting** / **Kirim Link** → **Selesaikan** (dan *Ambil* untuk mengambil alih).
