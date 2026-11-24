@@ -2914,7 +2914,7 @@
     keyword_agent: ['Kata kunci → balas → teruskan ke agen', 'Pesan berisi "harga"/"promo" dibalas otomatis lalu diteruskan ke agen.'],
     after_hours: ['Jam kerja', 'Di jam kerja diteruskan ke agen; di luar jam kerja dibalas pesan otomatis.'],
     welcome: ['Sambutan kontak baru', 'Kontak baru menerima sambutan dengan tombol pilihan.'],
-    service_menu: ['Menu layanan + video call', 'Menu daftar: Informasi Layanan, Jadwal Sidang, Video Call (Google Meet), Hubungi Petugas. Pemicu: halo, hai, menu.'],
+    service_menu: ['Menu layanan + video call', 'Menu daftar: Informasi Layanan, Jadwal Sidang, Video Call (Google Meet), Hubungi Petugas. Pemicu: halo, hai, menu — dan jalan pintas: ketik "video call" langsung membuat permintaan.'],
     court_schedule: ['Cek jadwal sidang PN Bulukumba', 'Tanya tanggal → ambil jadwal dari API PN Bulukumba → kirim daftar perkara pidana & perdata.'],
   };
   const flId = () => 'n' + Math.random().toString(36).slice(2, 10);
@@ -2978,8 +2978,11 @@
       const msg = (text, links) => add('send', { text, image: null, buttons: [] }, links);
       const toAgent = (text) => msg(text, { next: add('assign', { mode: 'least_busy', onlyIfUnassigned: true }) });
       const BACK = '\n\nKetik *menu* untuk membuka menu layanan lagi.';
-      // Video call: langkah ini mengirim pesan tunggu, membuat permintaan, dan meneruskan percakapan ke petugas
-      const video = add('videocall', { text: 'Baik, permintaan video call Anda akan kami teruskan kepada petugas. Mohon menunggu hingga petugas menyiapkan tautan video call.' });
+      // Video call: langkah ini mengirim pesan tunggu, membuat permintaan, dan meneruskan percakapan ke petugas.
+      // Dipakai dua kali (lewat menu & jalan pintas kata kunci), jadi dibuat per cabang — flow berbentuk pohon.
+      const VC_TEXT = 'Baik, permintaan video call Anda akan kami teruskan kepada petugas. Mohon menunggu hingga petugas menyiapkan tautan video call.';
+      const videoStep = () => add('videocall', { text: VC_TEXT });
+      const video = videoStep();
       const info = msg('ℹ️ *Informasi Layanan*\nJam layanan: Senin–Jumat, 08.00–16.00 WITA.\nAlamat: Jalan Kenari No. 5, Bulukumba.\n\nSilakan sesuaikan teks ini di langkah "Kirim pesan".' + BACK);
       const sidang = toAgent('Untuk informasi jadwal sidang, petugas kami akan segera membantu Anda.\n\nTip: pakai contoh flow *Cek jadwal sidang PN Bulukumba* bila ingin jadwal dikirim otomatis dari API.');
       const petugas = toAgent('👩‍💼 Anda akan dihubungkan dengan petugas kami. Mohon tunggu, petugas akan membalas di percakapan ini.');
@@ -2988,7 +2991,9 @@
       const ask = add('ask', { ...FL_ASK_DEFAULTS, text: 'Selamat datang di layanan WhatsApp Pengadilan Negeri Bulukumba.\n\nSilakan pilih layanan:', var: 'menu', input: 'choice', button: 'Pilih layanan',
         choices: MENU.map(([title, value]) => ({ title, value })), invalidText: 'Silakan pilih salah satu layanan dari daftar, atau ketik *batal*.' },
         { next: route, fail: toAgent('Kami teruskan ke petugas untuk membantu Anda.') });
-      nodes[root].next = add('condition', { kind: 'keyword', match: 'contains', keywords: ['halo', 'hai', 'menu'] }, { yes: ask });
+      const menu = add('condition', { kind: 'keyword', match: 'contains', keywords: ['halo', 'hai', 'menu'] }, { yes: ask });
+      // Jalan pintas: pelanggan yang langsung mengetik "video call" tidak perlu membuka menu dulu
+      nodes[root].next = add('condition', { kind: 'keyword', match: 'contains', keywords: ['video call', 'videocall', 'vidcall'] }, { yes: videoStep(), no: menu });
     }
     return { id: null, name, enabled: false, root, nodes, settings };
   }

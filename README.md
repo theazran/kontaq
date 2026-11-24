@@ -305,6 +305,8 @@ Pelanggan meminta video call dari chatbot; petugas membuat ruang Google Meet dar
 2. **Flow otomatis**: pakai contoh **Menu layanan + video call** di *Flow baru* (menu daftar: Informasi Layanan, Jadwal Sidang,
    Video Call, Hubungi Petugas), atau tambahkan langkah **Minta video call** ke flow Anda sendiri. Langkah ini
    mengirim pesan tunggu ke pelanggan, membuat permintaan, meneruskan percakapan ke agen, dan menambah catatan internal.
+   Contoh tersebut juga punya **jalan pintas**: pesan yang memuat *video call*, *videocall*, atau *vidcall* langsung membuat
+   permintaan tanpa membuka menu, sedangkan *halo / hai / menu* tetap membuka menu seperti biasa.
 3. **Inbox**: panel info percakapan menampilkan nama, nomor WhatsApp, waktu permintaan, dan status, dengan tombol
    **Buat Google Meet** → **Buka Meeting** / **Kirim Link** → **Selesaikan** (dan *Ambil* untuk mengambil alih).
 
