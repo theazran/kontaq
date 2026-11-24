@@ -636,6 +636,8 @@
     const i = S.inbox.convs.findIndex((c) => c.id === id);
     if (i >= 0) S.inbox.convs[i] = data.conversation;
     renderChat(); renderInfo(); renderConvList();
+    // Panel info mempersempit kolom chat setelah renderChat → tinggi pesan berubah; gulir ulang ke pesan terbaru setelah tata letak final
+    requestAnimationFrame(() => { const m = $('#msgs'); if (m && S.inbox.activeId === id) { m.scrollTop = m.scrollHeight; syncToBottom(); } });
     if (data.conversation.unread) api('POST', `/api/conversations/${id}/read`).then(() => { const c = activeConv(); if (c) c.unread = 0; renderConvList(); renderNav(); }).catch(() => {});
   }
   function windowLabel(c) {
@@ -662,12 +664,16 @@
         <button class="btn btn-ghost btn-icon relative" id="cv-rem" title="Pengingat" aria-label="Pengingat">${remBtnInner(c)}</button>
         <button class="btn btn-ghost btn-icon" id="cv-info-btn" title="Info kontak" aria-label="Info kontak">${ICON.info}</button>
       </div>
-      <div id="msgs" class="flex-1 overflow-y-auto overflow-x-hidden scroll-thin chat-bg px-3 md:px-6 py-4 space-y-1.5"></div>
+      <div class="relative flex-1 min-h-0 flex flex-col">
+        <div id="msgs" class="flex-1 overflow-y-auto overflow-x-hidden scroll-thin chat-bg px-3 md:px-6 py-4 space-y-1.5"></div>
+        <button type="button" class="to-bottom" id="to-bottom" title="Ke pesan terbaru" aria-label="Gulir ke pesan terbaru">${ICON.down}<span class="to-bottom-n" id="to-bottom-n"></span></button>
+      </div>
       <div id="typing-line" class="typing-line chat-bg" aria-live="polite"></div>
       <div id="composer" class="flex-none surface border-t bd safe-b"></div>
       <div class="drop-overlay" id="drop-ov">${ICON.clip.replace('<svg', '<svg width="20" height="20" style="margin-right:.5rem"')} Lepaskan file untuk dikirim</div>`;
     bindSwipeReply($('#msgs'));
     bindMsgActions($('#msgs'), () => S.inbox.messages);
+    bindToBottom();
     el.classList.add('relative');
     if (!el.dataset.drop) { bindChatDrop(el); el.dataset.drop = '1'; }
     $('#cv-status').addEventListener('change', (e) => patchConv({ status: e.target.value }));
@@ -807,6 +813,27 @@
       ${!out ? acts : ''}
     </div>`;
   }
+  // Tombol "ke pesan terbaru": muncul saat chat digulir ke atas, menghitung pesan masuk baru yang belum terlihat
+  const atBottom = (el) => el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+  function syncToBottom() {
+    const el = $('#msgs'), btn = $('#to-bottom'); if (!el || !btn) return;
+    const show = !atBottom(el);
+    btn.classList.toggle('on', show);
+    if (!show) S.inbox.unseen = 0;
+    const n = S.inbox.unseen || 0;
+    $('#to-bottom-n').textContent = n > 99 ? '99+' : n || '';
+    btn.setAttribute('aria-label', n ? `${n} pesan baru — gulir ke pesan terbaru` : 'Gulir ke pesan terbaru');
+  }
+  function bindToBottom() {
+    const el = $('#msgs'), btn = $('#to-bottom'); if (!el || !btn) return;
+    S.inbox.unseen = 0;
+    let raf = 0;
+    el.addEventListener('scroll', () => { cancelAnimationFrame(raf); raf = requestAnimationFrame(syncToBottom); }, { passive: true });
+    btn.addEventListener('click', () => {
+      el.scrollTo({ top: el.scrollHeight, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+      S.inbox.unseen = 0; syncToBottom();
+    });
+  }
   function renderMessages(scroll) {
     const el = $('#msgs'); if (!el) return;
     const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
@@ -818,6 +845,7 @@
     }).join('') || '<div class="empty">Belum ada pesan. Di luar jendela 24 jam, mulai dengan template.</div>';
     afterRenderMsgs(el);
     if (scroll || nearBottom) el.scrollTop = el.scrollHeight;
+    syncToBottom();
   }
   // Setelah render: ukuran dokumen masuk (diambil sekali per media) & status pemutar audio
   function afterRenderMsgs(el) {
@@ -6897,7 +6925,11 @@
       if (conversation.id !== S.inbox.activeId) notifyIncoming(conversation);
     }
     if (conversation.id === S.inbox.activeId) {
-      if (!S.inbox.messages.some((m) => m.id === message.id)) { S.inbox.messages.push(message); if (S.view === 'inbox') renderMessages(false); }
+      if (!S.inbox.messages.some((m) => m.id === message.id)) {
+        const el = $('#msgs');
+        if (message.direction === 'in' && el && !atBottom(el)) S.inbox.unseen = (S.inbox.unseen || 0) + 1;
+        S.inbox.messages.push(message); if (S.view === 'inbox') renderMessages(false);
+      }
       if (message.direction === 'in' && S.view === 'inbox' && document.visibilityState === 'visible') { conversation.unread = 0; api('POST', `/api/conversations/${conversation.id}/read`).catch(() => {}); }
     }
     applyConv(conversation);
